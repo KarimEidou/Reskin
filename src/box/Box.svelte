@@ -107,6 +107,12 @@
     return pending.result;
   }
 
+  /**
+   * Epoch of the absorb that an open from elsewhere cut short (`box:handoff`
+   * while it ran): its items still go to that editor.
+   */
+  let joinEpoch: number | null = null;
+
   async function absorb(paths: string[], position: { x: number; y: number }): Promise<void> {
     send({ type: 'drop', count: paths.length });
     if (box.name !== 'absorbing') return;
@@ -125,7 +131,7 @@
       failure = errorText(e);
     }
     pending = null;
-    if (!current()) return;
+    if (!current()) return joinOpening(epoch, items);
     if (items.length === 0) {
       send({ type: 'inspectFailed', message: failure });
       play('error');
@@ -138,7 +144,7 @@
     try {
       if (icon && flyLayer) await flyIconIn(flyLayer, icon, dropAt, iconRect(metrics), impact);
       else await sleep(impact);
-      if (!current()) return;
+      if (!current()) return joinOpening(epoch, items);
       send({ type: 'inspectDone', icon, count: items.length });
       play('drop');
       await sleep(dur(ABSORB_MS) - impact);
@@ -146,11 +152,28 @@
       // Never leave a later drop showing the gulp instead of the hold.
       if (gulpEpoch === epoch) gulpEpoch = null;
     }
-    if (!current()) return;
+    if (!current()) return joinOpening(epoch, items);
     await requestOpen(
       items.map((i) => i.id),
       'edit',
     );
+  }
+
+  /**
+   * The absorb of `epoch` was cut short: when an open from elsewhere did
+   * it, the dropped items join that editor (Rust hands them over once it is
+   * open) instead of being lost.
+   */
+  function joinOpening(epoch: number, items: ItemInfo[]): void {
+    if (joinEpoch !== epoch) return;
+    joinEpoch = null;
+    if (items.length === 0) return;
+    commands
+      .openEditor(
+        items.map((i) => i.id),
+        'edit',
+      )
+      .catch((e: unknown) => console.error('[box] the dropped items could not join the editor', e));
   }
 
   /** Freezes on the handoff picture and asks Rust to open the editor. */
@@ -292,7 +315,9 @@
         on('box:handoff', (h) => {
           // The editor opens over the (visible) box: freeze on the picture
           // its proxy draws — the one a drop or click already froze on, or
-          // a new one when the open came from elsewhere.
+          // a new one when the open came from elsewhere (a drop still being
+          // absorbed then joins that editor).
+          if (box.name === 'absorbing') joinEpoch = box.epoch;
           send({ type: 'openRequested', icon: h.icon, count: h.count });
           void confirmPainted({ session: h.session, decoded: iconDecoded() });
         }),

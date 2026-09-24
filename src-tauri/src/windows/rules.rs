@@ -12,12 +12,13 @@ pub enum Phase {
     Closing,
 }
 
-/// An open request finds the editor open or opening: its items join the
-/// editor's queue (or it switches view) instead of a second handoff. A
-/// closing editor is not open any more: the request waits for the close,
-/// then opens it again.
+/// An open request, once no handoff runs any more (it waits for one in
+/// progress), finds the editor open: its items join the editor's queue (or
+/// it switches view) instead of a second handoff. Joining an editor that is
+/// still opening could reach it before `Prepare`, which starts afresh, and
+/// one that is closing would take them into hiding: either is waited for.
 pub fn hands_over(phase: Phase) -> bool {
-    matches!(phase, Phase::Open | Phase::Opening)
+    phase == Phase::Open
 }
 
 /// The box may be on screen outside a handoff: the user has not hidden it
@@ -59,12 +60,13 @@ mod tests {
     use super::*;
 
     #[test]
-    fn an_open_hands_over_only_to_an_editor_that_is_or_will_be_open() {
+    fn an_open_hands_over_only_to_an_editor_that_is_open() {
         assert!(hands_over(Phase::Open));
-        assert!(hands_over(Phase::Opening));
         // A drop while the editor collapses must not go to the hiding
-        // editor (the next open's reset would wipe it): it opens anew.
+        // editor (the next open's Prepare would wipe it): it opens anew.
         assert!(!hands_over(Phase::Closing));
+        // Nor may items reach an opening editor before its Prepare.
+        assert!(!hands_over(Phase::Opening));
         assert!(!hands_over(Phase::Closed));
     }
 

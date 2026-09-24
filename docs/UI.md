@@ -61,8 +61,7 @@ The visual and interaction contract for the box and the editor. Tokens live in
   keyline guides toggle (K). Before/after: hold `\` shows the original icon;
   split view toggle in the bottom bar. Delete / Backspace clear the selected
   pixels, or the whole layer without a selection (Backspace first removes
-  the last corner of a lasso polygon being drawn). An image pasted onto the
-  design becomes a new layer, announced with an **Undo** toast.
+  the last corner of a lasso polygon being drawn).
 * **Sidebar tabs** (panels are independent components in `src/editor/panels/`):
   Layers, Color, Adjust (filters), Effects (layer effects), Styles (presets),
   Backdrop, Stickers, History. The **Previews** block is always visible at the
@@ -107,9 +106,8 @@ The visual and interaction contract for the box and the editor. Tokens live in
 * **Elevation** (apply returned `needsElevation`): explains Public Desktop;
   buttons "Allow (administrator)" → `apply_icon_elevated(ticket)`, "Make a
   personal copy" → apply with mode `personalCopy`, Cancel.
-* **Import popover** (image dropped from Explorer while editing): "Add as
-  layer" or "Queue as new item". A pasted image goes straight into the
-  design as a layer (toast with Undo).
+* **Import popover** (image dropped / pasted while editing): "Add as layer"
+  or "Queue as new item".
 * **Crash recovery** (autosave found at startup): Restore / Discard.
 * **Command palette** (Ctrl+K): fuzzy search over every command (tools,
   filters and icon helpers — opened in the Adjust panel —, style presets —

@@ -63,7 +63,8 @@ struct Inner {
 pub struct Morph {
     inner: Mutex<Inner>,
     cv: Condvar,
-    /// Held for the whole duration of an open or close handoff.
+    /// Held for the whole duration of an open or close handoff (and for a
+    /// moment by `settle_box`): outside it the phase is `Open` or `Closed`.
     busy: Mutex<()>,
 }
 
@@ -249,6 +250,10 @@ fn rest_box<R: Runtime>(app: &AppHandle<R>) -> bool {
 /// close asks `box_allowed` itself.
 pub fn settle_box<R: Runtime>(app: &AppHandle<R>) {
     let morph = &app.state::<AppState>().morph;
+    // Never waits for a handoff (the main thread calls this too).
+    if morph.phase() != Phase::Closed {
+        return;
+    }
     let Ok(_busy) = morph.busy.try_lock() else {
         return;
     };
@@ -267,9 +272,9 @@ fn rest_editor<R: Runtime>(editor: &WebviewWindow<R>) {
 }
 
 /// Opens the editor out of the box. Blocks for the whole handoff (call it
-/// from a blocking-capable thread). If the editor is already open (or
-/// opening) the items are added / the view switched instead; a close in
-/// progress is waited for, then this is a normal open.
+/// from a blocking-capable thread). A handoff in progress is waited for
+/// first; if the editor is open then, the items are added / the view
+/// switched instead.
 pub fn open<R: Runtime>(
     app: &AppHandle<R>,
     items: Vec<ItemInfo>,
@@ -277,18 +282,13 @@ pub fn open<R: Runtime>(
 ) -> Result<(), String> {
     let state = app.state::<AppState>();
     let morph = &state.morph;
-    // Only one handoff at a time.
-    let _busy = loop {
-        if rules::hands_over(morph.phase()) {
-            hand_over(app, items, view);
-            return Ok(());
-        }
-        let busy = morph.busy.lock().unwrap_or_else(|e| e.into_inner());
-        if morph.phase() == Phase::Closed {
-            break busy;
-        }
-        // Another open got there first: hand over to it.
-    };
+    // Only one handoff at a time; with `busy` held the editor is either
+    // open or closed.
+    let _busy = morph.busy.lock().unwrap_or_else(|e| e.into_inner());
+    if rules::hands_over(morph.phase()) {
+        hand_over(app, items, view);
+        return Ok(());
+    }
     morph.set_phase(Phase::Opening);
     let result = open_inner(app, items, view);
     if result.is_ok() {
@@ -306,8 +306,8 @@ pub fn open<R: Runtime>(
     result
 }
 
-/// An open for an editor that is open or opening: its items join the
-/// queue, or it switches to `view`.
+/// An open for the open editor (the caller holds `busy`, so no close can
+/// start meanwhile): its items join the queue, or it switches to `view`.
 fn hand_over<R: Runtime>(app: &AppHandle<R>, items: Vec<ItemInfo>, view: EditorView) {
     let state = app.state::<AppState>();
     if items.is_empty() {
@@ -315,9 +315,7 @@ fn hand_over<R: Runtime>(app: &AppHandle<R>, items: Vec<ItemInfo>, view: EditorV
     } else {
         state.mailbox.push(EditorCmd::AddItems { items });
     }
-    if state.morph.phase() == Phase::Open
-        && let Some(w) = app.get_webview_window(editor_window::LABEL)
-    {
+    if let Some(w) = app.get_webview_window(editor_window::LABEL) {
         let _ = w.set_focus();
     }
 }
@@ -444,12 +442,12 @@ pub fn close<R: Runtime>(
 ) -> Result<(), String> {
     let state = app.state::<AppState>();
     let morph = &state.morph;
+    // A handoff in progress is waited for (an open finishing, or another
+    // close); with `busy` held the editor is either open or closed.
+    let _busy = morph.busy.lock().unwrap_or_else(|e| e.into_inner());
     if morph.phase() != Phase::Open {
         return Ok(());
     }
-    let Ok(_busy) = morph.busy.try_lock() else {
-        return Ok(());
-    };
     morph.set_phase(Phase::Closing);
     let result = close_inner(app, then, icon);
     if result.is_err() {

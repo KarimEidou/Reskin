@@ -370,4 +370,19 @@ test.describe('shortcuts overlay', () => {
     await page.waitForTimeout(100);
     expect(await page.evaluate(() => window.__e2e!.callsOf('editor_close').length)).toBe(0);
   });
+
+  test('an overlay whose download failed is no page error, and ? tries again', async ({ openEditor, page }) => {
+    // Its stylesheet fails to download once, while it is preloaded after
+    // the open (as seen under heavy load).
+    let fetches = 0;
+    await page.route('**/ShortcutsOverlay-*.css', (route) => (fetches++ === 0 ? route.abort() : route.continue()));
+    const reported = page.waitForEvent('console', (m) => m.type() === 'error' && m.text().includes('shortcuts overlay could not be loaded'));
+    await openEditor();
+    await openWithDesign(page);
+    await reported;
+    // Logged, not thrown (the fixture fails the test on uncaught errors);
+    // asking for it loads it all the same.
+    await page.keyboard.press('?');
+    await expect(page.getByRole('dialog', { name: 'Keyboard shortcuts' })).toBeVisible();
+  });
 });

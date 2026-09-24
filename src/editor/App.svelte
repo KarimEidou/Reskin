@@ -80,8 +80,18 @@
         console.error('[editor] the command palette could not be loaded', e);
       });
   }
+
+  let shortcutsLoad: Promise<void> | null = null;
+
   function loadShortcuts(): void {
-    if (!Shortcuts) void import('./palette/ShortcutsOverlay.svelte').then((m) => (Shortcuts = m.default));
+    shortcutsLoad ??= import('./palette/ShortcutsOverlay.svelte')
+      .then((m) => {
+        Shortcuts = m.default;
+      })
+      .catch((e: unknown) => {
+        shortcutsLoad = null;
+        console.error('[editor] the shortcuts overlay could not be loaded', e);
+      });
   }
   $effect(() => {
     if (shell.paletteOpen) loadPalette();
@@ -324,15 +334,16 @@
     const fresh = design === null;
     if (fresh) session.newBlank();
     const starter = fresh ? session.engine.doc.layers[0] : undefined;
-    session.importSurface(surface);
+    const added = session.importSurface(surface) !== null;
     if (fresh) {
       // Like an opened image: the design is the picture, with nothing to undo.
       if (starter && session.engine.doc.layers.length > 1) session.engine.deleteLayer(starter.id);
       session.engine.clearHistory();
     }
     shell.navigate('edit');
-    // Joining a design went in without asking: say so, with an Undo.
-    if (!fresh) announcePaste(session.engine);
+    // Joining a design went in without asking: say so, with an Undo (the
+    // engine said why when it could not add the layer).
+    if (!fresh && added) announcePaste(session.engine);
   }
 
   // ---- smoke test -----------------------------------------------------------------

@@ -58,7 +58,9 @@ Rust: place_editor(), move hidden editor     (editor never resizes while visible
 Rust: box:handoff{session: box session, icon: items[0].icon, count} to the
       visible box, which freezes on that picture — the one the proxy draws
       (already its picture when the box asked for the open) — and answers
-      box_painted once it is on screen (decoded + double rAF)
+      box_painted once it is on screen (decoded + double rAF); a drop it was
+      still absorbing asks open_editor for its items all the same (handed
+      over once the editor is open)
 Prepare{session, boxRect(css px, editor-relative; null: box hidden), items,
         view, settings, morph}
    editor: render BoxVisual proxy at boxRect (same skin/size/state as the box),
@@ -98,13 +100,15 @@ Box sessions number the pictures handed to the box (`box:handoff`,
 `box:collapse`), apart from the editor's sessions: an open's picture and the
 close's of the same editor session never stand for each other.
 
-One handoff runs at a time (`morph.rs` holds `busy` through it). An open that
-finds the editor open or opening hands its items over (`AddItems`, or
-`Navigate` without items); one that finds it closing waits for the close,
-then opens it again. A close handoff that fails (a window went missing)
-still ends in the closed state (`morph::close`): the editor hidden, not
-topmost, without a taskbar button, memory low; the box on the empty picture
-(`box:collapse` hide + `box:shown`) when it may show.
+One handoff runs at a time (`morph.rs` holds `busy` through it; outside it
+the editor is open or closed). An open or a close that comes during a
+handoff waits for it. An open that then finds the editor open hands its
+items over (`AddItems`, or `Navigate` without items) — never earlier, when
+they could reach an opening editor before its `Prepare` or a closing one on
+its way out — else it opens the editor. A close handoff that fails (a
+window went missing) still ends in the closed state (`morph::close`): the
+editor hidden, not topmost, without a taskbar button, memory low; the box on
+the empty picture (`box:collapse` hide + `box:shown`) when it may show.
 
 The box at rest is shown exactly when it may be (`rules::box_allowed`): the
 user has not hidden it (tray / menu / hotkey / Settings) and no fullscreen

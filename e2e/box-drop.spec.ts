@@ -474,6 +474,23 @@ test.describe('events from Rust', () => {
     await editor.close();
   });
 
+  test('a drop still being absorbed when an open from elsewhere starts joins that editor', async ({ openBox, page }) => {
+    const box = await openBox();
+    await setInspectDelay(page, 900);
+    const [notes] = await makeItems(page, [SAMPLE_PATHS.notes]);
+    await box.drop([SAMPLE_PATHS.notes]);
+    await box.expectState('absorbing');
+    // The tray opens the editor meanwhile: the box freezes on its picture…
+    await emit(page, 'box:handoff', { session: 1, icon: null, count: 0 });
+    await waitForCall(page, 'box_painted', { session: 1 });
+    await box.expectState('idle');
+    // …and the dropped item still reaches the editor (Rust hands it over).
+    const open = await waitForCall(page, 'open_editor');
+    expect(open.args).toEqual({ items: [notes!.id], view: 'edit' });
+    await expect(box.icon).toHaveCount(0);
+    expect(await calls(page, 'open_editor')).toHaveLength(1);
+  });
+
   test('the first-run welcome opens over the plain box: the hint gives way, and returns after', async ({ openBox, page }) => {
     const box = await openBox({ firstRun: true });
     const hint = box.visual.locator('.hint');
