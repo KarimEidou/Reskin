@@ -1,11 +1,14 @@
 <!--
   First run: three short illustrated steps (drop → design → apply) that
-  animate once, then "Got it" marks onboarding done and collapses the editor
-  into the box, which shows its "drag a shortcut onto me" hint.
+  animate once, then "Got it" collapses the editor into the box, which shows
+  its "drag a shortcut onto me" hint. Onboarding counts as done once the
+  welcome has been shown, so closing it any other way (×, Escape) does not
+  bring it back at the next start.
 -->
 <script lang="ts">
   import ArrowRight from '@lucide/svelte/icons/arrow-right';
-  import { updateSettings } from '$lib/settings/store.svelte';
+  import { onMount } from 'svelte';
+  import { settings, updateSettings } from '$lib/settings/store.svelte';
   import Button from '$lib/ui/Button.svelte';
   import { toast } from '$lib/ui/toasts.svelte';
   import LogoMark from '../chrome/LogoMark.svelte';
@@ -22,6 +25,11 @@
     { title: 'Make it yours', text: 'Paint, recolour, add a backdrop or a style preset — every step can be undone.' },
     { title: 'Save & Apply', text: 'Your desktop icon changes right away. Undo or restore the original any time.' },
   ] as const;
+
+  onMount(() => {
+    if (settings().onboarded) return;
+    updateSettings({ onboarded: true }).catch((e: unknown) => console.error('[welcome] could not save onboarded', e));
+  });
 
   async function done(): Promise<void> {
     closing = true;

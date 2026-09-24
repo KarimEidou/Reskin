@@ -14,6 +14,7 @@ import {
   makeItems,
   pushEditorCmd,
   SAMPLE_PATHS,
+  settings,
   simulateClose,
   simulateOpen,
   test,
@@ -195,6 +196,15 @@ test.describe('welcome', () => {
     expect((set.args.settings as Settings).onboarded).toBe(true);
     await waitForCall(page, 'editor_close', { reason: 'user' });
     await expect.poll(async () => (await editorState(page)).phase).toBe('closed');
+  });
+
+  test('closing the welcome with Escape also finishes onboarding', async ({ openEditor, page }) => {
+    await openEditor({ firstRun: true });
+    await simulateOpen(page, [], 'welcome');
+    await expect(page.getByTestId('welcome-view')).toBeVisible();
+    await expect.poll(async () => (await settings(page)).onboarded).toBe(true);
+    await page.keyboard.press('Escape');
+    await waitForCall(page, 'editor_close', { reason: 'user' });
   });
 
   for (const tone of ['dark', 'light'] as const) {

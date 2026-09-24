@@ -117,6 +117,10 @@ impl<R: Runtime> SystemSettings for Os<'_, R> {
         contextmenu::is_installed()
     }
 
+    fn context_menu_usable(&self) -> bool {
+        contextmenu::is_installed() && contextmenu::installed_exe().is_some_and(|exe| exe.is_file())
+    }
+
     fn set_context_menu(&mut self, on: bool) -> reskin_core::Result<()> {
         if on {
             contextmenu::install(&current_exe()?)

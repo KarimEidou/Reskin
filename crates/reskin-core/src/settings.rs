@@ -178,6 +178,9 @@ pub trait SystemSettings {
     fn set_autostart(&mut self, on: bool) -> Result<()>;
     /// The Explorer verb is registered.
     fn context_menu(&self) -> bool;
+    /// The Explorer verb is registered and launches an executable that
+    /// still exists (possibly another copy of Reskin, which keeps it).
+    fn context_menu_usable(&self) -> bool;
     /// Registers (for this executable) or removes the Explorer verb.
     fn set_context_menu(&mut self, on: bool) -> Result<()>;
 }
@@ -257,7 +260,11 @@ pub fn reconcile_system_settings(
         // Writing now could undo what the user chose in Task Manager.
         Err(e) => errors.push(format!("Start with Windows: {e}")),
     }
+    // Only a missing or broken verb is (re)registered: another copy of
+    // Reskin that owns it (the installed one, when a portable or dev copy
+    // starts) keeps it.
     if saved.context_menu
+        && !sys.context_menu_usable()
         && let Err(e) = sys.set_context_menu(true)
     {
         errors.push(format!("Explorer menu: {e}"));
@@ -563,6 +570,8 @@ mod tests {
         taken: Vec<&'static str>,
         entry: Option<StartupEntry>,
         verb: bool,
+        /// The registered verb names an executable that no longer exists.
+        verb_broken: bool,
         registry_locked: bool,
         /// Reading the "Start with Windows" entry fails.
         registry_unreadable: bool,
@@ -602,12 +611,16 @@ mod tests {
         fn context_menu(&self) -> bool {
             self.verb
         }
+        fn context_menu_usable(&self) -> bool {
+            self.verb && !self.verb_broken
+        }
         fn set_context_menu(&mut self, on: bool) -> Result<()> {
             self.calls.push(format!("verb {on}"));
             if self.registry_locked {
                 return Err(Error::AccessDenied("Classes key".into()));
             }
             self.verb = on;
+            self.verb_broken = false;
             Ok(())
         }
     }
@@ -794,5 +807,31 @@ mod tests {
         let mut sys = FakeSystem::default();
         reconcile_system_settings(&mut sys, with(|s| s.hotkey.clear()));
         assert!(sys.calls.is_empty(), "{:?}", sys.calls);
+    }
+
+    #[test]
+    fn startup_keeps_a_working_verb_and_repairs_a_broken_one() {
+        let saved = with(|s| {
+            s.hotkey.clear();
+            s.context_menu = true;
+        });
+        // Registered by another copy that still exists: left alone.
+        let mut sys = FakeSystem {
+            verb: true,
+            ..FakeSystem::default()
+        };
+        let (s, errors) = reconcile_system_settings(&mut sys, saved.clone());
+        assert_eq!((s.context_menu, errors.len()), (true, 0));
+        assert!(sys.calls.is_empty(), "{:?}", sys.calls);
+
+        // Its executable is gone (moved or uninstalled): point it at us.
+        let mut sys = FakeSystem {
+            verb: true,
+            verb_broken: true,
+            ..FakeSystem::default()
+        };
+        reconcile_system_settings(&mut sys, saved);
+        assert_eq!(sys.calls, ["verb true"]);
+        assert!(sys.context_menu_usable());
     }
 }
