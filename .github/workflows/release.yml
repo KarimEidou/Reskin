@@ -25,6 +25,8 @@ jobs:
       - name: Toolchain (rust-toolchain.toml)
         run: rustup toolchain install
       - uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
       - run: pnpm install --frozen-lockfile
       - name: Version matches tag
         shell: pwsh

@@ -54,6 +54,8 @@ jobs:
       - name: Toolchain (rust-toolchain.toml)
         run: rustup toolchain install
       - uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
       - run: cargo fmt --all --check
       - run: cargo clippy -p reskin-core --all-targets -- -D warnings
       - name: clippy (Windows target)
@@ -79,6 +81,8 @@ jobs:
       - name: Toolchain (rust-toolchain.toml)
         run: rustup toolchain install
       - uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
       - run: pnpm install --frozen-lockfile
       - run: pnpm build
       - run: cargo clippy --workspace --all-targets -- -D warnings
