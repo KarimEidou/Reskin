@@ -8,7 +8,7 @@ update this file in the same change.
 
 ```
 box.html editor.html            Vite pages, each built on its own (vite.config.ts `environments`)
-src/box/                        floating box page — NO engine imports, tiny (≤33 KB gz JS)
+src/box/                        floating box page — NO engine imports, tiny (≤33.5 KB gz JS)
 src/editor/                     editor page: App.svelte, morph/MorphController.ts, panels/*, dialogs/*
 src/engine/                     pure-TS image engine (no Svelte, no DOM in core logic) — unit tested in node
 src/lib/ipc/                    commands.ts (typed invoke wrappers), events.ts, mailbox.ts, types.ts, bindings/ (ts-rs, generated)
@@ -430,6 +430,86 @@ Windows (`win/`, `#[cfg(windows)]`, type-checked on Linux with
 * Unit tests: `src/**/*.test.ts` (Vitest, node env) and `scripts/*.test.mjs`
   (`node --test`), both in `pnpm test`. E2E: `e2e/*.spec.ts`; tests drive
   the fake backend through `window.__e2e` (see tauri-mock.ts).
+
+## Performance
+
+Budgets, and what enforces them:
+
+* **Animations** (`e2e/perf.spec.ts`, Chromium with the CPU throttled 4×
+  through CDP): the open handoff with its morph, the collapse, and the
+  box's hover → armed → absorb never block the main thread for more than
+  50 ms — no long task (PerformanceObserver) and no gap between two
+  animation frames longer than that — and run at 55 fps or better (median
+  frame ≤ 18.2 ms). Each scenario runs up to three times on a freshly
+  loaded page and the best attempt counts; every attempt's numbers are
+  printed. Work that only exists in the test (the fake backend running on
+  the page's thread, Playwright's injected scripts) is done before
+  measuring.
+* **Idle** (same spec): the box at rest, and the editor in the Edit view
+  with nothing happening, run no animation-frame callback, no animation,
+  no style recalc and no layout for 2 s (< 20 ms of tasks: idle CPU ~0).
+* **Initial JS** (`pnpm bundle:budget`, gzip -9, entry + modulepreloads):
+  box ≤ 33.5 KB (30.5 KB when set), editor ≤ 220 KB (199.5 KB when set) —
+  about 10 % headroom, so growth is a decision.
+* **Memory** (`--smoke-test`, `src-tauri/src/memory.rs`): the whole process
+  tree — reskin.exe and every WebView2 process below it — is logged idle
+  after start and again after the handoffs and the apply/restore cycle,
+  with the editor hidden (its WebView2 memory target low): working set
+  and private bytes (`PROCESS_MEMORY_COUNTERS_EX.PrivateUsage`, what a
+  leak makes grow). Private bytes over 450 MB log a warning, over 700 MB
+  fail the run (exit 3). The idle working set has been ~370 MB. WebView2
+  dominates it: its browser, GPU and utility processes and one renderer per
+  window (box and editor); reskin.exe itself is a small share, and shared
+  DLL pages count once per process in the working set. Low-memory mode
+  destroys the editor on close (its renderer goes) and skips the pre-warm.
+* **The real morph on Windows** (`--smoke-test --capture-handoff`): the
+  CI runner reports reduced motion, so on its own it would only ever run
+  the crossfade. The smoke test captures two round trips, each forcing a
+  path through the handoff's settings (`smoke::HandoffPath`, smoke-only):
+  the morph (full motion — Rust and the editor both follow the `Prepare`
+  settings), then the crossfade. Each must take its path (`morph: session N
+  open (morph=true)` / `closed (morph=true)` in the log) and keep the
+  handoff invariant on its captured frames
+  (`%TEMP%\reskin-handoff-<path>-<frame>.png`); either failing exits 3.
+
+What keeps the morph cheap (`src/editor/morph/`):
+
+* Proxy, flyer and panel regions animate transform and opacity only; the
+  proxy and the flyer carry a constant non-compositable property so they
+  stay on the main thread's clock with the shell (`MAIN_THREAD`).
+* The shell's radius changes every frame, so the shell is repainted every
+  frame: it carries only its fill, hairline and highlight. The blurred drop
+  shadow is a layer of its own that never moves — it fades in as the shell
+  settles and out as the collapse starts. (In software rendering — CI
+  runners, VMs — repainting the blurred shadow with the shell doubled the
+  raster work of every frame, ~50 ms per frame at the panel's size, and the
+  main thread waits for raster at every commit.)
+* The content's clip-path runs only while the content shows (from its
+  fade-in on open; for the ~110 ms of its fade-out on close).
+* The panel is never `inert` (toggling it restyles every element in it):
+  a shield takes the pointer while it animates and focus is kept out.
+* After a collapse the content rests with `content-visibility: hidden`
+  until the next open shows or morphs it, so hiding the panel (and the
+  page's `data-stage` changes) skip the ~500 elements of the view; the next
+  open usually replaces the view before it is rendered again.
+* Animations are tracked and cancelled directly (no DOM queries or layout
+  reads to find them).
+
+Known gaps (the spec marks them; measured at 4×):
+
+* **Open handoff** (`test.fail`): `Prepare` starts loading the item, and
+  when its frames arrive one flush turns the icon into a design (engine
+  import with a 256 → 512 resample on the page's thread, ~310 ms), mounts
+  the Edit workspace (~215 ms, with forced layouts in the tool options bar)
+  and lays it out (~190 ms): a single 400–1000 ms task in the middle of
+  the morph, followed by a synchronous wallpaper decode for the desktop
+  preview (~70–100 ms) and more. The item's heavy work has to leave the
+  handoff (after `expanded`, or incremental / in a worker).
+* **Collapse** (`test.fixme`): App.svelte's rule for portalled overlays,
+  `html:not([data-stage='open']) body > :not(#app)`, cannot be keyed by the
+  style engine, so every `data-stage` change restyles the whole document —
+  ~730 elements, 50–85 ms as the collapse starts. Keyed on the overlays
+  themselves, the collapse is within budget.
 
 ## Checks (all must pass before pushing)
 

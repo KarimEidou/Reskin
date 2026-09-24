@@ -84,11 +84,30 @@ describe('timeline', () => {
     expect(frames.at(-1)).toMatchObject({ offset: 1, opacity: 1 });
     expect(frames.length).toBeGreaterThan(20);
   });
+
+  it('samples a part of itself, played at its place in time', () => {
+    const tl = morphTimeline();
+    const whole = tl.keyframes((p, t) => ({ opacity: p, t }));
+    const part = tl.keyframes((p, t) => ({ opacity: p, t }), 0.25, 0.5);
+    expect(part[0]).toMatchObject({ offset: 0, t: 0.25 });
+    expect(part.at(-1)).toMatchObject({ offset: 1, t: 0.5 });
+    // Still one sample per frame, on the same spring.
+    expect(part.length).toBeGreaterThanOrEqual(Math.floor(whole.length / 4));
+    expect(part.length).toBeLessThanOrEqual(Math.ceil(whole.length / 4) + 1);
+    const mid = whole.find((f) => f.t === 0.5);
+    if (mid) expect(part.at(-1)!.opacity).toBeCloseTo(mid.opacity as number, 9);
+    expect(tl.span(0.25, 0.5)).toEqual({ duration: tl.duration / 4, delay: tl.duration / 4 });
+  });
 });
+
+/** Every property a keyframe list animates. */
+const animated = (frames: Keyframe[]) =>
+  new Set(frames.flatMap((f) => Object.keys(f).filter((k) => k !== 'offset' && k !== 'easing' && k !== 'composite')));
 
 describe('play', () => {
   it('morphs shell, content, proxy and flyer on one timeline', () => {
     const shell = fakeEl();
+    const shadow = fakeEl();
     const content = fakeEl();
     const proxy = fakeEl();
     const flyer = fakeEl();
@@ -96,6 +115,7 @@ describe('play', () => {
     const anims = playExpand(
       {
         shell: shell.el,
+        shadow: shadow.el,
         content: content.el,
         proxy: proxy.el,
         regions: [region.el, region.el],
@@ -104,7 +124,7 @@ describe('play', () => {
       g,
       true,
     );
-    expect(anims).toHaveLength(7);
+    expect(anims).toHaveLength(8);
     const d = shell.calls[0]!.options.duration;
     expect(proxy.calls[0]!.options.duration).toBe(d);
     expect(flyer.calls[0]!.options.duration).toBe(d);
@@ -119,13 +139,35 @@ describe('play', () => {
     expect(shell.calls[0]!.frames.at(-1)!.opacity).toBe(1);
   });
 
+  it('keeps every frame of the open cheap to paint', () => {
+    const shell = fakeEl();
+    const shadow = fakeEl();
+    const content = fakeEl();
+    playExpand({ shell: shell.el, shadow: shadow.el, content: content.el, proxy: null, regions: [] }, g, true);
+    const d = shell.calls[0]!.options.duration as number;
+    // The blurred shadow never moves (the shell repaints every frame): it
+    // fades in as the shell settles, ending with the morph.
+    expect(shadow.calls).toHaveLength(1);
+    const fade = shadow.calls[0]!;
+    expect([...animated(fade.frames)].filter((k) => k !== 'outlineOffset')).toEqual(['opacity']);
+    expect(fade.frames.map((f) => f.opacity)).toEqual([0, 1]);
+    expect((fade.options.delay as number) + (fade.options.duration as number)).toBeCloseTo(d, 6);
+    expect(fade.options.delay as number).toBeGreaterThan(d / 2);
+    // The content is clipped only from when it starts to show.
+    const [clip, opacity] = content.calls;
+    expect(animated(clip!.frames)).toEqual(new Set(['clipPath']));
+    expect(clip!.options.delay).toBe(opacity!.options.delay);
+    expect((clip!.options.delay as number) + (clip!.options.duration as number)).toBeCloseTo(d, 6);
+  });
+
   it('crossfades without moving under reduced motion', () => {
     state.reduced = true;
     const shell = fakeEl();
+    const shadow = fakeEl();
     const content = fakeEl();
     const proxy = fakeEl();
-    playExpand({ shell: shell.el, content: content.el, proxy: proxy.el, regions: [] }, g, true);
-    for (const c of [shell, content, proxy]) {
+    playExpand({ shell: shell.el, shadow: shadow.el, content: content.el, proxy: proxy.el, regions: [] }, g, true);
+    for (const c of [shell, shadow, content, proxy]) {
       expect(c.calls).toHaveLength(1);
       expect(c.calls[0]!.frames.every((f) => !('transform' in f))).toBe(true);
       expect(c.calls[0]!.options.duration).toBeLessThanOrEqual(150);
@@ -134,9 +176,10 @@ describe('play', () => {
 
   it('collapses back onto the proxy', () => {
     const shell = fakeEl();
+    const shadow = fakeEl();
     const content = fakeEl();
     const proxy = fakeEl();
-    playCollapse({ shell: shell.el, content: content.el, proxy: proxy.el, regions: [] }, g, true);
+    playCollapse({ shell: shell.el, shadow: shadow.el, content: content.el, proxy: proxy.el, regions: [] }, g, true);
     const last = shell.calls[0]!.frames.at(-1)!;
     const at = applyFlip(g.panel, parseTransform(last.transform as string));
     expect(at.x).toBeCloseTo(g.box.x, 1);
@@ -144,5 +187,25 @@ describe('play', () => {
     expect(proxy.calls[0]!.frames.at(-1)!.opacity).toBe(1);
     expect(proxy.calls[0]!.frames.at(-1)!.transform).toBe('translate(0px, 0px) scale(1)');
     expect(content.calls[0]!.frames.at(-1)!.opacity).toBe(0);
+  });
+
+  it('stops painting the content and the shadow as soon as they are gone', () => {
+    const shell = fakeEl();
+    const shadow = fakeEl();
+    const content = fakeEl();
+    playCollapse({ shell: shell.el, shadow: shadow.el, content: content.el, proxy: null, regions: [] }, g, true);
+    const d = shell.calls[0]!.options.duration as number;
+    const [fade, clip] = content.calls;
+    const gone = fade!.options.duration as number;
+    expect(gone).toBeLessThan(d / 3);
+    // The clip follows the shrinking shell only while the content shows…
+    expect(animated(clip!.frames)).toEqual(new Set(['clipPath']));
+    expect(clip!.options.duration).toBeCloseTo(gone, 6);
+    expect(clip!.frames[0]!.clipPath).toBe(clipFrame(g, 1).clipPath);
+    // …and the shadow fades with it, never moving.
+    expect(shadow.calls).toHaveLength(1);
+    expect(shadow.calls[0]!.options.duration).toBe(gone);
+    expect([...animated(shadow.calls[0]!.frames)].filter((k) => k !== 'outlineOffset')).toEqual(['opacity']);
+    expect(shadow.calls[0]!.frames.map((f) => f.opacity)).toEqual([1, 0]);
   });
 });

@@ -6,9 +6,12 @@ import { gzipSync } from 'node:zlib';
 import { join } from 'node:path';
 
 const dist = process.argv[2] ?? 'dist';
-// The box builds on its own (vite.config.ts) at ~29.8 KB; its budget keeps
-// about 10 % headroom so an accidental editor-sized import fails the build.
-const BUDGETS = { 'box.html': 33 * 1024, 'editor.html': 250 * 1024 };
+// Each budget is the page's size when it was last set plus about 10 %
+// headroom, so growth is noticed (raise a budget on purpose, with the
+// reason, when a page really needs more): the box, built on its own
+// (vite.config.ts), was 30.5 KB — an accidental editor import fails at once;
+// the editor was 199.5 KB (views, panels and overlays load lazily).
+const BUDGETS = { 'box.html': 33.5 * 1024, 'editor.html': 220 * 1024 };
 
 let failed = false;
 for (const [page, budget] of Object.entries(BUDGETS)) {
@@ -32,7 +35,7 @@ for (const [page, budget] of Object.entries(BUDGETS)) {
   const ok = total <= budget;
   failed ||= !ok;
   console.log(
-    `${ok ? '✓' : '✗'} ${page}: ${(total / 1024).toFixed(1)} KB gz initial JS (budget ${(budget / 1024).toFixed(0)} KB)`,
+    `${ok ? '✓' : '✗'} ${page}: ${(total / 1024).toFixed(1)} KB gz initial JS (budget ${(budget / 1024).toFixed(1)} KB)`,
   );
   console.log(rows.join('\n'));
 }

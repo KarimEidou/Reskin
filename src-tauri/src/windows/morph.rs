@@ -345,7 +345,7 @@ fn open_inner<R: Runtime>(
     view: EditorView,
 ) -> Result<(), String> {
     let state = app.state::<AppState>();
-    let settings = state.settings();
+    let settings = crate::smoke::handoff_settings(&state.smoke, state.settings());
     let editor = ensure_editor(app, &settings)?;
     let bh = box_hwnd(app);
     let box_visible = raw::is_visible(bh);
@@ -420,6 +420,7 @@ fn open_inner<R: Runtime>(
     };
     raw::hide(bh);
     crate::smoke::probe(app, "2-revealed");
+    crate::smoke::handoff_taken(app, crate::smoke::Handoff::Open, morphing);
     state.mailbox.push(EditorCmd::Expand {
         session,
         morph: morphing,
@@ -463,7 +464,7 @@ fn close_inner<R: Runtime>(
     icon: Option<String>,
 ) -> Result<(), String> {
     let state = app.state::<AppState>();
-    let settings = state.settings();
+    let settings = crate::smoke::handoff_settings(&state.smoke, state.settings());
     let morph = &state.morph;
     let (session, box_was_visible) = {
         let g = morph.lock();
@@ -497,6 +498,7 @@ fn close_inner<R: Runtime>(
     );
     let do_morph =
         show_box && box_was_visible && wants_morph(&settings, state.system_reduced_motion());
+    crate::smoke::handoff_taken(app, crate::smoke::Handoff::Close, do_morph);
 
     let _ = editor.set_always_on_top(true);
     state.mailbox.push(EditorCmd::Collapse {
@@ -538,7 +540,9 @@ fn close_inner<R: Runtime>(
     }
     finish_close(app, &editor, &settings);
     tray::refresh(app);
-    log::line(&format!("morph: session {session} closed"));
+    log::line(&format!(
+        "morph: session {session} closed (morph={do_morph})"
+    ));
     if show_box && then == CollapseThen::Hide && (at.x != home.x || at.y != home.y) {
         state.animator.glide_to((home.x as i32, home.y as i32));
     }
@@ -644,5 +648,15 @@ mod tests {
         assert!(wants_morph(&s, true));
         s.open_style = OpenStyle::Crossfade;
         assert!(!wants_morph(&s, false));
+    }
+
+    #[test]
+    fn the_smoke_test_forces_either_path() {
+        use crate::smoke::HandoffPath;
+        // The CI runner: Windows reports reduced motion.
+        let user = Settings::default();
+        assert!(!wants_morph(&user, true));
+        assert!(wants_morph(&HandoffPath::Morph.apply(user.clone()), true));
+        assert!(!wants_morph(&HandoffPath::Crossfade.apply(user), false));
     }
 }

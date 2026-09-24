@@ -13,6 +13,12 @@
   Between animations the frame rests in one of the modes: hidden, proxy,
   open. `data-mode` / `data-transition` on `[data-testid="morph-frame"]`
   expose them to tests.
+
+  Staying cheap (docs/ARCHITECTURE.md, "Performance"): the panel never goes
+  `inert` (that restyles every element in it as a morph starts); while it
+  animates a shield takes the pointer and focus is kept out. After a
+  collapse its content rests unrendered (`content-visibility: hidden`) until
+  the next open, so hiding the panel does not restyle the view either.
 -->
 <script module lang="ts">
   export type FrameMode = 'hidden' | 'proxy' | 'animating' | 'open';
@@ -24,7 +30,6 @@
   import BoxVisual from '$lib/ui/BoxVisual.svelte';
   import { iconRect, visualRect, visualRadius, type BoxVisualProps } from '$lib/ui/box-geometry';
   import {
-    cancelOn,
     iconTarget,
     playCollapse,
     playExpand,
@@ -55,15 +60,25 @@
   let transition = $state<'morph' | 'crossfade' | null>(null);
   let proxy = $state.raw<{ rect: Rect; props: BoxVisualProps } | null>(null);
   let flyer = $state.raw<{ src: string; rect: Rect } | null>(null);
+  /**
+   * After a collapse the content rests unrendered (`content-visibility:
+   * hidden`) until the next open shows or morphs: hiding the panel then
+   * restyles a handful of elements instead of every one in the view, and
+   * the next open usually replaces the view before it is rendered again.
+   */
+  let resting = $state(false);
 
   let proxyEl: HTMLDivElement | undefined = $state();
   let panelEl: HTMLDivElement | undefined = $state();
   let shellEl: HTMLDivElement | undefined = $state();
+  let shadowEl: HTMLDivElement | undefined = $state();
   let contentEl: HTMLDivElement | undefined = $state();
   let flyerEl: HTMLImageElement | undefined = $state();
 
   /** Bumped by every call so a superseded animation doesn't settle the frame. */
   let run = 0;
+  /** The animations of the latest morph or fade (cancelled by the next call). */
+  let running: Animation[] = [];
 
   const inset = $derived(compat ? 0 : PANEL_INSET);
   const radius = $derived(compat ? 8 : PANEL_RADIUS);
@@ -77,7 +92,22 @@
   function setMode(next: FrameMode): void {
     if (mode === next) return;
     mode = next;
+    if (next !== 'open') releaseFocus();
     onmode?.(next);
+  }
+
+  /**
+   * Only the open panel takes part in the page: while it animates the
+   * shield takes the pointer and nothing in it keeps (or takes, see
+   * `guardFocus`) the keyboard; hidden, it is not painted at all.
+   */
+  function releaseFocus(): void {
+    const active = document.activeElement;
+    if (active instanceof HTMLElement && panelEl?.contains(active)) active.blur();
+  }
+
+  function guardFocus(e: FocusEvent): void {
+    if (mode !== 'open' && e.target instanceof HTMLElement) e.target.blur();
   }
 
   function geometry(): MorphGeometry | null {
@@ -106,8 +136,10 @@
     }
   }
 
+  /** Stops the latest morph or fade and drops what its `fill` still holds. */
   function stopAll(): void {
-    cancelOn([proxyEl, shellEl, contentEl, flyerEl, ...(contentEl ? staggerTargets(contentEl, viewEl()) : [])]);
+    for (const animation of running) animation.cancel();
+    running = [];
   }
 
   /** Draws the box proxy (panel hidden) and waits until its icon is decoded. */
@@ -116,6 +148,7 @@
     stopAll();
     flyer = null;
     transition = null;
+    resting = false;
     proxy = { rect, props };
     setMode('proxy');
     await tick();
@@ -126,6 +159,7 @@
   export async function expand(morph: boolean, landing: Rect | null = null): Promise<void> {
     const my = ++run;
     stopAll();
+    resting = false;
     const g = geometry();
     const useMorph = morph && g !== null;
     transition = useMorph ? 'morph' : 'crossfade';
@@ -135,12 +169,13 @@
     }
     setMode('animating');
     await tick();
-    if (my !== run || !shellEl || !contentEl) return;
+    if (my !== run || !shellEl || !shadowEl || !contentEl) return;
     const from = proxy ? iconRect(proxy.props.metrics, origin(proxy), proxy.props.state) : null;
-    const animations = playExpand(
+    running = playExpand(
       {
         proxy: proxy ? (proxyEl ?? null) : null,
         shell: shellEl,
+        shadow: shadowEl,
         content: contentEl,
         regions: useMorph ? staggerTargets(contentEl, viewEl()) : [],
         flyer: flyer && flyerEl && from ? { el: flyerEl, from, to: flyer.rect } : null,
@@ -148,7 +183,7 @@
       g ?? fallbackGeometry(),
       useMorph,
     );
-    await settled(animations);
+    await settled(running);
     if (my !== run) return;
     proxy = null;
     flyer = null;
@@ -177,17 +212,18 @@
     transition = useMorph ? 'morph' : 'crossfade';
     setMode('animating');
     await tick();
-    if (my !== run || !shellEl || !contentEl) return;
+    if (my !== run || !shellEl || !shadowEl || !contentEl) return;
     if (wasOpen) {
-      const animations = playCollapse(
-        { proxy: proxy ? (proxyEl ?? null) : null, shell: shellEl, content: contentEl, regions: [] },
+      running = playCollapse(
+        { proxy: proxy ? (proxyEl ?? null) : null, shell: shellEl, shadow: shadowEl, content: contentEl, regions: [] },
         g ?? fallbackGeometry(),
         useMorph,
       );
-      await settled(animations);
+      await settled(running);
       if (my !== run) return;
     }
     transition = null;
+    resting = true;
     setMode(proxy ? 'proxy' : 'hidden');
     await tick();
     stopAll();
@@ -219,11 +255,19 @@
   style:--inset="{inset}px"
   style:--panel-radius="{radius}px"
 >
-  <div class="panel" data-testid="editor-panel" bind:this={panelEl} inert={mode !== 'open'} aria-hidden={mode === 'hidden' || mode === 'proxy'}>
+  <div
+    class="panel"
+    data-testid="editor-panel"
+    bind:this={panelEl}
+    aria-hidden={mode === 'hidden' || mode === 'proxy'}
+    onfocusin={guardFocus}
+  >
+    <div class="shadow" bind:this={shadowEl}></div>
     <div class="shell" bind:this={shellEl}></div>
-    <div class="content" bind:this={contentEl} tabindex="-1">
+    <div class="content" class:resting bind:this={contentEl} tabindex="-1">
       {@render children()}
     </div>
+    <div class="shield"></div>
   </div>
 
   {#if proxy}
@@ -281,30 +325,58 @@
 
   /* The panel's material: layered translucency (no backdrop blur — the
      window is transparent, there is nothing to blur), hairline border,
-     a tight shadow that fits the 12 px margin. */
+     a tight shadow that fits the 12 px margin. The shadow is a layer of
+     its own: the shell is repainted on every frame of a morph, and a
+     blurred shadow would make each of those frames expensive. */
+  .shadow,
   .shell {
     position: absolute;
     inset: 0;
     border-radius: var(--panel-radius);
+  }
+  .shadow {
+    box-shadow:
+      0 6px 12px -4px rgb(0 0 0 / 0.38),
+      0 2px 5px -1px rgb(0 0 0 / 0.24);
+  }
+  :global([data-theme='light']) .shadow {
+    box-shadow:
+      0 6px 12px -4px rgb(20 24 40 / 0.2),
+      0 2px 5px -1px rgb(20 24 40 / 0.12);
+  }
+  .shell {
     background: var(--glass-tint), var(--glass-fill-strong);
     box-shadow:
       0 0 0 1px var(--glass-border),
-      var(--glass-highlight),
-      0 6px 12px -4px rgb(0 0 0 / 0.38),
-      0 2px 5px -1px rgb(0 0 0 / 0.24);
+      var(--glass-highlight);
     transform-origin: 0 0;
     will-change: transform;
   }
   :global([data-theme='light']) .shell {
     box-shadow:
       0 0 0 1px rgb(0 0 0 / 0.08),
-      var(--glass-highlight),
-      0 6px 12px -4px rgb(20 24 40 / 0.2),
-      0 2px 5px -1px rgb(20 24 40 / 0.12);
+      var(--glass-highlight);
+  }
+  .compat .shadow {
+    display: none;
   }
   .compat .shell {
     box-shadow: none;
     background: var(--glass-fill-strong);
+  }
+
+  .content.resting {
+    content-visibility: hidden;
+  }
+
+  /* Takes the pointer while the panel animates. */
+  .shield {
+    position: absolute;
+    inset: 0;
+    display: none;
+  }
+  .frame[data-mode='animating'] .shield {
+    display: block;
   }
 
   .content {

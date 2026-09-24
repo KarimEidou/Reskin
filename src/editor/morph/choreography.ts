@@ -3,8 +3,15 @@
 // Everything is driven by one spring timeline (SPRINGS.morph, ~480 ms at
 // speed 1) sampled into WAAPI keyframes, so the panel's shell, the fading
 // proxy and the icon that settles onto the canvas move in step. Only
-// transform, opacity and border-radius are animated; the shell's radius is
-// counter-scaled per frame so its corners stay round while it stretches.
+// transform, opacity, border-radius and the content's clip-path are
+// animated; the shell's radius is counter-scaled per frame so its corners
+// stay round while it stretches.
+//
+// Cost per frame (docs/ARCHITECTURE.md, "Performance"): the shell is
+// repainted every frame (its radius changes), so it carries no blurred
+// shadow — the panel's drop shadow is a layer of its own that only fades,
+// once the shell is in place. The content's clip is animated only while the
+// content shows.
 
 import type { Rect } from '$lib/ipc/types';
 import { clamp, EASE, lerp } from '$lib/motion/easing';
@@ -24,8 +31,10 @@ export interface MorphGeometry {
 export interface MorphParts {
   /** Wrapper of the BoxVisual proxy (absent for a crossfade close). */
   proxy: HTMLElement | null;
-  /** The panel background (glass, border, shadow). */
+  /** The panel background (glass, border). */
   shell: HTMLElement;
+  /** The panel's drop shadow (never moved or scaled: it only fades). */
+  shadow: HTMLElement;
   /** Everything drawn on the panel (title bar, view). */
   content: HTMLElement;
   /** Content regions that enter one after another. */
@@ -38,6 +47,12 @@ export interface MorphParts {
 export const STAGGER_MS = 30;
 const REGION_MS = 280;
 const CROSSFADE_MS = 220;
+/** The panel shadow's fade (ms at speed 1). */
+const SHADOW_FADE_MS = 160;
+/** The content fades out this fast as the collapse starts (ms at speed 1). */
+const CONTENT_OUT_MS = 110;
+/** Fraction of the open timeline after which the content fades in. */
+const CONTENT_IN = 0.22;
 const FRAME_MS = 1000 / 60;
 
 /**
@@ -58,8 +73,15 @@ const round = (v: number) => Math.round(v * 1000) / 1000;
 
 interface Timeline {
   duration: number;
-  /** Frame builder: spring progress p (0..1, may overshoot slightly) and time fraction t. */
-  keyframes(render: (p: number, t: number) => Keyframe): Keyframe[];
+  /**
+   * Frame builder: spring progress p (0..1, may overshoot slightly) and
+   * time fraction t, sampled once per frame over the part of the timeline
+   * from `from` to `to` (fractions; offsets relative to that part — play it
+   * with `span(from, to)`).
+   */
+  keyframes(render: (p: number, t: number) => Keyframe, from?: number, to?: number): Keyframe[];
+  /** Duration and delay that play the part of the timeline from `from` to `to`. */
+  span(from: number, to: number): { duration: number; delay: number };
 }
 
 /** The morph spring as a sampled timeline scaled by the animation speed. */
@@ -67,15 +89,18 @@ export function morphTimeline(): Timeline {
   const spring = createSpring(SPRINGS.morph);
   const settle = spring.settleTime();
   const duration = settle * 1000 / motion.speed;
-  const count = Math.max(2, Math.ceil(duration / FRAME_MS) + 1);
-  const samples: Array<[number, number]> = [];
-  for (let i = 0; i < count; i++) {
-    const t = i / (count - 1);
-    samples.push([i === count - 1 ? 1 : spring.position(t * settle), t]);
-  }
+  const progress = (t: number) => (t >= 1 ? 1 : spring.position(t * settle));
   return {
     duration,
-    keyframes: (render) => samples.map(([p, t]) => ({ ...render(p, t), offset: t })),
+    keyframes: (render, from = 0, to = 1) => {
+      const count = Math.max(2, Math.ceil(((to - from) * duration) / FRAME_MS) + 1);
+      return Array.from({ length: count }, (_, i) => {
+        const offset = i / (count - 1);
+        const t = i === count - 1 ? to : from + (to - from) * offset;
+        return { ...render(progress(t), t), offset };
+      });
+    },
+    span: (from, to) => ({ duration: (to - from) * duration, delay: from * duration }),
   };
 }
 
@@ -156,6 +181,7 @@ export function playExpand(parts: MorphParts, g: MorphGeometry, morph: boolean):
   if (!morph || motion.reduced) {
     const d = dur(CROSSFADE_MS, 'fade');
     const out = [
+      animate(parts.shadow, [{ opacity: 0 }, { opacity: 1 }], { duration: d }),
       animate(parts.shell, [{ opacity: 0 }, { opacity: 1 }], { duration: d }),
       animate(parts.content, [{ opacity: 0 }, { opacity: 1 }], { duration: d }),
     ];
@@ -163,21 +189,24 @@ export function playExpand(parts: MorphParts, g: MorphGeometry, morph: boolean):
     return out;
   }
   const tl = morphTimeline();
+  const shadowIn = Math.min(1, dur(SHADOW_FADE_MS, 'fade') / tl.duration);
   const out: Animation[] = [
     animate(
       parts.shell,
       tl.keyframes((p) => ({ ...shellFrame(g, p), opacity: round(smooth(p / 0.3)) })),
       { duration: tl.duration },
     ),
+    // The shadow comes as the shell settles in place.
+    animate(parts.shadow, [{ opacity: 0, ...MAIN_THREAD }, { opacity: 1, ...MAIN_THREAD }], tl.span(1 - shadowIn, 1)),
     // Content is revealed by the growing shell and fades in once it is
-    // about two-thirds open.
-    animate(parts.content, tl.keyframes((p) => clipFrame(g, p)), { duration: tl.duration }),
+    // about two-thirds open (invisible before: nothing to clip).
+    animate(parts.content, tl.keyframes((p) => clipFrame(g, p), CONTENT_IN, 1), tl.span(CONTENT_IN, 1)),
     animate(parts.content, [{ opacity: 0 }, { opacity: 1 }], {
       duration: dur(160, 'fade'),
-      delay: tl.duration * 0.22,
+      delay: tl.duration * CONTENT_IN,
       easing: EASE.standard,
     }),
-    ...enterRegions(parts.regions, tl.duration * 0.22),
+    ...enterRegions(parts.regions, tl.duration * CONTENT_IN),
   ];
   if (parts.proxy) {
     out.push(
@@ -209,6 +238,7 @@ export function playCollapse(parts: MorphParts, g: MorphGeometry, morph: boolean
   if (!morph || motion.reduced) {
     const d = dur(CROSSFADE_MS, 'fade');
     const out = [
+      animate(parts.shadow, [{ opacity: 1 }, { opacity: 0 }], { duration: d }),
       animate(parts.shell, [{ opacity: 1 }, { opacity: 0 }], { duration: d }),
       animate(parts.content, [{ opacity: 1 }, { opacity: 0 }], { duration: d }),
     ];
@@ -216,9 +246,13 @@ export function playCollapse(parts: MorphParts, g: MorphGeometry, morph: boolean
     return out;
   }
   const tl = morphTimeline();
+  const fadeOut = dur(CONTENT_OUT_MS, 'fade');
+  // The content is gone after `fadeOut`: its clip follows the shell until then.
+  const contentOut = Math.min(1, fadeOut / tl.duration);
   const out: Animation[] = [
-    animate(parts.content, [{ opacity: 1 }, { opacity: 0 }], { duration: dur(110, 'fade'), easing: EASE.accelerate }),
-    animate(parts.content, tl.keyframes((q) => clipFrame(g, 1 - q)), { duration: tl.duration }),
+    animate(parts.shadow, [{ opacity: 1, ...MAIN_THREAD }, { opacity: 0, ...MAIN_THREAD }], { duration: fadeOut }),
+    animate(parts.content, [{ opacity: 1 }, { opacity: 0 }], { duration: fadeOut, easing: EASE.accelerate }),
+    animate(parts.content, tl.keyframes((q) => clipFrame(g, 1 - q), 0, contentOut), tl.span(0, contentOut)),
     // q = travel towards the box; the shell melts into the proxy at the end.
     animate(
       parts.shell,
@@ -241,14 +275,6 @@ export function playCollapse(parts: MorphParts, g: MorphGeometry, morph: boolean
 /** Resolves when every animation finished or was cancelled. */
 export async function settled(animations: readonly Animation[]): Promise<void> {
   await Promise.all(animations.map((a) => a.finished.catch(() => undefined)));
-}
-
-/** Cancels every animation on these elements (drops `fill` leftovers). */
-export function cancelOn(elements: ReadonlyArray<Element | null | undefined>): void {
-  for (const el of elements) {
-    if (!el) continue;
-    for (const a of el.getAnimations()) a.cancel();
-  }
 }
 
 /** Marks the regions that enter one after another (document order). */
