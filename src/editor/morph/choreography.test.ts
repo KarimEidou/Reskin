@@ -141,6 +141,52 @@ describe('play', () => {
     expect(shell.calls[0]!.frames.at(-1)!.opacity).toBe(1);
   });
 
+  it('shows what the icon lands on only as it settles there', () => {
+    const shell = fakeEl();
+    const flyer = fakeEl();
+    const doc = fakeEl();
+    const docShadow = fakeEl();
+    const anims = playExpand(
+      {
+        shell: shell.el,
+        shadow: fakeEl().el,
+        content: fakeEl().el,
+        proxy: fakeEl().el,
+        regions: [],
+        flyer: {
+          el: flyer.el,
+          from: { x: 957, y: 597, w: 74, h: 74 },
+          to: { x: 400, y: 200, w: 280, h: 280 },
+          landing: [doc.el, docShadow.el],
+        },
+      },
+      g,
+      true,
+    );
+    expect(anims).toHaveLength(8);
+    const d = shell.calls[0]!.options.duration;
+    const icon = flyer.calls[0]!;
+    for (const landed of [doc, docShadow]) {
+      expect(landed.calls).toHaveLength(1);
+      const fade = landed.calls[0]!;
+      // On the icon's clock (the main thread), frame for frame.
+      expect(fade.options.duration).toBe(d);
+      expect(fade.frames).toHaveLength(icon.frames.length);
+      expect([...animated(fade.frames)].filter((k) => k !== 'outlineOffset')).toEqual(['opacity']);
+      expect(fade.frames[0]).toHaveProperty('outlineOffset');
+      // Hidden while the icon flies, then the two cross-fade: never both
+      // apart, never neither.
+      expect(fade.frames[0]!.opacity).toBe(0);
+      expect(fade.frames.at(-1)!.opacity).toBe(1);
+      fade.frames.forEach((f, i) => {
+        expect(f.offset).toBe(icon.frames[i]!.offset);
+        expect((f.opacity as number) + (icon.frames[i]!.opacity as number)).toBeCloseTo(1, 2);
+      });
+      const half = fade.frames.filter((f) => (f.offset as number) <= 0.5);
+      expect(half.every((f) => f.opacity === 0)).toBe(true);
+    }
+  });
+
   it('keeps every frame of the open cheap to paint', () => {
     const shell = fakeEl();
     const shadow = fakeEl();

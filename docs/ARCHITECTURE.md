@@ -94,9 +94,9 @@ Prepare{session, boxRect(css px, editor-relative; null: box hidden), items,
    editor: render BoxVisual proxy at boxRect (same skin/size/state as the box),
            await img.decode() + double rAF → editor_ack(session,'prepared');
            no boxRect: no proxy (morph is false). The items start loading
-           (their design built off the main thread) and the view gets
-           ready behind the proxy: the panel is laid out and drawn there,
-           only transparent (its shield takes the pointer)
+           (the icon's resample to the design runs in the panels worker)
+           and the view gets ready behind the proxy: the panel is laid out
+           and drawn there, only transparent (its shield takes the pointer)
 Rust: waits for prepared (400 ms) and box_painted (300 ms from box:handoff)
 Rust: show editor (topmost), Reveal{session}
    editor: double rAF → editor_ack(session,'revealed')
@@ -109,7 +109,9 @@ Rust: hide box; Expand{session, morph}
    morph=true : FLIP proxy → panel (~480 ms spring, scaled by animation speed),
                 regions fade in one after another ([data-stagger], the
                 workspace's [data-panel]), the box's icon lands exactly on
-                the document → editor_ack(session,'expanded')
+                the document, which shows only as the icon settles on it
+                (the two cross-fade; `[data-morph-landing]`)
+                → editor_ack(session,'expanded')
    morph=false: crossfade the panel in (Prepared came later than 400 ms, the
                 box was hidden, reduced motion, or the user chose crossfade)
 Rust: focus editor, not topmost.
@@ -714,8 +716,9 @@ Budgets, and what enforces them:
   page's thread — its wallpaper and item frames are made before measuring —
   and Playwright's injected scripts) is done before measuring.
 * **No whole-view restyle** (same spec, Chromium trace): neither an open
-  morph nor a collapse runs a style recalc of as many elements as the
-  Edit view has (~500).
+  morph nor a collapse runs a style recalc of half the Edit view's
+  elements or more (it has ~580; a change they all inherit restyles
+  nearly all of them, the targeted changes a few dozen).
 * **Idle** (same spec): the box at rest, and the editor in the Edit view
   with nothing happening, run no animation-frame callback, no animation,
   no style recalc and no layout for 2 s (< 20 ms of tasks: idle CPU ~0).
@@ -745,28 +748,34 @@ Budgets, and what enforces them:
   (`%TEMP%\reskin-handoff-<path>-<frame>.png`); either failing exits 3.
 
 Measured in a Linux container (headless Chromium with software rendering,
-4× CPU): `pnpm e2e e2e/perf.spec.ts` once and with `--repeat-each=3`, then
-the Edit-view open 10 more times and its collapse 5 more. Frame gaps fall
-on the 60 Hz grid; the ranges are over the passing attempts.
+4× CPU): `pnpm e2e e2e/perf.spec.ts` several times, once and with
+`--repeat-each=3`, and in full `pnpm e2e` runs. Frame gaps fall on the
+60 Hz grid; the ranges are over the passing attempts.
 
 | Scenario | Longest frame | Median frame | Motion started |
 | --- | --- | --- | --- |
-| Open, Edit view (22–29 frames) | 33.4–50.1 ms | 16.7–16.8 ms | 393–638 ms after Expand |
-| Collapse, Edit view (27–30 frames) | 33.3–50.1 ms | 16.7 ms | 41–55 ms after Collapse |
-| Open, Start view (33–35 frames) | 16.8–33.3 ms | 16.7 ms | 42–65 ms after Expand |
-| Collapse, Start view (31–32 frames) | 16.7–16.8 ms | 16.7 ms | 33–39 ms after Collapse |
+| Open, Edit view (22–29 frames) | 33.4–50.1 ms | 16.7–16.8 ms | 377–638 ms after Expand |
+| Collapse, Edit view (27–30 frames) | 33.3–50.1 ms | 16.7 ms | 41–56 ms after Collapse |
+| Open, Start view (33–36 frames) | 16.8–33.4 ms | 16.7 ms | 35–65 ms after Expand |
+| Collapse, Start view (28–32 frames) | 16.7–50.0 ms | 16.7 ms | 31–45 ms after Collapse |
 | Box hover → armed → absorb (115–118 frames) | 16.8–33.4 ms | 16.7 ms | — |
 
 No passing attempt had a long task over 50 ms. The first attempt of the
-Edit-view open — the first page of a new browser context — missed the
-budget in 6 of 14 runs (a 66.7 ms frame, a median of 33.3 ms, or a
-51–52 ms task — the one located was the panel settling into `open` at the
-end of the motion), and the second attempt passed every time; the
-collapse's first attempt missed once in 9 (a 54 ms task). Idle, both pages
-ran 0 frame callbacks, 0 animations, 0 style recalcs and 0 layouts, with
-0.1–0.4 ms of tasks in 2 s. Initial JS: box 31.0 KB, editor 200.8 KB. On
-the Windows smoke run the idle working set of the process tree has been
-~370 MB.
+Edit-view open — the first page of a new browser context — misses the
+budget in about 4 runs of 10 (a 66.7–83.4 ms frame, a 51–55 ms task, or
+— with a second test worker taking the CPU — a 33 ms median frame) and
+the second attempt has passed every time; the collapse's first
+attempt misses about 1 in 8 (a 54–73 ms task). Traced, those are mostly
+the software renderer rather than the page's work: the display compositor
+draws each frame of the morph on the CPU in 24–32 ms, so a frame with more
+to draw takes three or four vsyncs, and in the collapse the page's main
+thread waits 30–50 ms in its commit for that compositor. The page's own
+task among them is the panel settling into `open` after the motion's last
+frame (~45–55 ms at 4×: the focus, and the work the open panel lets go).
+Idle, both pages ran 0 frame callbacks, 0 animations, 0 style recalcs and
+0 layouts, with 0.0–0.4 ms of tasks in 2 s. Initial JS: box 31.0 KB,
+editor 201.0 KB. On the Windows smoke run the idle working set of the
+process tree has been ~370 MB.
 
 What gets the open ready before its motion (the Edit view with an item):
 
@@ -777,7 +786,10 @@ What gets the open ready before its motion (the Edit view with an item):
   the step's time box — until the item is in and the Edit workspace is
   mounted, laid out and its canvas drawn, all behind the proxy; then the
   morph starts on a view that is ready, and the box's icon lands on the
-  canvas. An item that takes longer arrives in the open panel.
+  canvas. The document is drawn there all along, so it is hidden while the
+  icon flies and fades in under it as the icon fades out on landing (the
+  canvas and its shadow, `data-morph-landing`): the two never show side by
+  side. An item that takes longer arrives in the open panel.
 * Behind the proxy the panel is transparent through the opacity of its
   three parts (shadow, shell, content), not `visibility`: every element of
   the view inherits that, and showing the panel restyled them all as the

@@ -2,7 +2,9 @@
 //
 // Everything is driven by one spring timeline (SPRINGS.morph, ~480 ms at
 // speed 1) sampled into WAAPI keyframes, so the panel's shell, the fading
-// proxy and the icon that settles onto the canvas move in step. Only
+// proxy and the icon that settles onto the canvas move in step. What the
+// icon lands on (the document, drawn before the morph starts) shows only as
+// the icon settles: the two cross-fade there, never side by side. Only
 // transform, opacity, border-radius and the content's clip-path are
 // animated; the shell's radius is counter-scaled per frame so its corners
 // stay round while it stretches.
@@ -42,8 +44,12 @@ export interface MorphParts {
   content: HTMLElement;
   /** Content regions that enter one after another. */
   regions: readonly HTMLElement[];
-  /** Icon clone that flies from the proxy onto the canvas (expand only). */
-  flyer?: { el: HTMLElement; from: Rect; to: Rect } | null;
+  /**
+   * Icon clone that flies from the proxy onto the canvas (expand only), and
+   * what it lands on there (`landing`: the document on the canvas, hidden
+   * until the icon settles on it).
+   */
+  flyer?: { el: HTMLElement; from: Rect; to: Rect; landing?: readonly HTMLElement[] } | null;
 }
 
 /** Stagger between panel regions (ms at speed 1). */
@@ -216,11 +222,17 @@ export function playExpand(parts: MorphParts, g: MorphGeometry, morph: boolean):
   }
   const flyer = parts.flyer;
   if (flyer) {
+    // The icon fades out over the second half as it settles, and what it
+    // lands on fades in under it: at no time do both show apart.
+    const settle = (t: number) => smooth((t - 0.5) / 0.5);
     out.push(
       animate(
         flyer.el,
-        tl.keyframes((p, t) => ({ ...flyerFrame(flyer.from, flyer.to, p), opacity: round(1 - smooth((t - 0.5) / 0.5)) })),
+        tl.keyframes((p, t) => ({ ...flyerFrame(flyer.from, flyer.to, p), opacity: round(1 - settle(t)) })),
         { duration: tl.duration },
+      ),
+      ...(flyer.landing ?? []).map((el) =>
+        animate(el, tl.keyframes((_p, t) => ({ opacity: round(settle(t)), ...MAIN_THREAD })), { duration: tl.duration }),
       ),
     );
   }

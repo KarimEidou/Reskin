@@ -24,7 +24,8 @@ let systemEvents: Promise<unknown> | null = null;
 
 async function run(): Promise<BootInfo> {
   // Before app_boot reads Windows' state: a change announced after that
-  // read must not be missed.
+  // read must not be missed (one that comes before followSystem below is
+  // read again as soon as it follows, see refreshSystem).
   systemEvents ??= on(EVENTS.system, () => void refreshSystem()).catch((e: unknown) =>
     console.warn('[boot] cannot follow system:changed', e),
   );

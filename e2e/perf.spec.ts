@@ -559,6 +559,16 @@ test.describe('the morph frame', () => {
 
   const viewSize = (page: Page) => page.evaluate(() => document.querySelectorAll('[data-view-host] *').length);
 
+  /**
+   * No recalc restyled the view (of `view` elements): half of them or more.
+   * A change every element of the view inherits restyles nearly all of them
+   * (not every one is counted); a targeted change, a few dozen.
+   */
+  function expectNoViewRestyle(recalcs: number[], view: number): void {
+    const whole = recalcs.filter((n) => n >= view / 2);
+    expect(whole, `style recalcs of ≥ ${view / 2} elements: ${recalcs.join(', ')}`).toEqual([]);
+  }
+
   test('a collapse never restyles the whole view', async ({ page, browser }) => {
     await openedOn(page, await freshEditor(page, [SAMPLE_PATHS.steam]));
     const view = await viewSize(page);
@@ -570,8 +580,7 @@ test.describe('the morph frame', () => {
     // rule hiding floating layers is keyed on them, App.svelte) nor hiding
     // the panel at the end (its content rests unrendered, content-visibility,
     // until the next open) restyles the view.
-    const whole = recalcs.filter((n) => n >= view);
-    expect(whole, `style recalcs of ≥ ${view} elements: ${recalcs.join(', ')}`).toEqual([]);
+    expectNoViewRestyle(recalcs, view);
     // …and the next open renders the view again.
     await simulateOpen(page, [SAMPLE_PATHS.notes], 'edit', { morph: true });
     await designLoaded(page);
@@ -585,9 +594,11 @@ test.describe('the morph frame', () => {
     expect(await waitForAck(page, session, 'prepared')).toBe(true);
     await pushEditorCmd(page, { type: 'reveal', session });
     expect(await waitForAck(page, session, 'revealed')).toBe(true);
-    // The view gets ready behind the proxy: laid out and drawn, transparent.
+    // The view gets ready behind the proxy: laid out and drawn, transparent
+    // (checked by its layout alone: how the panel is kept from showing is
+    // what this test is about).
     await designLoaded(page);
-    await expect(page.getByTestId('canvas')).toBeVisible();
+    await expect.poll(() => page.getByTestId('canvas').evaluate((el) => el.getBoundingClientRect().width)).toBeGreaterThan(100);
     await settle(page);
     const view = await viewSize(page);
     expect(view).toBeGreaterThan(200);
@@ -597,8 +608,7 @@ test.describe('the morph frame', () => {
     });
     // Showing the panel changes three elements (not `visibility`, which
     // every element of the view would inherit).
-    const whole = recalcs.filter((n) => n >= view);
-    expect(whole, `style recalcs of ≥ ${view} elements: ${recalcs.join(', ')}`).toEqual([]);
+    expectNoViewRestyle(recalcs, view);
   });
 
   test('a morphing panel takes neither the pointer nor the focus, without going inert', async ({ page }) => {

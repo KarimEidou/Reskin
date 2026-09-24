@@ -531,8 +531,17 @@ test.describe('landing', () => {
     });
     await pushEditorCmd(page, { type: 'expand', session: 1, morph: true });
     await page.waitForFunction(() => (document.querySelector('img.flyer')?.getAnimations().length ?? 0) > 0);
-    // Hold every animation at its end: where the icon lands.
+    // While the icon flies, the document it lands on does not show (it is
+    // drawn already: the two would show side by side)…
+    const landingOpacity = () =>
+      page.evaluate(() => [...document.querySelectorAll('[data-morph-landing]')].map((el) => getComputedStyle(el).opacity));
+    await freezeAt(page, 0.3);
+    await expect(page.locator('img.flyer')).toHaveCSS('opacity', '1');
+    expect(await landingOpacity()).toEqual(['0', '0']);
+    // …and it shows as the icon settles on it. Hold every animation at its
+    // end: where the icon lands.
     await freezeAt(page, 1);
+    expect(await landingOpacity()).toEqual(['1', '1']);
     await page.evaluate(() => (Animation.prototype.play = (window as Held).__play!));
     const landed = (await page.locator('img.flyer').boundingBox())!;
     const doc = (await page.getByTestId('canvas-stage').locator('.doc-overlay').boundingBox())!;
@@ -665,10 +674,7 @@ test.describe('mailbox commands', () => {
   });
 });
 
-/**
- * Pauses every running animation at `fraction` of its own timeline (delay
- * included), so a screenshot shows one exact moment of the morph.
- */
+/** The animations `freezeAt` holds, until `resume` lets them go on. */
 type Frozen = { __frozen?: Set<Animation> };
 
 /**

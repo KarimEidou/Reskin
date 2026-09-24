@@ -7,7 +7,8 @@
   the pointer) and a drop highlight. Redraws are coalesced to one per
   animation frame; the view state and controls are shared through `stage`
   (the command registry's view keys — Ctrl+0 / Ctrl+1 / Ctrl ±, K — use
-  them).
+  them). The document (the canvas and its shadow, `data-morph-landing`) is
+  where the open morph's flying icon settles: it shows as the icon lands.
 -->
 <script lang="ts">
   import { onMount } from 'svelte';
@@ -792,10 +793,11 @@
   data-testid="canvas-stage"
   data-morph-target
 >
-  <div class="doc-shadow" bind:this={shadowEl} aria-hidden="true"></div>
+  <div class="doc-shadow" bind:this={shadowEl} aria-hidden="true" data-morph-landing></div>
   <canvas
     bind:this={canvas}
     class="canvas"
+    data-morph-landing
     tabindex={session.hasDesign ? 0 : -1}
     aria-label="Icon canvas. Draw with the active tool; hold Space to pan, scroll to zoom."
     data-testid="canvas"

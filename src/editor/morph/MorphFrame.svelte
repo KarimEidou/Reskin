@@ -189,10 +189,12 @@
     const useMorph = morph && g !== null;
     const geo = g ?? fallbackGeometry();
     const regions = useMorph && contentEl ? staggerTargets(contentEl, viewEl()) : [];
-    // Icon that settles onto the canvas (only when the box carried one).
+    // Icon that settles onto the canvas (only when the box carried one), and
+    // what it lands on there — the document, shown as it settles.
     if (useMorph && proxy?.props.icon && contentEl) {
       flyer = { src: proxy.props.icon, rect: iconTarget(landing, viewEl() ?? contentEl, 48) };
     }
+    const landingEls = flyer && landing ? [...(viewEl()?.querySelectorAll<HTMLElement>('[data-morph-landing]') ?? [])] : [];
     setMode('animating');
     await tick();
     if (my !== run || !shellEl || !shadowEl || !contentEl) return;
@@ -204,7 +206,7 @@
         shadow: shadowEl,
         content: contentEl,
         regions,
-        flyer: flyer && flyerEl && from ? { el: flyerEl, from, to: flyer.rect } : null,
+        flyer: flyer && flyerEl && from ? { el: flyerEl, from, to: flyer.rect, landing: landingEls } : null,
       },
       geo,
       useMorph,
