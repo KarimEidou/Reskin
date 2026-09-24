@@ -8,7 +8,9 @@
 //! administrator" ([`is_uac_elevated`]) starts itself again through
 //! Explorer with [`run_unelevated`]: elevated, it would not get Explorer's
 //! drags (UIPI drops them), and its shell writes would bypass the helper's
-//! validation.
+//! validation. A `--restore-all` run as administrator, which has to wait
+//! for the result, starts itself again as the desktop user instead
+//! ([`run_as_desktop_user`]).
 
 use std::ffi::c_void;
 use std::mem::ManuallyDrop;
@@ -18,14 +20,17 @@ use windows::Win32::Foundation::{
     ERROR_CANCELLED, HANDLE, WAIT_OBJECT_0, WAIT_TIMEOUT, WIN32_ERROR,
 };
 use windows::Win32::Security::{
-    GetTokenInformation, TOKEN_ELEVATION_TYPE, TOKEN_QUERY, TokenElevationType,
-    TokenElevationTypeFull,
+    DuplicateTokenEx, GetTokenInformation, SecurityImpersonation, TOKEN_ADJUST_DEFAULT,
+    TOKEN_ADJUST_SESSIONID, TOKEN_ASSIGN_PRIMARY, TOKEN_DUPLICATE, TOKEN_ELEVATION_TYPE,
+    TOKEN_QUERY, TokenElevationType, TokenElevationTypeFull, TokenPrimary,
 };
 use windows::Win32::System::Com::{
     CLSCTX_LOCAL_SERVER, CoCreateInstance, IDispatch, IServiceProvider,
 };
 use windows::Win32::System::Threading::{
-    GetCurrentProcess, GetExitCodeProcess, OpenProcessToken, WaitForSingleObject,
+    CREATE_PROCESS_LOGON_FLAGS, CreateProcessWithTokenW, GetCurrentProcess, GetExitCodeProcess,
+    INFINITE, OpenProcess, OpenProcessToken, PROCESS_CREATION_FLAGS, PROCESS_INFORMATION,
+    PROCESS_QUERY_LIMITED_INFORMATION, STARTF_USESHOWWINDOW, STARTUPINFOW, WaitForSingleObject,
 };
 use windows::Win32::System::Variant::{VARIANT, VT_BSTR, VT_I4, VariantClear};
 use windows::Win32::UI::Shell::{
@@ -33,10 +38,12 @@ use windows::Win32::UI::Shell::{
     SEE_MASK_NOASYNC, SEE_MASK_NOCLOSEPROCESS, SHELLEXECUTEINFOW, SID_STopLevelBrowser,
     SVGIO_BACKGROUND, SWC_DESKTOP, SWFO_NEEDDISPATCH, ShellExecuteExW, ShellWindows,
 };
-use windows::Win32::UI::WindowsAndMessaging::{SW_HIDE, SW_SHOWNORMAL};
-use windows::core::{BSTR, Interface, Owned, PCWSTR, w};
+use windows::Win32::UI::WindowsAndMessaging::{
+    GetShellWindow, GetWindowThreadProcessId, SW_HIDE, SW_SHOWNORMAL,
+};
+use windows::core::{BSTR, Interface, Owned, PCWSTR, PWSTR, w};
 
-use super::util::{ComScope, ResultExt, pcwstr, wide};
+use super::util::{ComScope, ResultExt, pcwstr, wide, with_context};
 use crate::{Error, Result};
 
 /// How long the elevated helper may run.
@@ -105,7 +112,7 @@ pub fn run_elevated(exe: &Path, args: &[String]) -> Result<i32> {
         if WIN32_ERROR::from_error(&e) == Some(ERROR_CANCELLED) {
             return Err(Error::Cancelled);
         }
-        return Err(super::util::with_context(e, "start the elevated helper"));
+        return Err(with_context(e, "start the elevated helper"));
     }
     if info.hProcess.is_invalid() {
         return Err(Error::Other(
@@ -114,24 +121,32 @@ pub fn run_elevated(exe: &Path, args: &[String]) -> Result<i32> {
     }
     // SAFETY: SEE_MASK_NOCLOSEPROCESS hands us the process handle.
     let process: Owned<HANDLE> = unsafe { Owned::new(info.hProcess) };
+    exit_code_of(&process, HELPER_TIMEOUT_MS, "the elevated helper")
+}
+
+/// Waits up to `timeout_ms` (`INFINITE`: for as long as it takes) for
+/// `process`, described as `what`, to end and returns its exit code.
+fn exit_code_of(process: &Owned<HANDLE>, timeout_ms: u32, what: &str) -> Result<i32> {
     // SAFETY: valid process handle.
-    match unsafe { WaitForSingleObject(*process, HELPER_TIMEOUT_MS) } {
+    match unsafe { WaitForSingleObject(**process, timeout_ms) } {
         WAIT_OBJECT_0 => {}
         WAIT_TIMEOUT => {
-            return Err(Error::Other(
-                "the elevated helper did not finish within 5 minutes".into(),
-            ));
+            return Err(Error::Other(format!(
+                "{what} did not finish within {} minutes",
+                timeout_ms / 60_000
+            )));
         }
         _ => {
-            return Err(super::util::with_context(
+            return Err(with_context(
                 windows_core::Error::from_win32(),
-                "wait for the elevated helper",
+                format!("wait for {what}"),
             ));
         }
     }
     let mut code = 0u32;
     // SAFETY: valid process handle and out pointer.
-    unsafe { GetExitCodeProcess(*process, &mut code) }.ctx("read the helper's exit code")?;
+    unsafe { GetExitCodeProcess(**process, &mut code) }
+        .ctx(format!("read the exit code of {what}"))?;
     Ok(code as i32)
 }
 
@@ -148,12 +163,18 @@ pub fn is_uac_elevated() -> bool {
     }
     // SAFETY: we own the token handle now.
     let token = unsafe { Owned::new(token) };
+    is_full_token(&token)
+}
+
+/// Whether `token` (opened with `TOKEN_QUERY`) is the full token of a UAC
+/// administrator (see [`is_uac_elevated`]).
+fn is_full_token(token: &Owned<HANDLE>) -> bool {
     let mut kind = TOKEN_ELEVATION_TYPE::default();
     let mut len = 0u32;
     // SAFETY: `kind` is a TOKEN_ELEVATION_TYPE-sized buffer.
     unsafe {
         GetTokenInformation(
-            *token,
+            **token,
             TokenElevationType,
             Some(&mut kind as *mut TOKEN_ELEVATION_TYPE as *mut c_void),
             size_of::<TOKEN_ELEVATION_TYPE>() as u32,
@@ -162,6 +183,103 @@ pub fn is_uac_elevated() -> bool {
     }
     .is_ok()
         && kind == TokenElevationTypeFull
+}
+
+/// Starts `exe args…` as the user signed in to this desktop, with the
+/// token of the desktop's shell process (Explorer): the user's own,
+/// unelevated one under UAC. Waits for it to end and returns its exit
+/// code.
+///
+/// For a process holding an administrator's full token that must not act
+/// with it and needs the result (`--restore-all`), which
+/// [`run_unelevated`] cannot give. Uses `CreateProcessWithTokenW`
+/// (Windows' Secondary Logon service, allowed by an administrator's
+/// `SeImpersonatePrivilege`). Fails when no shell runs on this desktop,
+/// when the shell runs as administrator too (nothing would change), or
+/// when the process cannot be started.
+pub fn run_as_desktop_user(exe: &Path, args: &[String]) -> Result<i32> {
+    // SAFETY: a plain window query.
+    let shell = unsafe { GetShellWindow() };
+    if shell.is_invalid() {
+        return Err(Error::NotFound(
+            "no desktop shell (Explorer) runs on this desktop".into(),
+        ));
+    }
+    let mut pid = 0u32;
+    // SAFETY: a window handle and a valid out pointer.
+    unsafe { GetWindowThreadProcessId(shell, Some(&mut pid)) };
+    if pid == 0 {
+        return Err(with_context(
+            windows_core::Error::from_win32(),
+            "find the desktop shell's process",
+        ));
+    }
+    // SAFETY (whole block): plain calls with valid out pointers; each
+    // handle is owned (and so closed) as soon as it exists.
+    let primary = unsafe {
+        let shell = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid)
+            .ctx("open the desktop shell's process")?;
+        let shell = Owned::new(shell);
+        let mut token = HANDLE::default();
+        OpenProcessToken(*shell, TOKEN_QUERY | TOKEN_DUPLICATE, &mut token)
+            .ctx("read the desktop user's token")?;
+        let token = Owned::new(token);
+        if is_full_token(&token) {
+            return Err(Error::Other(
+                "the desktop shell runs as administrator too".into(),
+            ));
+        }
+        let mut primary = HANDLE::default();
+        DuplicateTokenEx(
+            *token,
+            TOKEN_QUERY
+                | TOKEN_DUPLICATE
+                | TOKEN_ASSIGN_PRIMARY
+                | TOKEN_ADJUST_DEFAULT
+                | TOKEN_ADJUST_SESSIONID,
+            None,
+            SecurityImpersonation,
+            TokenPrimary,
+            &mut primary,
+        )
+        .ctx("copy the desktop user's token")?;
+        Owned::new(primary)
+    };
+    let app = wide(exe);
+    let mut command = wide(format!(
+        "{} {}",
+        quote_arg(&exe.to_string_lossy()),
+        command_line(args)
+    ));
+    let dir = exe.parent().map(wide);
+    // Hidden, like the elevated helper: it shows no window of its own.
+    let startup = STARTUPINFOW {
+        cb: size_of::<STARTUPINFOW>() as u32,
+        dwFlags: STARTF_USESHOWWINDOW,
+        wShowWindow: SW_HIDE.0 as u16,
+        ..Default::default()
+    };
+    let mut info = PROCESS_INFORMATION::default();
+    // SAFETY: every string outlives the call, and the command line is a
+    // writable buffer, as the function requires. Without an environment
+    // block the process gets the user's own, from their profile.
+    unsafe {
+        CreateProcessWithTokenW(
+            *primary,
+            CREATE_PROCESS_LOGON_FLAGS(0),
+            pcwstr(&app),
+            Some(PWSTR(command.as_mut_ptr())),
+            PROCESS_CREATION_FLAGS(0),
+            None,
+            dir.as_deref().map_or(PCWSTR::null(), pcwstr),
+            &startup,
+            &mut info,
+        )
+    }
+    .ctx(format!("start {} as the desktop user", exe.display()))?;
+    // SAFETY: the call handed us both handles.
+    let (process, _thread) = unsafe { (Owned::new(info.hProcess), Owned::new(info.hThread)) };
+    exit_code_of(&process, INFINITE, &exe.display().to_string())
 }
 
 /// A `VARIANT` that frees its value on drop.

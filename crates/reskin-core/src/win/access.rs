@@ -23,7 +23,9 @@
 //!   `CREATE_NEW` (never overwriting) and deletes through the handle, so a
 //!   planted link is removed rather than followed;
 //! * edits a Public Desktop shortcut only after the same checks against
-//!   the Public Desktop folder ([`TrustedDir::check_file`]);
+//!   the Public Desktop folder ([`TrustedDir::check_file`]), and rewrites
+//!   one by hand ([`TrustedDir::replace_file`]) only through a file it
+//!   created beside it that way, renamed over it by handle;
 //! * reads its job once, without following a link, up to a size limit
 //!   ([`read_plain_file`]).
 //!
@@ -38,31 +40,39 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
 use windows::Win32::Foundation::{
-    ERROR_ACCESS_DENIED, ERROR_ALREADY_EXISTS, ERROR_FILE_EXISTS, ERROR_LOCK_VIOLATION,
-    ERROR_SHARING_VIOLATION, GENERIC_READ, GENERIC_WRITE, HANDLE, WIN32_ERROR,
+    ERROR_ACCESS_DENIED, ERROR_ALREADY_EXISTS, ERROR_FILE_EXISTS, ERROR_INVALID_FUNCTION,
+    ERROR_INVALID_PARAMETER, ERROR_LOCK_VIOLATION, ERROR_NOT_SUPPORTED, ERROR_SHARING_VIOLATION,
+    GENERIC_READ, GENERIC_WRITE, HANDLE, WIN32_ERROR,
 };
 use windows::Win32::Security::{
     ACCESS_ALLOWED_ACE, ACL, ACL_REVISION, AddAccessAllowedAceEx, CONTAINER_INHERIT_ACE,
     CreateWellKnownSid, DACL_SECURITY_INFORMATION, GetKernelObjectSecurity, GetLengthSid,
-    GetSecurityDescriptorOwner, InitializeAcl, InitializeSecurityDescriptor, IsWellKnownSid,
-    OBJECT_INHERIT_ACE, OWNER_SECURITY_INFORMATION, PROTECTED_DACL_SECURITY_INFORMATION,
-    PSECURITY_DESCRIPTOR, PSID, SE_DACL_PROTECTED, SECURITY_ATTRIBUTES, SECURITY_DESCRIPTOR,
-    SECURITY_MAX_SID_SIZE, SetKernelObjectSecurity, SetSecurityDescriptorControl,
-    SetSecurityDescriptorDacl, SetSecurityDescriptorOwner, WELL_KNOWN_SID_TYPE,
-    WinBuiltinAdministratorsSid, WinBuiltinUsersSid, WinLocalSystemSid,
+    GetSecurityDescriptorControl, GetSecurityDescriptorOwner, InitializeAcl,
+    InitializeSecurityDescriptor, IsWellKnownSid, OBJECT_INHERIT_ACE, OBJECT_SECURITY_INFORMATION,
+    OWNER_SECURITY_INFORMATION, PROTECTED_DACL_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR, PSID,
+    SE_DACL_PROTECTED, SECURITY_ATTRIBUTES, SECURITY_DESCRIPTOR, SECURITY_MAX_SID_SIZE,
+    SetKernelObjectSecurity, SetSecurityDescriptorControl, SetSecurityDescriptorDacl,
+    SetSecurityDescriptorOwner, WELL_KNOWN_SID_TYPE, WinBuiltinAdministratorsSid,
+    WinBuiltinUsersSid, WinLocalSystemSid,
 };
 use windows::Win32::Storage::FileSystem::{
     BY_HANDLE_FILE_INFORMATION, CREATE_NEW, CreateDirectoryW, CreateFileW, DELETE, FILE_ADD_FILE,
-    FILE_ALL_ACCESS, FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_READONLY,
-    FILE_ATTRIBUTE_REPARSE_POINT, FILE_CREATION_DISPOSITION, FILE_DISPOSITION_INFO,
+    FILE_ALL_ACCESS, FILE_ATTRIBUTE_ARCHIVE, FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_HIDDEN,
+    FILE_ATTRIBUTE_NOT_CONTENT_INDEXED, FILE_ATTRIBUTE_READONLY, FILE_ATTRIBUTE_REPARSE_POINT,
+    FILE_ATTRIBUTE_SYSTEM, FILE_BASIC_INFO, FILE_CREATION_DISPOSITION, FILE_DISPOSITION_INFO,
     FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, FILE_FLAGS_AND_ATTRIBUTES,
-    FILE_GENERIC_EXECUTE, FILE_GENERIC_READ, FILE_NAME_NORMALIZED, FILE_READ_ATTRIBUTES,
-    FILE_SHARE_DELETE, FILE_SHARE_MODE, FILE_SHARE_NONE, FILE_SHARE_READ, FILE_SHARE_WRITE,
-    FILE_TYPE_DISK, FileDispositionInfo, GETFINALPATHNAMEBYHANDLE_FLAGS, GetFileAttributesW,
-    GetFileInformationByHandle, GetFileType, GetFinalPathNameByHandleW, INVALID_FILE_ATTRIBUTES,
-    OPEN_EXISTING, READ_CONTROL, SetFileInformationByHandle, VOLUME_NAME_DOS, WRITE_DAC,
+    FILE_GENERIC_EXECUTE, FILE_GENERIC_READ, FILE_INFO_BY_HANDLE_CLASS, FILE_NAME_NORMALIZED,
+    FILE_READ_ATTRIBUTES, FILE_RENAME_INFO, FILE_SHARE_DELETE, FILE_SHARE_MODE, FILE_SHARE_NONE,
+    FILE_SHARE_READ, FILE_SHARE_WRITE, FILE_TYPE_DISK, FILE_WRITE_ATTRIBUTES, FileBasicInfo,
+    FileDispositionInfo, FileRenameInfo, FileRenameInfoEx, GETFINALPATHNAMEBYHANDLE_FLAGS,
+    GetFileAttributesW, GetFileInformationByHandle, GetFileType, GetFinalPathNameByHandleW,
+    INVALID_FILE_ATTRIBUTES, OPEN_EXISTING, READ_CONTROL, SetFileInformationByHandle,
+    VOLUME_NAME_DOS, WRITE_DAC,
 };
 use windows::Win32::System::SystemServices::SECURITY_DESCRIPTOR_REVISION;
+use windows::Win32::System::WindowsProgramming::{
+    FILE_RENAME_FLAG_POSIX_SEMANTICS, FILE_RENAME_FLAG_REPLACE_IF_EXISTS,
+};
 use windows::core::Owned;
 
 use super::known;
@@ -400,44 +410,71 @@ fn check_plain(file: &File, path: &Path, expected: Option<&str>) -> Result<()> {
     Ok(())
 }
 
-/// Whether the object behind `file` (opened with `READ_CONTROL`) is owned
-/// by Administrators or SYSTEM.
-fn owned_by_admins(file: &File, path: &Path) -> Result<bool> {
-    let what = || format!("read the owner of {}", path.display());
+/// The parts `info` names of the security descriptor of the object behind
+/// `file` (opened with `READ_CONTROL`): self-relative, in a buffer that
+/// keeps it aligned.
+fn security_of(
+    file: &File,
+    info: OBJECT_SECURITY_INFORMATION,
+    what: &dyn Fn() -> String,
+) -> Result<Vec<u64>> {
     let mut needed = 0u32;
     // SAFETY: a size query (no buffer); it fails with
     // ERROR_INSUFFICIENT_BUFFER and reports the size needed.
-    let _ = unsafe {
-        GetKernelObjectSecurity(
-            handle(file),
-            OWNER_SECURITY_INFORMATION.0,
-            None,
-            0,
-            &mut needed,
-        )
-    };
+    let _ = unsafe { GetKernelObjectSecurity(handle(file), info.0, None, 0, &mut needed) };
     if needed == 0 {
         return Err(with_context(windows_core::Error::from_win32(), what()));
     }
     let mut buf = vec![0u64; (needed as usize).div_ceil(8)];
-    let sd = PSECURITY_DESCRIPTOR(buf.as_mut_ptr().cast());
-    let mut owner = PSID::default();
-    let mut defaulted = windows_core::BOOL::default();
-    // SAFETY: `buf` holds `needed` bytes; `owner` points into it and is
-    // only used while it lives.
+    // SAFETY: `buf` holds `needed` bytes.
     unsafe {
         GetKernelObjectSecurity(
             handle(file),
-            OWNER_SECURITY_INFORMATION.0,
-            Some(sd),
+            info.0,
+            Some(PSECURITY_DESCRIPTOR(buf.as_mut_ptr().cast())),
             needed,
             &mut needed,
         )
-        .ctx(what())?;
+    }
+    .ctx(what())?;
+    Ok(buf)
+}
+
+/// Whether the object behind `file` (opened with `READ_CONTROL`) is owned
+/// by Administrators or SYSTEM.
+fn owned_by_admins(file: &File, path: &Path) -> Result<bool> {
+    let what = || format!("read the owner of {}", path.display());
+    let mut buf = security_of(file, OWNER_SECURITY_INFORMATION, &what)?;
+    let sd = PSECURITY_DESCRIPTOR(buf.as_mut_ptr().cast());
+    let mut owner = PSID::default();
+    let mut defaulted = windows_core::BOOL::default();
+    // SAFETY: `sd` is the descriptor in `buf`; `owner` points into it and
+    // is only used while it lives.
+    unsafe {
         GetSecurityDescriptorOwner(sd, &mut owner, &mut defaulted).ctx(what())?;
         Ok(!owner.is_invalid()
             && (IsWellKnownSid(owner, WinBuiltinAdministratorsSid).as_bool()
                 || IsWellKnownSid(owner, WinLocalSystemSid).as_bool()))
+    }
+}
+
+/// Gives the object behind `to` (opened with `WRITE_DAC`) the access rules
+/// of the one behind `from` (opened with `READ_CONTROL`), protected from
+/// inheritance exactly when those are.
+fn copy_dacl(from: &File, to: &File, path: &Path) -> Result<()> {
+    let what = || format!("copy the access rules to {}", path.display());
+    let mut buf = security_of(from, DACL_SECURITY_INFORMATION, &what)?;
+    let sd = PSECURITY_DESCRIPTOR(buf.as_mut_ptr().cast());
+    let mut control = 0u16;
+    let mut revision = 0u32;
+    // SAFETY: `sd` is the descriptor in `buf`, which outlives both calls.
+    unsafe {
+        GetSecurityDescriptorControl(sd, &mut control, &mut revision).ctx(what())?;
+        let mut info = DACL_SECURITY_INFORMATION;
+        if control & SE_DACL_PROTECTED.0 != 0 {
+            info |= PROTECTED_DACL_SECURITY_INFORMATION;
+        }
+        SetKernelObjectSecurity(handle(to), info, sd).ctx(what())
     }
 }
 
@@ -471,6 +508,108 @@ fn delete_by_handle(file: &File, path: &Path) -> Result<()> {
         )
     }
     .ctx(format!("delete {}", path.display()))
+}
+
+/// The attributes a rewritten file takes over from the one it replaces;
+/// the others describe the new file itself (a read-only file cannot be
+/// replaced, so that one never comes along).
+const KEPT_ATTRIBUTES: u32 =
+    FILE_ATTRIBUTE_HIDDEN.0 | FILE_ATTRIBUTE_SYSTEM.0 | FILE_ATTRIBUTE_NOT_CONTENT_INDEXED.0;
+
+/// Gives the file behind `file` (opened with `FILE_WRITE_ATTRIBUTES`) the
+/// creation time and the [`KEPT_ATTRIBUTES`] of the file `original`
+/// describes; it is marked as changed (archive) either way.
+fn copy_basic_info(original: &BY_HANDLE_FILE_INFORMATION, file: &File, path: &Path) -> Result<()> {
+    let created = original.ftCreationTime;
+    let info = FILE_BASIC_INFO {
+        CreationTime: (i64::from(created.dwHighDateTime) << 32) | i64::from(created.dwLowDateTime),
+        // Zero leaves a time as it is.
+        LastAccessTime: 0,
+        LastWriteTime: 0,
+        ChangeTime: 0,
+        FileAttributes: (original.dwFileAttributes & KEPT_ATTRIBUTES) | FILE_ATTRIBUTE_ARCHIVE.0,
+    };
+    // SAFETY: valid handle; `info` is a FILE_BASIC_INFO of the size given.
+    unsafe {
+        SetFileInformationByHandle(
+            handle(file),
+            FileBasicInfo,
+            (&raw const info).cast(),
+            size_of::<FILE_BASIC_INFO>() as u32,
+        )
+    }
+    .ctx(format!("set the attributes of {}", path.display()))
+}
+
+/// Renames the file behind `file` (opened with `DELETE`) to `to`, a full
+/// path, replacing the entry by that name: the name itself, never what a
+/// link there leads to. POSIX semantics also replace a file somebody holds
+/// open; where Windows or the file system lacks them, the classic rename
+/// does it.
+fn rename_by_handle(file: &File, from: &Path, to: &str) -> Result<()> {
+    let name: Vec<u16> = to.encode_utf16().collect();
+    let offset = std::mem::offset_of!(FILE_RENAME_INFO, FileName);
+    // The name and a terminating NUL, which FileNameLength leaves out.
+    let size = offset + (name.len() + 1) * size_of::<u16>();
+    let mut buf = vec![0u64; size.div_ceil(8)];
+    let info = buf.as_mut_ptr().cast::<FILE_RENAME_INFO>();
+    // SAFETY: `buf` is zeroed, aligned for FILE_RENAME_INFO and holds
+    // `size` bytes: the header, the name and its NUL.
+    unsafe {
+        (*info).FileNameLength = (name.len() * size_of::<u16>()) as u32;
+        std::ptr::copy_nonoverlapping(
+            name.as_ptr(),
+            (&raw mut (*info).FileName).cast::<u16>(),
+            name.len(),
+        );
+    }
+    let rename = move |class: FILE_INFO_BY_HANDLE_CLASS| {
+        // SAFETY: valid handle; `info` points at `size` initialised bytes.
+        unsafe {
+            SetFileInformationByHandle(handle(file), class, info.cast_const().cast(), size as u32)
+        }
+    };
+    let what = || format!("replace {to} with {}", from.display());
+    // SAFETY: `info` points into `buf`; the union holds plain integers.
+    unsafe {
+        (*info).Anonymous.Flags =
+            FILE_RENAME_FLAG_REPLACE_IF_EXISTS | FILE_RENAME_FLAG_POSIX_SEMANTICS;
+    }
+    match rename(FileRenameInfoEx) {
+        Ok(()) => Ok(()),
+        Err(e)
+            if matches!(
+                WIN32_ERROR::from_error(&e),
+                Some(ERROR_INVALID_PARAMETER | ERROR_NOT_SUPPORTED | ERROR_INVALID_FUNCTION)
+            ) =>
+        {
+            // SAFETY: as above. FILE_RENAME_INFO keeps a BOOLEAN there.
+            unsafe {
+                (*info).Anonymous.Flags = 0;
+                (*info).Anonymous.ReplaceIfExists = true;
+            }
+            rename(FileRenameInfo).ctx(what())
+        }
+        Err(e) => Err(with_context(e, what())),
+    }
+}
+
+/// Deletes the entry `path` of a trusted folder (the link itself when it
+/// is one) after checking that its final path is `expected`, directly in
+/// that folder. `false` when there was none.
+fn remove_entry(path: &Path, expected: &str) -> Result<bool> {
+    let Some(file) = open_entry(path, DELETE.0)? else {
+        return Ok(false);
+    };
+    let actual = final_path(&file, path)?;
+    if !job::final_path_matches(expected, &actual) {
+        return Err(Error::AccessDenied(format!(
+            "{} leads to {actual}; refusing to delete it",
+            path.display()
+        )));
+    }
+    delete_by_handle(&file, path)?;
+    Ok(true)
 }
 
 /// Opens an existing entry of a folder without following it; `None` when
@@ -532,10 +671,12 @@ impl TrustedDir {
         Ok((self.path.join(name), format!("{}\\{name}", self.final_path)))
     }
 
-    /// Checks, before a shell object edits it in place, that `path` is a
-    /// plain file directly in this folder: not a link (to be followed by
-    /// the edit), not a hard link (whose other names would change too).
-    pub fn check_file(&self, path: &Path) -> Result<()> {
+    /// Opens `path`, which must lie directly in this folder, without
+    /// following a link at its name (with `access` besides
+    /// `FILE_READ_ATTRIBUTES`) and checks that it is a plain file there.
+    /// Returns it with its entry in this folder, the final path that entry
+    /// has, and its name.
+    fn open_plain(&self, path: &Path, access: u32) -> Result<(File, PathBuf, String, String)> {
         let name = path
             .file_name()
             .and_then(|n| n.to_str())
@@ -548,9 +689,68 @@ impl TrustedDir {
             )));
         }
         let (entry, expected) = self.entry(name)?;
-        let file =
-            open_entry(&entry, 0)?.ok_or_else(|| Error::NotFound(entry.display().to_string()))?;
-        check_plain(&file, &entry, Some(&expected))
+        let file = open_entry(&entry, access)?
+            .ok_or_else(|| Error::NotFound(entry.display().to_string()))?;
+        check_plain(&file, &entry, Some(&expected))?;
+        Ok((file, entry, expected, name.to_owned()))
+    }
+
+    /// Checks, before a shell object edits it in place, that `path` is a
+    /// plain file directly in this folder: not a link (to be followed by
+    /// the edit), not a hard link (whose other names would change too).
+    pub fn check_file(&self, path: &Path) -> Result<()> {
+        self.open_plain(path, 0).map(drop)
+    }
+
+    /// The content of `path`, a plain file directly in this folder (see
+    /// [`TrustedDir::check_file`]), read through the handle that was
+    /// checked; at most `max` bytes.
+    pub fn read_file(&self, path: &Path, max: u64) -> Result<Vec<u8>> {
+        let (file, entry, _, _) = self.open_plain(path, GENERIC_READ.0)?;
+        read_capped(file, &entry, max)
+    }
+
+    /// Replaces the content of `path`, a plain file directly in this folder
+    /// (see [`TrustedDir::check_file`]), with `bytes` the way the elevated
+    /// helper writes every file: into a new file beside it
+    /// ([`paths::rewrite_temp_name`]), created with `CREATE_NEW` without
+    /// following a link and checked to be a plain file directly in this
+    /// folder, written through its handle, given the original's access
+    /// rules, attributes and creation time, then renamed over the original
+    /// by handle. Whatever had the temporary name (a file a crash left, a
+    /// planted link) is deleted through its own handle first. On failure
+    /// the new file is deleted and the original stays as it was.
+    pub fn replace_file(&self, path: &Path, bytes: &[u8]) -> Result<()> {
+        let (original, entry, expected, name) = self.open_plain(path, READ_CONTROL.0)?;
+        let info = file_info(&original, &entry)?;
+        let (temp, temp_expected) = self.entry(&paths::rewrite_temp_name(&name))?;
+        remove_entry(&temp, &temp_expected)?;
+        let how = OpenAs {
+            access: GENERIC_WRITE.0
+                | DELETE.0
+                | FILE_READ_ATTRIBUTES.0
+                | FILE_WRITE_ATTRIBUTES.0
+                | WRITE_DAC.0,
+            share: FILE_SHARE_NONE,
+            disposition: CREATE_NEW,
+            follow: false,
+        };
+        let mut file = open(&temp, &how, None)?;
+        let prepared = check_plain(&file, &temp, Some(&temp_expected))
+            .and_then(|()| {
+                file.write_all(bytes)
+                    .and_then(|()| file.sync_all())
+                    .map_err(|e| io_error(e, "writing", &temp))
+            })
+            .and_then(|()| copy_dacl(&original, &file, &temp))
+            .and_then(|()| copy_basic_info(&info, &file, &temp));
+        // Without POSIX semantics a file held open cannot be replaced.
+        drop(original);
+        let replaced = prepared.and_then(|()| rename_by_handle(&file, &temp, &expected));
+        if replaced.is_err() {
+            let _ = delete_by_handle(&file, &temp);
+        }
+        replaced
     }
 }
 
@@ -649,18 +849,7 @@ impl AdminDir {
     /// when there was none.
     pub fn remove(&self, name: &str) -> Result<bool> {
         let (path, expected) = self.dir.entry(name)?;
-        let Some(file) = open_entry(&path, DELETE.0)? else {
-            return Ok(false);
-        };
-        let actual = final_path(&file, &path)?;
-        if !job::final_path_matches(&expected, &actual) {
-            return Err(Error::AccessDenied(format!(
-                "{} leads to {actual}; refusing to delete it",
-                path.display()
-            )));
-        }
-        delete_by_handle(&file, &path)?;
-        Ok(true)
+        remove_entry(&path, &expected)
     }
 
     /// The entries directly inside that are files (not links or folders),

@@ -135,12 +135,18 @@ the empty picture (`box:collapse` hide + `box:shown`) when it may show.
 
 The box at rest is shown exactly when it may be (`rules::box_allowed`): the
 user has not hidden it (tray / menu / hotkey / Settings) and no fullscreen
-app runs. Outside a handoff `settle_box` enforces that (on each toggle and
-every 1.5 s from the fullscreen watcher); while the editor is open a wish is
-only recorded, and the close asks the same question — a box that stays hidden
-is not moved. The hotkey / tray click closes an open editor, toggles the
-box, or — while a fullscreen app hides it — opens the editor. The tray's
-Hide / Show label follows the box's actual visibility.
+app hides it — one runs (with auto-hide on) and the user has not shown the
+box over it (`state::FullscreenHide`). Outside a handoff `settle_box`
+enforces that (on each toggle and every 1.5 s from the fullscreen watcher);
+while the editor is open a wish is only recorded, and the close asks the
+same question — a box that stays hidden is not moved. The hotkey / tray
+click closes an open editor, toggles the box, or — while a fullscreen app
+hides it — opens the editor. The menus' box item (tray and box, `menu.rs`)
+follows the box's actual visibility and does what it says: *Hide box*
+hides it; *Show box* shows it — closing an open editor into it — and keeps
+it on screen over a fullscreen app until that app goes away or the user
+hides the box again. Reskin started again without paths (single-instance)
+brings the open editor to the front, else does what *Show box* does.
 Invariant: a window hides only when its content is transparent and shows only
 over an identical picture (the editor over the box at open; the box under
 the editor's proxy at close, which goes only once the box has painted it).
@@ -259,9 +265,11 @@ one switches the sidebar tab and asks the panel through
 
 ## Rust: reskin-core module contracts
 
-Error type: `reskin_core::Error { AccessDenied, NotFound, Unsupported, Cancelled, Other }`
+Error type: `reskin_core::Error { AccessDenied, NotFound, Unsupported, Cancelled, Busy, Other }`
 with `Result<T> = std::result::Result<T, Error>`; `From<windows_core::Error>`
-maps `E_ACCESSDENIED`. Pixels: `pixels::Rgba` (straight alpha RGBA8).
+maps `E_ACCESSDENIED`. `Busy`: another process held what was needed (the
+journal lock) for longer than the call waits; trying again later can work.
+Pixels: `pixels::Rgba` (straight alpha RGBA8).
 
 Pure (all hosts, unit tested on Linux):
 
@@ -276,7 +284,8 @@ Pure (all hosts, unit tested on Linux):
   (byte-exact ICO from RT_GROUP_ICON + RT_ICON blobs).
 * `urlini` — `UrlFile::parse(bytes)` (infallible; UTF-16LE/BE, UTF-8, ANSI
   1252; `[InternetShortcut.W]` UTF-7 values preferred) with `url()`,
-  `icon_file()`, `icon_index()`, `get`, `entries`, `shortcut_value`, writers
+  `icon_file()`, `icon_index()`, `has_icon(Option<(file, index)>)` (the
+  read-back check of a write), `get`, `entries`, `shortcut_value`, writers
   `set`, `remove`, `set_url`, `set_icon`, `set_shortcut_value`,
   `to_ini_string()`, `to_bytes()` (original encoding); `utf7_encode/decode`.
 * `paths` — `APP_ID`, `AppDirs { roaming, local, program_data }`
@@ -284,7 +293,9 @@ Pure (all hosts, unit tested on Linux):
   `journal_file()`, `library_dir()`, `autosave_file()`, `icons_dir()`,
   `jobs_dir()`, `public_icons_dir()`, `ensure()`; `slugify`, `sha256_hex`,
   `icon_file_name(name, ico) -> "<slug>-<sha256[..12]>.ico"`,
-  `is_valid_public_icon_name`, and string-based Windows path helpers
+  `is_valid_public_icon_name`, `rewrite_temp_name(name)`
+  (`<name>.reskin-tmp`: the file beside one that a rewrite of it goes
+  through), and string-based Windows path helpers
   (`normalize_for_compare`, `is_directly_under`, `has_parent_traversal`,
   `is_unc`, …) that behave the same on every host.
 * `store` — `write_atomic`, `read_json`, `write_json`, `store_icon(dir, name,
@@ -336,7 +347,8 @@ Pure (all hosts, unit tested on Linux):
   grace), `gc_icons_older_than`, `icons_released_by(plans, dir)`.
   **Sharing between processes:** every read-modify-write holds an exclusive
   lock on `journal.json.lock` (`LockFileEx`; waits up to `LOCK_TIMEOUT` =
-  30 s, then fails saying another Reskin process holds it) and reloads the
+  30 s, then fails with `Error::Busy` saying another Reskin process holds
+  it) and reloads the
   file first (skipped when its SHA-256 is unchanged); `locked(f)` holds it
   across several steps, `refresh()` just reloads. The app keeps one
   `Journal` behind a mutex and takes that first. Holders keep the lock for
@@ -369,7 +381,10 @@ Windows (`win/`, `#[cfg(windows)]`, type-checked on Linux with
   Option<(&str, i32)>)` (None clears; verified by read-back), `create_link(dest,
   target, args, Option<(&Path, i32)>, description)`.
 * `urlfile` — `read_url_icon`, `set_url_icon` (InternetShortcut COM object,
-  direct-file fallback if the change didn't stick).
+  direct-file fallback if the change didn't stick: rewritten through
+  `<name>.reskin-tmp`), `set_url_icon_in(dir: &TrustedDir, path, icon)`
+  (the elevated helper's: `check_file` first; the fallback reads and
+  rewrites only through `dir`'s `read_file` / `replace_file`).
 * `folder` — `read_folder_icon`, `set_folder_icon(path, Option<(&Path, i32)>)`
   (clear removes the keys and an empty desktop.ini).
 * `sysicons` — `read_system_icon`, `set_system_icon`, `restore_system_icon`,
@@ -380,14 +395,18 @@ Windows (`win/`, `#[cfg(windows)]`, type-checked on Linux with
   `probe_creatable(dir)`, `location_of(path) -> ItemLocation`; for the
   elevated helper (see "Elevation"): `AdminDir::open(base, parts)` with
   `read`, `create`, `put`, `remove`, `files`; `TrustedDir::open(dir)` with
-  `check_file`; `read_plain_file(path, max)`; and for the app
-  `read_admin_file(path, max)`.
+  `check_file`, `read_file(path, max)`, `replace_file(path, bytes)`;
+  `read_plain_file(path, max)`; and for the app `read_admin_file(path,
+  max)`.
 * `desktop` — `find_desktop_icon(path) -> Result<Option<DesktopSpot>>` (also
   `::{CLSID}`), `desktop_icon_size()`.
 * `elevate` — `run_elevated(exe, args) -> Result<i32>` (blocks ≤ 5 min; call
   off the STA; `Error::Cancelled` on UAC cancel), `is_uac_elevated()` (the
   full token of a UAC administrator), `run_unelevated(exe, args)` (through
-  Explorer: `IShellDispatch2::ShellExecute` on the desktop's view).
+  Explorer: `IShellDispatch2::ShellExecute` on the desktop's view; does not
+  wait), `run_as_desktop_user(exe, args) -> Result<i32>` (with the token of
+  the desktop's shell process, `CreateProcessWithTokenW`; waits for the exit
+  code; refuses when the shell runs elevated too).
   `WinJobExec` lives in `src-tauri/src/helper.rs`.
 * `fonts` — `system_fonts()`.
 * `wallpaper` — `wallpaper_path`, `wallpaper_info(Option<(w, h)>)`,
@@ -403,8 +422,14 @@ Windows (`win/`, `#[cfg(windows)]`, type-checked on Linux with
 * `lib.rs` `run`: panic hook (`reskin.log`, and an error box: release builds
   abort on panic); started as administrator (`is_uac_elevated`) it restarts
   unelevated through Explorer (`--relaunched`) and returns; no WebView2
-  Runtime → an error box offering Microsoft's download, exit 1. Builder:
-  single-instance first, then dialog, opener, global-shortcut; `setup`
+  Runtime → an error box offering Microsoft's download, exit 1; a history
+  that cannot be loaded → an error box saying which of three it is (another
+  Reskin process holds the journal lock, `Error::Busy`: try again in a
+  moment; a journal a newer Reskin wrote; a file it can neither read nor
+  set aside), exit 1. Builder: single-instance first (a second start with
+  `--edit` paths opens them, without paths `actions::bring_forward`: the
+  open editor to the front, else *Show box*), then dialog, opener,
+  global-shortcut; `setup`
   creates the box (visible; a failure is reported, not returned into Tauri),
   reconciles the OS-backed settings on a thread (`commands::settings::
   reconcile_at_startup`) and schedules the editor pre-warm (skipped in
@@ -416,7 +441,16 @@ Windows (`win/`, `#[cfg(windows)]`, type-checked on Linux with
   releasing the old one; `registered()`, `problem(saved)` (why the saved one
   doesn't work, for `BootInfo.hotkeyError`).
 * `AppState::system_reduced_motion()` reads `SPI_GETCLIENTAREAANIMATION` live;
-  `first_run()` clears once the welcome sets `onboarded`.
+  `first_run()` clears once the welcome sets `onboarded`;
+  `hidden_for_fullscreen()` follows `FullscreenHide` (the watcher's
+  `set_fullscreen_busy`, `show_box_anyway()` for *Show box*, ended by the
+  app going away or `set_box_hidden_by_user(true)`).
+* `menu.rs` / `tray.rs`: one menu for the box's popup and the tray; its box
+  item is `hide-box` ("Hide box") while the box shows, else `show-box`
+  ("Show box", `actions::show_box`). A tray click and the hotkey run
+  `actions::toggle_box` (`rules::toggle`). The Import dialog (`pick_files`)
+  offers images, icons, shortcuts, programs and `.reskin` projects, and
+  projects on their own.
 * `windows/{box_window,editor_window}.rs` build windows `from_config` + WebView2
   tuning (compatibility mode: the box's clip region is rebuilt on
   `ScaleFactorChanged`); `windows/mailbox.rs` (seq queue + long-poll,
@@ -428,7 +462,10 @@ Windows (`win/`, `#[cfg(windows)]`, type-checked on Linux with
   probes the target again (`access::probe_writable`, or `probe_creatable`
   on the desktop for a new shortcut / personal copy): a Public-Desktop link
   gets an elevation ticket, anything else Windows refuses a `Failed`
-  outcome with a hint. With the flourish a new shortcut is created before
+  outcome with a hint. The flourish plays only while the box may be on
+  screen (`morph::box_allowed`: not hidden by the user or a fullscreen
+  app); otherwise the change is made in place. With the flourish a new
+  shortcut is created before
   the collapse (a failure leaves the editor open); a failure after the
   collapse reaches the box as exactly one `error` flight; without a
   visible desktop icon the box celebrates in place and glides home. System
@@ -449,8 +486,14 @@ Windows (`win/`, `#[cfg(windows)]`, type-checked on Linux with
 * `helper.rs`: `--elevated-apply`, `run_elevated_job` and `--restore-all`
   (see "Elevation"; `--restore-all` runs alongside the app thanks to the
   journal lock, asks once for approval — also under `--quiet` — and exits
-  3 unless everything is back, so the uninstaller keeps Reskin's data).
+  3 unless everything is back, so the uninstaller keeps Reskin's data; run
+  with an administrator's full token it restarts as the desktop user, see
+  "Elevation").
 * `commands/*.rs`: `boot, box_cmds, editor_cmds, items, apply, library, system, settings`.
+  `settings::rebuild_windows` (compatibility mode) and the low-memory drop
+  destroy the editor through `morph::destroy_editor`, which returns once
+  tauri has released its label and the mailbox moved on, so the next open
+  never meets a half-destroyed editor.
 * Permissions: `build.rs` lists every command in `AppManifest::commands`;
   `capabilities/box.json` and `capabilities/editor.json` grant per window.
 
@@ -502,7 +545,18 @@ touch as hostile:
   (`IShellLinkW` / `CLSID_InternetShortcut`). Only administrators can write
   to that folder; before each edit the helper still checks that the target
   is a plain file with a single name directly in it, by final path
-  (`TrustedDir::check_file`).
+  (`TrustedDir::check_file`). When the shell object drops a `.url` change,
+  the helper rewrites the INI itself (`urlfile::set_url_icon_in`) under the
+  same rules: it reads the file through the handle it checked
+  (`TrustedDir::read_file`) and writes `<name>.reskin-tmp` beside it with
+  `CREATE_NEW` and `FILE_FLAG_OPEN_REPARSE_POINT` (whatever had that name —
+  a leftover, a planted link — is deleted through its own handle first),
+  checks it is a plain file directly in the folder, writes through the
+  handle, gives it the original's DACL, attributes and creation time, and
+  renames it over the original by handle
+  (`SetFileInformationByHandle(FileRenameInfoEx)`, POSIX semantics, else
+  `FileRenameInfo`): `TrustedDir::replace_file`. A failure deletes the
+  new file and leaves the original as it was.
 * **The result.** The helper writes `results\<job id>.json` there (and
   removes results older than an hour nobody read) and exits with 0 / 2 / 3.
   The app, which cannot delete it, reads it only when it is a plain file
@@ -514,6 +568,25 @@ Icons of `%ProgramData%\Reskin\icons` are machine-wide: one content-hashed
 name may serve several accounts' shortcuts. A restore deletes those its own
 journal no longer needs (`icons_released_by`, existing files only), and the
 helper keeps any a Public Desktop shortcut still shows.
+
+**`--restore-all` run as administrator.** Started with an administrator's
+full token (`is_uac_elevated`: from an elevated terminal, or an uninstaller
+run as administrator), `--restore-all` would restore the user's items with
+administrator rights: it would write the journal, the user's icons folder
+and their shortcuts — all places the user, and anything they run, can
+redirect with a link — and would read the history of whichever account
+approved the prompt. So it restores nothing itself and writes nothing, not
+even the log: it starts `reskin.exe --restore-all --quiet --relaunched`
+as the desktop user (`elevate::run_as_desktop_user`: the token of the
+desktop's shell process, the signed-in user's own and unelevated), waits
+for it and exits with its verdict (0 when everything is back, else 3).
+That run restores every item as any unelevated restore does; the
+Public-Desktop ones go through the helper's checked jobs, so Windows asks
+for approval once more when there are any. If Reskin cannot start itself
+that way (no desktop shell, or the shell runs elevated too) — or a
+`--relaunched` run still holds a full token — it refuses with exit 3 and a
+message to run it from a terminal that isn't run as administrator; the
+uninstaller then keeps Reskin's data, so nothing is lost.
 
 ## Web conventions
 

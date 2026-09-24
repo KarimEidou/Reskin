@@ -92,6 +92,7 @@ pub(crate) fn with_context(e: windows_core::Error, what: impl Display) -> Error 
         Error::AccessDenied(m) => Error::AccessDenied(format!("{what}: {m}")),
         Error::NotFound(m) => Error::NotFound(format!("{what}: {m}")),
         Error::Unsupported(m) => Error::Unsupported(format!("{what}: {m}")),
+        Error::Busy(m) => Error::Busy(format!("{what}: {m}")),
         Error::Other(m) => Error::Other(format!("{what}: {m}")),
         Error::Cancelled => Error::Cancelled,
     }
@@ -267,7 +268,7 @@ pub(crate) fn resolve_icon_path(raw: &str, base: Option<&Path>) -> PathBuf {
 
 /// `.url` and `desktop.ini` files are tiny; anything bigger is refused
 /// rather than read into memory.
-const MAX_INI_BYTES: u64 = 1024 * 1024;
+pub(crate) const MAX_INI_BYTES: u64 = 1024 * 1024;
 
 /// Decodes bytes in the system ANSI code page (`CP_ACP`): what Windows
 /// assumes for an INI file without a BOM.
@@ -337,7 +338,12 @@ pub(crate) fn read_ini(path: &Path) -> Result<UrlFile> {
             path.display()
         )));
     }
-    Ok(UrlFile::parse_with_ansi(&bytes, ansi_decode))
+    Ok(parse_ini(&bytes))
+}
+
+/// INI bytes read some other way, decoded as [`read_ini`] decodes them.
+pub(crate) fn parse_ini(bytes: &[u8]) -> UrlFile {
+    UrlFile::parse_with_ansi(bytes, ansi_decode)
 }
 
 /// `file` as bytes in its original encoding (ANSI files in `CP_ACP`, the

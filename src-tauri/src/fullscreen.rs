@@ -1,7 +1,9 @@
 //! Hides the box while a fullscreen app, game or presentation runs
-//! (`SHQueryUserNotificationState`), and brings it back afterwards. Each
-//! tick also puts a box at rest back in line with the user's wish
-//! (`morph::settle_box`), should anything have left it otherwise.
+//! (`SHQueryUserNotificationState`), and brings it back afterwards —
+//! unless the user showed it over that app ("Show box", see
+//! `state::FullscreenHide`). Each tick also puts a box at rest back in line
+//! with the user's wish (`morph::settle_box`), should anything have left it
+//! otherwise.
 
 use std::time::Duration;
 
@@ -28,7 +30,7 @@ fn tick<R: Runtime>(app: &AppHandle<R>) {
     let state = app.state::<AppState>();
     let busy =
         state.settings().auto_hide_fullscreen && reskin_core::win::fullscreen::is_fullscreen_busy();
-    state.set_hidden_for_fullscreen(busy);
+    state.set_fullscreen_busy(busy);
     // A box at rest follows at once; while the editor is open (or a
     // handoff runs) the close asks the same flag.
     morph::settle_box(app);

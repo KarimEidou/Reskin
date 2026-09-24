@@ -26,6 +26,9 @@ pub enum Error {
     Unsupported(String),
     /// The user cancelled (UAC prompt, dialog).
     Cancelled,
+    /// Another process holds what this needs (the journal lock) for longer
+    /// than it waits; trying again later can succeed. The message says so.
+    Busy(String),
     Other(String),
 }
 
@@ -36,7 +39,7 @@ impl std::fmt::Display for Error {
             Error::NotFound(m) => write!(f, "not found: {m}"),
             Error::Unsupported(m) => write!(f, "unsupported: {m}"),
             Error::Cancelled => write!(f, "cancelled"),
-            Error::Other(m) => f.write_str(m),
+            Error::Busy(m) | Error::Other(m) => f.write_str(m),
         }
     }
 }

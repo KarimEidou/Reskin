@@ -232,6 +232,37 @@ fn clearing_the_icon_removes_both_sections_keys() {
 }
 
 #[test]
+fn has_icon_tells_whether_a_write_stuck() {
+    let steam = UrlFile::parse(STEAM.as_bytes());
+    let icon = "C:\\Program Files (x86)\\Steam\\steam\\games\\0bbb630d63262dd66d2fdd0f7d37e8661a410075.ico";
+    assert!(steam.has_icon(Some((icon, 0))));
+    assert!(!steam.has_icon(Some((icon, 1))), "another index");
+    assert!(!steam.has_icon(Some(("C:\\other.ico", 0))));
+    assert!(!steam.has_icon(None));
+
+    // The Unicode path is the one in [InternetShortcut.W], not its ANSI
+    // stand-in.
+    let unicode = UrlFile::parse(UNICODE_W.as_bytes());
+    assert!(unicode.has_icon(Some(("C:\\Users\\José\\Pictures\\星空.ico", 2))));
+    assert!(!unicode.has_icon(Some(("C:\\Users\\Jos?\\Pictures\\?.ico", 2))));
+
+    // Every icon set_icon writes (or clears) reads back as written.
+    for icon in [
+        Some(("C:\\Zoë\\アイコン.ico", 3)),
+        Some(("D:\\a.ico", 0)),
+        None,
+    ] {
+        let mut f = UrlFile::parse(EPIC.as_bytes());
+        f.set_icon(icon.map(|(file, _)| file), icon.map_or(0, |(_, i)| i));
+        assert!(UrlFile::parse(&f.to_bytes()).has_icon(icon), "{icon:?}");
+    }
+    // An empty IconFile is no icon.
+    let empty =
+        UrlFile::parse(b"[InternetShortcut]\r\nURL=https://a/\r\nIconFile=\r\nIconIndex=5\r\n");
+    assert!(empty.has_icon(None));
+}
+
+#[test]
 fn new_file_and_encodings_round_trip() {
     let mut f = UrlFile::new();
     f.set_url("https://example.com/ünïcode");

@@ -1342,3 +1342,121 @@ fn jobs_results_and_public_desktop_shortcuts_must_be_plain_files() {
     let err = access::read_admin_file(&mine, 16).unwrap_err().to_string();
     assert!(err.contains("does not belong to an administrator"), "{err}");
 }
+
+#[test]
+#[ignore = "Windows shell integration as administrator (run with --include-ignored)"]
+fn the_helper_rewrites_a_url_file_only_through_a_file_it_created() {
+    use std::os::windows::fs::MetadataExt;
+    const HIDDEN: u32 = 0x2;
+    let dir = TempDir::new("trusted-url");
+    let url = dir.join("Site.url");
+    let temp = dir.join("Site.url.reskin-tmp");
+    let mut file = UrlFile::new();
+    file.set_url("https://example.com/");
+    std::fs::write(&url, file.to_bytes()).unwrap();
+
+    // The helper's edit through the shell object, checked first.
+    let ico = dir.join("site.ico");
+    write_ico(&ico, 40);
+    let ico_str = ico.to_string_lossy().into_owned();
+    let (base, u, s) = (dir.0.clone(), url.clone(), ico_str.clone());
+    sta()
+        .try_run(move || {
+            let trusted = TrustedDir::open(&base)?;
+            urlfile::set_url_icon_in(&trusted, &u, Some((&s, 2)))
+        })
+        .unwrap();
+    assert_eq!(
+        urlfile::read_url_icon(&url).unwrap(),
+        (Some(ico_str.clone()), 2)
+    );
+    let (base, u) = (dir.0.clone(), url.clone());
+    sta()
+        .try_run(move || {
+            let trusted = TrustedDir::open(&base)?;
+            urlfile::set_url_icon_in(&trusted, &u, None)
+        })
+        .unwrap();
+    assert_eq!(urlfile::read_url_icon(&url).unwrap(), (None, 0));
+    let parsed = UrlFile::parse(&std::fs::read(&url).unwrap());
+    assert_eq!(parsed.url(), Some("https://example.com/"));
+
+    // The direct rewrite: the file gets the new bytes and keeps its access
+    // rules (protected here) and attributes; no temporary file stays.
+    let trusted = TrustedDir::open(&dir.0).unwrap();
+    let p = url.display().to_string();
+    run_tool(
+        "icacls",
+        &[
+            &p,
+            "/inheritance:r",
+            "/grant:r",
+            "*S-1-5-32-544:(F)",
+            "*S-1-1-0:(R)",
+        ],
+    );
+    run_tool("attrib", &["+h", &p]);
+    let one = b"[InternetShortcut]\r\nURL=https://example.org/\r\n";
+    trusted.replace_file(&url, one).unwrap();
+    assert_eq!(std::fs::read(&url).unwrap(), one);
+    assert!(security_of(&url).1, "the access rules came along");
+    let attributes = std::fs::metadata(&url).unwrap().file_attributes();
+    assert_ne!(attributes & HIDDEN, 0, "the attributes came along");
+    assert!(std::fs::symlink_metadata(&temp).is_err());
+    assert_eq!(trusted.read_file(&url, 1024).unwrap(), one);
+    assert!(trusted.read_file(&url, 8).is_err(), "larger than asked for");
+
+    // Whatever has the temporary name is removed, never written through:
+    // a symbolic link, a junction, a file a crash left.
+    let victim = dir.join("victim.txt");
+    std::fs::write(&victim, b"keep").unwrap();
+    std::os::windows::fs::symlink_file(&victim, &temp).unwrap();
+    trusted.replace_file(&url, b"two").unwrap();
+    assert_eq!(std::fs::read(&url).unwrap(), b"two");
+    assert_eq!(std::fs::read(&victim).unwrap(), b"keep");
+    let folder = dir.join("folder");
+    std::fs::create_dir(&folder).unwrap();
+    std::fs::write(folder.join("file.txt"), b"keep").unwrap();
+    mklink_junction(&temp, &folder);
+    trusted.replace_file(&url, b"three").unwrap();
+    assert_eq!(std::fs::read(&url).unwrap(), b"three");
+    assert_eq!(std::fs::read(folder.join("file.txt")).unwrap(), b"keep");
+    assert_eq!(std::fs::read_dir(&folder).unwrap().count(), 1);
+    std::fs::write(&temp, b"left by a crash").unwrap();
+    trusted.replace_file(&url, b"four").unwrap();
+    assert_eq!(std::fs::read(&url).unwrap(), b"four");
+    assert!(std::fs::symlink_metadata(&temp).is_err());
+
+    // The file itself must be a plain file directly in the folder; nothing
+    // else is read or replaced, and what a link leads to stays as it was.
+    let soft = dir.join("Soft.url");
+    std::os::windows::fs::symlink_file(&victim, &soft).unwrap();
+    for err in [
+        trusted.replace_file(&soft, b"x").unwrap_err(),
+        trusted.read_file(&soft, 1024).unwrap_err(),
+        urlfile::set_url_icon_in(&trusted, &soft, Some((&ico_str, 0))).unwrap_err(),
+    ] {
+        assert!(err.to_string().contains("is a link"), "{err}");
+    }
+    assert_eq!(std::fs::read(&victim).unwrap(), b"keep");
+    std::fs::hard_link(&url, dir.join("Hard.url")).unwrap();
+    let err = trusted.replace_file(&url, b"x").unwrap_err();
+    assert!(err.to_string().contains("hard links"), "{err}");
+    assert_eq!(std::fs::read(&url).unwrap(), b"four");
+    std::fs::remove_file(dir.join("Hard.url")).unwrap();
+    let sub = dir.join("sub");
+    std::fs::create_dir(&sub).unwrap();
+    std::fs::write(sub.join("App.url"), b"x").unwrap();
+    let err = trusted
+        .replace_file(&sub.join("App.url"), b"y")
+        .unwrap_err();
+    assert!(err.to_string().contains("not directly in"), "{err}");
+    assert_eq!(std::fs::read(sub.join("App.url")).unwrap(), b"x");
+    assert!(matches!(
+        trusted.replace_file(&dir.join("Missing.url"), b"x"),
+        Err(Error::NotFound(_))
+    ));
+    assert!(!dir.join("Missing.url").exists());
+    run_tool("icacls", &[&p, "/reset"]);
+    run_tool("attrib", &["-h", &p]);
+}

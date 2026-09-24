@@ -307,25 +307,51 @@ pub async fn item_frames(app: AppHandle, item: ItemId) -> CmdResult<Vec<IconFram
     .map_err(|e| e.to_string())?
 }
 
+/// Extension of a Reskin project (a saved or exported design).
+const PROJECT_EXTENSION: &str = "reskin";
+
+/// The Import dialog's file types, first shown first: everything Import
+/// takes (pictures, icons, shortcuts, programs and Reskin projects, which
+/// the editor opens or queues), projects alone, then any file.
+const IMPORT_FILTERS: &[(&str, &[&str])] = &[
+    (
+        "Images, icons, shortcuts and projects",
+        &[
+            "png",
+            "jpg",
+            "jpeg",
+            "gif",
+            "bmp",
+            "webp",
+            "ico",
+            "tif",
+            "tiff",
+            "lnk",
+            "url",
+            "exe",
+            "dll",
+            PROJECT_EXTENSION,
+        ],
+    ),
+    ("Reskin project", &[PROJECT_EXTENSION]),
+    ("All files", &["*"]),
+];
+
 #[tauri::command]
 pub async fn pick_files(app: AppHandle, purpose: PickPurpose) -> CmdResult<Vec<ItemInfo>> {
     tauri::async_runtime::spawn_blocking(move || {
         let dialog = app.dialog().file();
         let picked = match purpose {
-            PickPurpose::Import => dialog
-                .set_title("Import an image or icon")
-                .add_filter(
-                    "Images, icons and shortcuts",
-                    &[
-                        "png", "jpg", "jpeg", "gif", "bmp", "webp", "ico", "tif", "tiff", "lnk",
-                        "url", "exe", "dll",
-                    ],
+            PickPurpose::Import => IMPORT_FILTERS
+                .iter()
+                .fold(
+                    dialog.set_title("Import an image or icon"),
+                    |d, &(name, ext)| d.add_filter(name, ext),
                 )
-                .add_filter("All files", &["*"])
                 .blocking_pick_files(),
             PickPurpose::Project => dialog
                 .set_title("Open a Reskin project")
-                .add_filter("Reskin project", &["reskin"])
+                .add_filter("Reskin project", &[PROJECT_EXTENSION])
                 .blocking_pick_file()
                 .map(|f| vec![f]),
         };
@@ -423,6 +449,28 @@ pub(crate) mod tests {
                 "{notes:?}"
             );
         }
+    }
+
+    #[test]
+    fn import_offers_projects_among_everything_else_and_on_their_own() {
+        let (name, first) = IMPORT_FILTERS[0];
+        assert!(name.contains("projects"), "{name}");
+        for ext in ["png", "ico", "lnk", "url", "exe", PROJECT_EXTENSION] {
+            assert!(first.contains(&ext), "{ext}");
+        }
+        assert!(
+            IMPORT_FILTERS
+                .iter()
+                .any(|&(name, ext)| name == "Reskin project" && ext == [PROJECT_EXTENSION]),
+            "{IMPORT_FILTERS:?}"
+        );
+        let (name, ext) = IMPORT_FILTERS[IMPORT_FILTERS.len() - 1];
+        assert_eq!((name, ext), ("All files", &["*"][..]));
+        // What the dialog offers as a project opens as one.
+        assert_eq!(
+            extract::classify(Path::new(&format!("Design.{PROJECT_EXTENSION}"))),
+            ItemKind::Project
+        );
     }
 
     #[test]

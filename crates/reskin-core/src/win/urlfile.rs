@@ -6,7 +6,9 @@
 //! `[InternetShortcut.W]` section for non-ANSI paths. Every write is
 //! verified by re-reading the file; if the shell object did not persist the
 //! change (seen with some third-party `.url` files), the INI is edited
-//! directly instead, preserving its encoding.
+//! directly instead, preserving its encoding. The elevated helper does that
+//! only through a [`TrustedDir`] ([`set_url_icon_in`]), never following a
+//! link.
 
 use std::path::Path;
 
@@ -24,8 +26,12 @@ use windows::Win32::UI::Shell::{
 };
 use windows::core::{Interface, PCWSTR, PWSTR};
 
-use super::util::{ComScope, ResultExt, ini_bytes, pcwstr, read_ini, wide};
-use crate::{Error, Result};
+use super::access::TrustedDir;
+use super::util::{
+    ComScope, MAX_INI_BYTES, ResultExt, ini_bytes, parse_ini, pcwstr, read_ini, wide,
+};
+use crate::urlini::UrlFile;
+use crate::{Error, Result, paths};
 
 /// The custom icon of a `.url` file as stored (`IconFile`, raw — it may
 /// contain `%VARS%` or be relative to the file's folder) and `IconIndex`
@@ -39,16 +45,80 @@ pub fn read_url_icon(path: &Path) -> Result<(Option<String>, i32)> {
 /// Sets (`Some((icon_file, index))`) or clears (`None`) a `.url` file's
 /// custom icon.
 pub fn set_url_icon(path: &Path, icon: Option<(&str, i32)>) -> Result<()> {
+    set_icon(path, icon, &AnyFile(path))
+}
+
+/// [`set_url_icon`] for the elevated helper: `path` must be a plain file
+/// directly in `dir` (the Public Desktop; see [`TrustedDir::check_file`]),
+/// checked before the shell object edits it. The direct-file fallback
+/// reads and rewrites it only through `dir` ([`TrustedDir::read_file`],
+/// [`TrustedDir::replace_file`]), which never follow a link.
+pub fn set_url_icon_in(dir: &TrustedDir, path: &Path, icon: Option<(&str, i32)>) -> Result<()> {
+    dir.check_file(path)?;
+    set_icon(path, icon, &InDir { dir, path })
+}
+
+/// How the direct-file fallback reads and rewrites a `.url` file.
+trait IniFile {
+    fn read(&self) -> Result<UrlFile>;
+    /// Replaces the file's content with `bytes` in one step.
+    fn replace(&self, bytes: &[u8]) -> Result<()>;
+}
+
+/// A `.url` file the user may change: plain file access, and an atomic
+/// replace through a sibling file.
+struct AnyFile<'a>(&'a Path);
+
+impl IniFile for AnyFile<'_> {
+    fn read(&self) -> Result<UrlFile> {
+        read_ini(self.0)
+    }
+
+    fn replace(&self, bytes: &[u8]) -> Result<()> {
+        let mut tmp = self.0.as_os_str().to_owned();
+        tmp.push(paths::REWRITE_TEMP_SUFFIX);
+        std::fs::write(&tmp, bytes)?;
+        std::fs::rename(&tmp, self.0).inspect_err(|_| {
+            let _ = std::fs::remove_file(&tmp);
+        })?;
+        Ok(())
+    }
+}
+
+/// A `.url` file directly in a folder the elevated helper trusts.
+struct InDir<'a> {
+    dir: &'a TrustedDir,
+    path: &'a Path,
+}
+
+impl IniFile for InDir<'_> {
+    fn read(&self) -> Result<UrlFile> {
+        Ok(parse_ini(&self.dir.read_file(self.path, MAX_INI_BYTES)?))
+    }
+
+    fn replace(&self, bytes: &[u8]) -> Result<()> {
+        self.dir.replace_file(self.path, bytes)
+    }
+}
+
+/// Writes `icon` with the shell object, verifies it on disk (read as
+/// `file` reads), and falls back to rewriting the INI through `file`.
+fn set_icon(path: &Path, icon: Option<(&str, i32)>, file: &dyn IniFile) -> Result<()> {
     let com = {
         let _com = ComScope::enter()?;
         write_properties(path, icon)
     };
-    if com.is_ok() && persisted(path, icon)? {
+    if com.is_ok() && file.read()?.has_icon(icon) {
         return Ok(());
     }
-    // The shell object failed or silently dropped the change: edit the INI.
-    match write_ini(path, icon) {
-        Ok(()) if persisted(path, icon)? => Ok(()),
+    // The shell object failed or silently dropped the change: edit the INI,
+    // keeping every other key and the file's encoding.
+    let written = file.read().and_then(|mut ini| {
+        ini.set_icon(icon.map(|(f, _)| f), icon.map_or(0, |(_, i)| i));
+        file.replace(&ini_bytes(&ini))
+    });
+    match written {
+        Ok(()) if file.read()?.has_icon(icon) => Ok(()),
         Ok(()) => Err(Error::Other(format!(
             "{} did not keep the icon change",
             path.display()
@@ -59,15 +129,6 @@ pub fn set_url_icon(path: &Path, icon: Option<(&str, i32)>) -> Result<()> {
             _ => e,
         }),
     }
-}
-
-/// The file on disk now carries exactly `icon`.
-fn persisted(path: &Path, icon: Option<(&str, i32)>) -> Result<bool> {
-    let (file, index) = read_url_icon(path)?;
-    Ok(match icon {
-        Some((f, i)) => file.as_deref() == Some(f) && index == i,
-        None => file.is_none(),
-    })
 }
 
 fn prop(id: i32) -> PROPSPEC {
@@ -154,23 +215,5 @@ fn write_properties(path: &Path, icon: Option<(&str, i32)>) -> Result<()> {
         file.Save(PCWSTR::null(), true)
             .ctx(format!("save {}", path.display()))?;
     }
-    Ok(())
-}
-
-/// Fallback: rewrites the INI with [`crate::urlini::UrlFile::set_icon`],
-/// keeping every other key and the file's encoding (atomic replace via a
-/// sibling file).
-fn write_ini(path: &Path, icon: Option<(&str, i32)>) -> Result<()> {
-    let mut file = read_ini(path)?;
-    match icon {
-        Some((f, i)) => file.set_icon(Some(f), i),
-        None => file.set_icon(None, 0),
-    }
-    let mut tmp = path.as_os_str().to_owned();
-    tmp.push(".reskin-tmp");
-    std::fs::write(&tmp, ini_bytes(&file))?;
-    std::fs::rename(&tmp, path).inspect_err(|_| {
-        let _ = std::fs::remove_file(&tmp);
-    })?;
     Ok(())
 }

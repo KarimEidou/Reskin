@@ -277,6 +277,16 @@ impl UrlFile {
         }
     }
 
+    /// Whether the file carries exactly `icon`, as [`UrlFile::set_icon`]
+    /// writes it: `Some((file, index))` that icon file and index, `None`
+    /// no custom icon.
+    pub fn has_icon(&self, icon: Option<(&str, i32)>) -> bool {
+        match icon {
+            Some((file, index)) => self.icon_file() == Some(file) && self.icon_index() == index,
+            None => self.icon_file().is_none(),
+        }
+    }
+
     /// Serialises the file with CRLF line endings. Values of the `.W`
     /// section are UTF-7 encoded; line breaks inside other values (which
     /// INI cannot represent) are dropped. A value that reading would alter
