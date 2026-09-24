@@ -21,6 +21,19 @@ function ctxOf(w: number, h: number): Ctx2D {
 
 class CanvasTextRasterizer implements TextRasterizer {
   private readonly probe: Ctx2D = ctxOf(1, 1);
+  /** Reused render target (re-created only when the document size changes). */
+  private target: Ctx2D | null = null;
+
+  private targetFor(width: number, height: number): Ctx2D {
+    const t = this.target;
+    if (t && t.canvas.width === width && t.canvas.height === height) {
+      t.setTransform(1, 0, 0, 1, 0, 0);
+      t.clearRect(0, 0, width, height);
+      return t;
+    }
+    this.target = ctxOf(width, height);
+    return this.target;
+  }
 
   measure(props: TextProps): TextLayout {
     const ctx = this.probe;
@@ -35,7 +48,7 @@ class CanvasTextRasterizer implements TextRasterizer {
 
   render(props: TextProps, width: number, height: number, opts: TextRenderOptions): Surface {
     const layout = this.measure(props);
-    const ctx = ctxOf(width, height);
+    const ctx = this.targetFor(width, height);
     ctx.font = cssFont(props);
     ctx.fillStyle = cssColor({ color: { ...props.color, a: 1 } });
     ctx.textAlign = 'left';
@@ -52,19 +65,28 @@ class CanvasTextRasterizer implements TextRasterizer {
   }
 }
 
-/** Applies the colour's alpha after rendering (so overlapping glyphs do not double up) and pixel-art thresholding. */
+/**
+ * Applies the colour's alpha after rendering (so overlapping glyphs do not
+ * double up) and pixel-art thresholding. The text is one solid colour, so
+ * every covered pixel gets that exact colour back: the canvas stores
+ * premultiplied 8-bit values, which would otherwise quantise faint edges.
+ */
 function applyAlpha(s: Surface, alpha: number, crisp: boolean, color: TextProps['color']): void {
   const d = s.data;
   for (let p = 0; p < d.length; p += 4) {
     let a = d[p + 3];
     if (a === 0) continue;
-    if (crisp) {
-      a = a >= 128 ? 255 : 0;
-      d[p] = color.r;
-      d[p + 1] = color.g;
-      d[p + 2] = color.b;
+    if (crisp) a = a >= 128 ? 255 : 0;
+    a *= alpha;
+    if (a < 0.5) {
+      // Rounds to fully transparent: keep the (0, 0, 0, 0) convention.
+      d[p] = d[p + 1] = d[p + 2] = d[p + 3] = 0;
+      continue;
     }
-    d[p + 3] = a * alpha;
+    d[p] = color.r;
+    d[p + 1] = color.g;
+    d[p + 2] = color.b;
+    d[p + 3] = a;
   }
 }
 

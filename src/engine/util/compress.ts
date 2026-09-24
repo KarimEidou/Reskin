@@ -4,7 +4,15 @@
 
 type ByteStream = CompressionStream | DecompressionStream;
 
-async function pump(bytes: Uint8Array, stream: ByteStream): Promise<Uint8Array<ArrayBuffer>> {
+/** Thrown by `inflate` when the output would exceed its `maxBytes`. */
+export class OutputLimitError extends RangeError {
+  constructor(limit: number) {
+    super(`Decompressed data exceeds ${limit} bytes`);
+    this.name = 'OutputLimitError';
+  }
+}
+
+async function pump(bytes: Uint8Array, stream: ByteStream, maxBytes = Infinity): Promise<Uint8Array<ArrayBuffer>> {
   const writer = stream.writable.getWriter();
   // Write and read concurrently so large inputs cannot deadlock on
   // back-pressure. The write promise is observed so a failure (e.g. corrupt
@@ -20,8 +28,13 @@ async function pump(bytes: Uint8Array, stream: ByteStream): Promise<Uint8Array<A
   for (;;) {
     const { value, done } = await reader.read();
     if (done) break;
-    chunks.push(value);
     total += value.length;
+    if (total > maxBytes) {
+      // Stop decompressing right away (zip bombs) instead of after the fact.
+      await reader.cancel().catch(() => undefined);
+      throw new OutputLimitError(maxBytes);
+    }
+    chunks.push(value);
   }
   await writing;
   if (chunks.length === 1) return chunks[0] as Uint8Array<ArrayBuffer>;
@@ -53,8 +66,11 @@ export function deflate(bytes: Uint8Array): Promise<Uint8Array<ArrayBuffer>> {
   return pump(bytes, new CompressionStream('deflate'));
 }
 
-/** Inflates zlib data; rejects on corrupt input. */
-export function inflate(bytes: Uint8Array): Promise<Uint8Array<ArrayBuffer>> {
+/**
+ * Inflates zlib data; rejects on corrupt input, and with `OutputLimitError`
+ * as soon as the output grows past `maxBytes` (use it for untrusted data).
+ */
+export function inflate(bytes: Uint8Array, maxBytes = Infinity): Promise<Uint8Array<ArrayBuffer>> {
   requireStreams();
-  return pump(bytes, new DecompressionStream('deflate'));
+  return pump(bytes, new DecompressionStream('deflate'), maxBytes);
 }

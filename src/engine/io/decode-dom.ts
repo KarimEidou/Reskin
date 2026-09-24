@@ -46,11 +46,21 @@ async function viaImageElement(blob: Blob): Promise<CanvasImageSource & { width:
   }
 }
 
+/** Longest side a decoded image keeps; larger images are scaled down while decoding. */
+export const MAX_DECODE_SIZE = 4096;
+
 /**
  * Decodes an image to a surface. SVGs without intrinsic size render at
- * `fallbackSize`. Rejects when the data is not a decodable image.
+ * `fallbackSize`; images larger than `maxSize` on a side are scaled down
+ * (aspect kept) so huge files cannot exhaust memory — everything is fitted
+ * into the 512 document afterwards anyway. Rejects when the data is not a
+ * decodable image.
  */
-export async function decodeImage(input: ImageInput, fallbackSize = 512): Promise<Surface> {
+export async function decodeImage(
+  input: ImageInput,
+  fallbackSize = 512,
+  maxSize = MAX_DECODE_SIZE,
+): Promise<Surface> {
   if (typeof createImageBitmap !== 'function' && typeof Image === 'undefined') {
     throw new Error('Image decoding needs a browser environment');
   }
@@ -64,16 +74,23 @@ export async function decodeImage(input: ImageInput, fallbackSize = 512): Promis
     // e.g. SVG in Chromium's createImageBitmap.
     source = await viaImageElement(blob);
   }
-  const w = source.width || fallbackSize;
-  const h = source.height || fallbackSize;
-  const canvas = createCanvas(w, h);
-  const ctx = canvas.getContext('2d', { willReadFrequently: true }) as
-    | OffscreenCanvasRenderingContext2D
-    | CanvasRenderingContext2D
-    | null;
-  if (!ctx) throw new Error('2D canvas context unavailable');
-  ctx.drawImage(source, 0, 0, w, h);
-  bitmap?.close();
-  const data = ctx.getImageData(0, 0, w, h).data;
-  return new Surface(w, h, data);
+  try {
+    const sw = source.width || fallbackSize;
+    const sh = source.height || fallbackSize;
+    const k = Math.min(1, maxSize / Math.max(sw, sh));
+    const w = Math.max(1, Math.round(sw * k));
+    const h = Math.max(1, Math.round(sh * k));
+    const canvas = createCanvas(w, h);
+    const ctx = canvas.getContext('2d', { willReadFrequently: true }) as
+      | OffscreenCanvasRenderingContext2D
+      | CanvasRenderingContext2D
+      | null;
+    if (!ctx) throw new Error('2D canvas context unavailable');
+    ctx.imageSmoothingQuality = 'high';
+    ctx.drawImage(source, 0, 0, w, h);
+    const data = ctx.getImageData(0, 0, w, h).data;
+    return new Surface(w, h, data);
+  } finally {
+    bitmap?.close();
+  }
 }

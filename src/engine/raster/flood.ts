@@ -86,7 +86,8 @@ export function floodFill(
       while (x0 > 0 && !mask[row + x0 - 1] && matches(row + x0 - 1)) x0--;
       while (x1 < width - 1 && !mask[row + x1 + 1] && matches(row + x1 + 1)) x1++;
       mark(x0, x1, y);
-      for (const ny of [y - 1, y + 1]) {
+      // Queue one seed per matching run in the rows above and below.
+      for (let ny = y - 1; ny <= y + 1; ny += 2) {
         if (ny < 0 || ny >= height) continue;
         const nrow = ny * width;
         let inRun = false;

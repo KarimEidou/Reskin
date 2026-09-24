@@ -122,7 +122,11 @@ export interface Tool<O extends object = object> {
   pointerUp(ctx: ToolContext, p: PointerInput, options: O): void;
   /** Pointer moved with no button down (null = left the canvas). */
   hover?(ctx: ToolContext, p: PointerInput | null, options: O): void;
-  /** Aborts the gesture in progress (Esc, pointercancel). */
+  /**
+   * Aborts the gesture in progress (Esc, pointercancel). Tools with state
+   * across gestures (`hasPending`) revert only the current gesture when one
+   * is in progress, and discard the pending state when called without one.
+   */
   cancel(ctx: ToolContext): void;
   /** Finishes state kept across gestures (e.g. a pending transform). */
   commit?(ctx: ToolContext): void;

@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { readdirSync, readFileSync, statSync } from 'node:fs';
-import { join, relative } from 'node:path';
+import { dirname, join, relative } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { Engine } from './engine';
 import type { EngineEvent } from './engine';
@@ -186,6 +186,11 @@ describe('Engine painting & history', () => {
     e.undo();
     expect(raster(e).equals(original)).toBe(true);
     expect(e.doc.pixelArt).toBeNull();
+    // Only the supported grids are accepted.
+    const msgs = collect(e);
+    e.setPixelArt(17 as never);
+    expect(e.doc.width).toBe(512);
+    expect(msgs).toContainEqual({ kind: 'message', level: 'warning', text: 'Pixel-art grids are 16, 24, 32, 48, 64 px' });
   });
 
   it('tool overrides route input without committing pending work', () => {
@@ -234,6 +239,8 @@ describe('Engine painting & history', () => {
     expect(e.secondary).toEqual({ r: 255, g: 0, b: 10, a: 1 });
     e.setSymmetry({ mode: 'radial', rays: 200 });
     expect(e.symmetry.rays).toBe(64);
+    e.setSymmetry({ rays: Number.NaN, cx: Number.POSITIVE_INFINITY, cy: 40 });
+    expect(e.symmetry).toMatchObject({ rays: 64, cx: null, cy: 40 });
     expect(events.map((ev) => ev.kind)).toEqual(expect.arrayContaining(['tool', 'color', 'symmetry', 'overlay']));
   });
 
@@ -275,6 +282,29 @@ describe('Engine documents', () => {
     expect(f.layerThumbnail(f.doc.layers[0].id, 4)!.width).toBe(4);
   });
 
+  it('clamps out-of-range edits so every document it produces loads again', async () => {
+    const e = new Engine({ doc: createDocument({ pixelArt: 16 }) });
+    const base = e.doc.activeLayerId!;
+    e.setLayerProps(base, { opacity: Number.NaN });
+    expect(e.getLayer(base)!.opacity).toBe(1);
+    e.setLayerProps(base, {
+      opacity: 7,
+      effects: [createEffect('dropShadow', { blur: -3, distance: 1e9, opacity: 2, color: { r: 300, g: -1, b: Number.NaN, a: 5 } })],
+    });
+    expect(e.getLayer(base)!.effects[0]).toMatchObject({ blur: 0, distance: 4096, opacity: 1, color: { r: 255, g: 0, b: 0, a: 1 } });
+    const id = e.addTextLayer({ text: 'a', color: { r: 300, g: 0, b: 0, a: 1 }, fontSize: Number.POSITIVE_INFINITY })!;
+    e.updateText(id, { lineHeight: 20, fontSize: 5000, weight: 1234, x: Number.NaN });
+    const t = e.getLayer(id) as TextLayer;
+    expect([t.color.r, t.fontSize, t.lineHeight, t.weight, Number.isFinite(t.x)]).toEqual([255, 4096, 10, 900, true]);
+    // Pixel-art → master scales sizes by 32: still within range.
+    e.setPixelArt(null);
+    expect((e.getLayer(id) as TextLayer).fontSize).toBe(4096);
+    const f = new Engine();
+    await f.loadProject(await e.serialize());
+    expect(f.doc.layers).toHaveLength(2);
+    expect(e.setLayerProps(base, { effects: [{ type: 'bevel' } as never] })).toBe(false);
+  });
+
   it('newDocument resets history; dispose silences events', () => {
     const e = new Engine();
     e.addLayer();
@@ -313,15 +343,33 @@ describe('module boundaries', () => {
   }
 
   it('the pure core never imports DOM-only modules', () => {
+    let checked = 0;
     for (const file of files(root)) {
       const rel = relative(root, file).replace(/\\/g, '/').replace(/\.ts$/, '');
       if (DOM_MODULES.includes(rel) || rel.endsWith('.test')) continue;
       const src = readFileSync(file, 'utf8');
-      for (const m of src.matchAll(/from\s+'([^']+)'/g)) {
+      for (const m of src.matchAll(/(?:from|import)\s*\(?\s*'([^']+)'/g)) {
         const target = m[1];
-        expect(DOM_MODULES.some((d) => target.endsWith(d)), `${rel} imports ${target}`).toBe(false);
+        // Resolve relative and `$engine/` specifiers to an engine-relative module path.
+        const resolved = target.startsWith('$engine/')
+          ? target.slice('$engine/'.length)
+          : target.startsWith('.')
+            ? relative(root, join(dirname(file), target)).replace(/\\/g, '/')
+            : null;
+        if (resolved === null) continue;
+        checked++;
+        expect(DOM_MODULES.includes(resolved.replace(/\.ts$/, '')), `${rel} imports ${target}`).toBe(false);
       }
     }
+    expect(checked).toBeGreaterThan(100);
+  });
+
+  it('DEFAULT_ICO_SIZES matches ICO_SIZES in crates/reskin-core/src/model.rs', () => {
+    const model = readFileSync(join(root, '../../crates/reskin-core/src/model.rs'), 'utf8');
+    const m = /pub const ICO_SIZES: \[u32; \d+\] = \[([^\]]*)\]/.exec(model);
+    expect(m, 'ICO_SIZES not found in model.rs').not.toBeNull();
+    const rust = m![1].split(',').map((v) => Number(v.trim()));
+    expect([...api.DEFAULT_ICO_SIZES]).toEqual(rust);
   });
 
   it('the public barrel loads in Node and exposes the main API', () => {

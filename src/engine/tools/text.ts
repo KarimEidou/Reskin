@@ -1,14 +1,16 @@
-// Text tool: click an existing text layer to edit it (drag to move it), or
-// click elsewhere to create a new text layer anchored at the click. The
-// Engine then asks the UI to open its inline editor (`textEdit` event); the
-// UI writes the text with `engine.updateText`, and `engine.endTextEdit()`
-// removes a layer that was left empty.
+// Text tool: click an existing text layer to edit it (drag to move it: one
+// "Move text" entry on release, Esc reverts), or click elsewhere to create a
+// new text layer anchored at the click. The Engine then asks the UI to open
+// its inline editor (`textEdit` event); the UI writes the text with
+// `engine.updateText`, and `engine.endTextEdit()` removes a layer that was
+// left empty.
 
 import type { CursorHint, Tool, ToolContext } from './types';
 import type { PointerInput } from '../input/pointer';
 import type { TextAlign, TextLayer } from '../doc/types';
 import { createTextLayer } from '../doc/document';
-import { addLayerOp, setTextPropsOp } from '../doc/ops';
+import { addLayerOp } from '../doc/ops';
+import { PropsCommand } from '../history/commands';
 import { hitTestText, textQuad } from '../text/text';
 import type { OverlayPainter } from '../render/overlay';
 
@@ -32,8 +34,6 @@ interface MoveDrag {
   px: number;
   py: number;
   moved: boolean;
-  /** Merge key unique to this drag, so the whole drag is one history entry. */
-  key: string;
 }
 
 /** Top-most visible text layer under (x, y). */
@@ -54,7 +54,6 @@ export class TextTool implements Tool<TextToolOptions> {
   readonly shortcut = 'T';
   readonly usesSymmetry = false;
   private drag: MoveDrag | null = null;
-  private serial = 0;
 
   defaultOptions(): TextToolOptions {
     return defaultTextToolOptions();
@@ -70,18 +69,14 @@ export class TextTool implements Tool<TextToolOptions> {
     if (hit) {
       ctx.setActiveLayer(hit.id);
       if (!hit.locked) {
-        this.drag = {
-          layer: hit,
-          startX: hit.x,
-          startY: hit.y,
-          px: p.x,
-          py: p.y,
-          moved: false,
-          key: `text-move:${hit.id}:${++this.serial}`,
-        };
+        this.drag = { layer: hit, startX: hit.x, startY: hit.y, px: p.x, py: p.y, moved: false };
       }
       return;
     }
+    // Close the current edit first: a text it created and left empty is then
+    // rolled back without history entries, and the new layer's own session
+    // starts right after its "Add text" entry.
+    ctx.requestTextEdit(null);
     const layer = createTextLayer(ctx.doc, {
       text: '',
       name: 'Text',
@@ -98,6 +93,7 @@ export class TextTool implements Tool<TextToolOptions> {
     ctx.requestTextEdit(layer.id);
   }
 
+  /** Moves the layer live (not recorded); the release records one entry. */
   pointerMove(ctx: ToolContext, p: PointerInput): void {
     const d = this.drag;
     if (!d) return;
@@ -105,10 +101,7 @@ export class TextTool implements Tool<TextToolOptions> {
     const dy = p.y - d.py;
     if (!d.moved && Math.hypot(dx, dy) * ctx.viewScale < 3) return;
     d.moved = true;
-    ctx.execute(setTextPropsOp(ctx.doc, d.layer.id, { x: d.startX + dx, y: d.startY + dy }), {
-      mergeKey: d.key,
-      mergeWindowMs: Infinity,
-    });
+    this.place(ctx, d, d.startX + dx, d.startY + dy);
   }
 
   pointerUp(ctx: ToolContext, p: PointerInput): void {
@@ -116,20 +109,27 @@ export class TextTool implements Tool<TextToolOptions> {
     if (!d) return;
     this.pointerMove(ctx, p);
     this.drag = null;
-    if (!d.moved) ctx.requestTextEdit(d.layer.id);
+    if (!d.moved) {
+      ctx.requestTextEdit(d.layer.id);
+      return;
+    }
+    const { x, y } = d.layer;
+    if (x === d.startX && y === d.startY) return;
+    ctx.execute(new PropsCommand('Move text', d.layer, { x: d.startX, y: d.startY }, { x, y }));
   }
 
   cancel(ctx: ToolContext): void {
     const d = this.drag;
     if (!d) return;
     this.drag = null;
-    // Merges into the drag's own history entry, so the net effect is nothing.
-    if (d.moved) {
-      ctx.execute(setTextPropsOp(ctx.doc, d.layer.id, { x: d.startX, y: d.startY }), {
-        mergeKey: d.key,
-        mergeWindowMs: Infinity,
-      });
-    }
+    if (d.moved) this.place(ctx, d, d.startX, d.startY);
+  }
+
+  private place(ctx: ToolContext, d: MoveDrag, x: number, y: number): void {
+    if (d.layer.x === x && d.layer.y === y) return;
+    d.layer.x = x;
+    d.layer.y = y;
+    ctx.emitChanges([{ kind: 'layers' }]);
   }
 
   drawOverlay(painter: OverlayPainter, ctx: ToolContext): void {

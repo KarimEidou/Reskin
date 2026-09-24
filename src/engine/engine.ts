@@ -8,7 +8,7 @@
 
 import type { SizedPng } from '$lib/ipc/types';
 import type { Rgba } from './color/color';
-import { BLACK, WHITE, rgba } from './color/color';
+import { BLACK, WHITE, clampRgba } from './color/color';
 import type { Doc, Layer, LayerProps, PixelGrid, RasterLayer, TextLayer, TextProps } from './doc/types';
 import type { NewDocumentOptions } from './doc/document';
 import { createDocument, createRasterLayer, createTextLayer, getLayer } from './doc/document';
@@ -183,6 +183,18 @@ export class Engine {
     if (selection) this.emit({ kind: 'selection' });
     for (const [layerId, rect] of pixels) this.emit({ kind: 'pixels', layerId, rect });
     this.syncTextCaches(true);
+    if (layers) this.dropStaleTextEdit();
+  }
+
+  /**
+   * Closes the inline text editor when its layer is gone or no longer a
+   * text layer (deleted, merged, flattened, rasterized, undone).
+   */
+  private dropStaleTextEdit(): void {
+    const s = this.textEdit;
+    if (!s || getLayer(this._doc, s.layerId)?.kind === 'text') return;
+    this.textEdit = null;
+    this.emit({ kind: 'textEdit', layerId: null });
   }
 
   private message(text: string, level: MessageLevel = 'info'): void {
@@ -309,7 +321,7 @@ export class Engine {
   }
 
   setColor(which: 'primary' | 'secondary', c: Rgba): void {
-    const v = rgba(clamp(c.r, 0, 255), clamp(c.g, 0, 255), clamp(c.b, 0, 255), clamp(c.a, 0, 1));
+    const v = clampRgba(c);
     if (which === 'primary') this._primary = v;
     else this._secondary = v;
     this.emit({ kind: 'color' });
@@ -331,8 +343,12 @@ export class Engine {
   }
 
   setSymmetry(patch: Partial<SymmetrySettings>): void {
-    this._symmetry = { ...this._symmetry, ...patch };
-    this._symmetry.rays = Math.max(2, Math.min(64, Math.round(this._symmetry.rays)));
+    const next = { ...this._symmetry, ...patch };
+    next.rays = Number.isFinite(next.rays) ? Math.max(2, Math.min(64, Math.round(next.rays))) : this._symmetry.rays;
+    // A non-finite centre falls back to the document centre.
+    if (next.cx !== null && !Number.isFinite(next.cx)) next.cx = null;
+    if (next.cy !== null && !Number.isFinite(next.cy)) next.cy = null;
+    this._symmetry = next;
     this.emit({ kind: 'symmetry' });
     this.emit({ kind: 'overlay' });
   }
@@ -582,7 +598,6 @@ export class Engine {
   deleteLayer(id: string | null = this._doc.activeLayerId): boolean {
     if (id === null) return false;
     this.settle('commit');
-    if (this.textEdit?.layerId === id) this.textEdit = null;
     return this.run(() => deleteLayerOp(this._doc, id));
   }
 
@@ -652,6 +667,7 @@ export class Engine {
    * `edit` mutates `surface` directly; only changed tiles are stored.
    */
   editLayerPixels(id: string, label: string, edit: (surface: Surface) => void): boolean {
+    if (this.disposed) return false;
     this.settle('commit');
     const layer = getLayer(this._doc, id);
     if (!layer || layer.kind !== 'raster') {
@@ -733,12 +749,24 @@ export class Engine {
 
   /**
    * Closes the edit session. A text layer the session created and left
-   * empty is removed without leaving history entries behind.
+   * empty is removed without leaving history entries behind; an existing
+   * text layer that was emptied is deleted (one undoable step).
    */
   endTextEdit(): void {
+    this.closeTextEdit(true);
+  }
+
+  /**
+   * Closes the edit session (see `endTextEdit`). With `deleteEmptied` false,
+   * an emptied pre-existing layer is kept, so history navigation (undo,
+   * redo, jump) never pushes a new entry. Returns true when the session's
+   * own entries were rolled back.
+   */
+  private closeTextEdit(deleteEmptied: boolean): boolean {
     const s = this.textEdit;
-    if (!s) return;
+    if (!s) return false;
     this.textEdit = null;
+    let rolledBack = false;
     const layer = getLayer(this._doc, s.layerId);
     if (layer?.kind === 'text' && layer.text.trim() === '') {
       // Undo "add + edits" when nothing else happened since, so an abandoned
@@ -759,13 +787,15 @@ export class Engine {
       if (steps > 0) {
         const changes = h.jumpTo(this._doc, h.index - steps);
         h.discardRedo();
+        rolledBack = true;
         this.emitChanges(changes);
         this.emit({ kind: 'history' });
-      } else if (this._doc.layers.length > 1) {
+      } else if (deleteEmptied && this._doc.layers.length > 1) {
         this.run(() => deleteLayerOp(this._doc, s.layerId));
       }
     }
     this.emit({ kind: 'textEdit', layerId: null });
+    return rolledBack;
   }
 
   /** Measured layout of a text layer (real fonts when a rasterizer is installed). */
@@ -840,14 +870,19 @@ export class Engine {
     return this.history.index;
   }
 
-  /** Undo; a pending transform is cancelled instead. */
+  /**
+   * Undo. A pending transform is cancelled instead, and a text layer that
+   * was just created and is still empty is removed instead (that is the
+   * step being undone).
+   */
   undo(): boolean {
+    if (this.disposed) return false;
     if (this.gesture) this.pointerCancel();
     if (this.hasPending) {
       this.settle('cancel');
       return true;
     }
-    this.endTextEdit();
+    if (this.closeTextEdit(false)) return true;
     const changes = this.history.undo(this._doc);
     if (!changes) return false;
     this.emitChanges(changes);
@@ -856,8 +891,9 @@ export class Engine {
   }
 
   redo(): boolean {
+    if (this.disposed) return false;
     this.settle('commit');
-    this.endTextEdit();
+    this.closeTextEdit(false);
     const changes = this.history.redo(this._doc);
     if (!changes) return false;
     this.emitChanges(changes);
@@ -867,8 +903,9 @@ export class Engine {
 
   /** Jumps to a history position (0 = oldest reachable state). */
   jumpTo(index: number): void {
+    if (this.disposed) return;
     this.settle('commit');
-    this.endTextEdit();
+    this.closeTextEdit(false);
     const changes = this.history.jumpTo(this._doc, index);
     this.emitChanges(changes);
     this.emit({ kind: 'history' });
@@ -1001,6 +1038,3 @@ export class Engine {
   }
 }
 
-function clamp(v: number, lo: number, hi: number): number {
-  return Number.isFinite(v) ? Math.min(hi, Math.max(lo, v)) : lo;
-}

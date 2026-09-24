@@ -13,14 +13,18 @@ import { shapeDragBox } from './shape';
 
 export interface SelectOptions {
   mode: SelectionOp;
-  /** Soft edge (ellipse always anti-aliases unless false). */
+  /**
+   * Anti-aliased edge (default: on for ellipses, off for rectangles, which
+   * then snap to whole pixels like a classic marquee). Pixel-art documents
+   * always select whole pixels.
+   */
   antialias: boolean;
   /** Feather radius, document px. */
   feather: number;
 }
 
-export function defaultSelectOptions(): SelectOptions {
-  return { mode: 'replace', antialias: true, feather: 0 };
+export function defaultSelectOptions(shape: 'rect' | 'ellipse' = 'ellipse'): SelectOptions {
+  return { mode: 'replace', antialias: shape === 'ellipse', feather: 0 };
 }
 
 export function selectionOpFor(p: PointerInput, fallback: SelectionOp): SelectionOp {
@@ -50,7 +54,7 @@ export class MarqueeTool implements Tool<SelectOptions> {
   ) {}
 
   defaultOptions(): SelectOptions {
-    return defaultSelectOptions();
+    return defaultSelectOptions(this.shape);
   }
 
   cursor(): CursorHint {
@@ -89,15 +93,16 @@ export class MarqueeTool implements Tool<SelectOptions> {
       if (d.op === 'replace' && doc.selection) ctx.setSelection(null, 'Deselect');
       return;
     }
+    const antialias = o.antialias && doc.pixelArt === null;
     // Rectangles snap to whole pixels (crisp edges) unless anti-aliased.
     const r =
-      this.shape === 'rect' && !o.antialias
+      this.shape === 'rect' && !antialias
         ? { x: Math.round(x), y: Math.round(y), w: Math.round(x + w) - Math.round(x), h: Math.round(y + h) - Math.round(y) }
         : { x, y, w, h };
     let shape =
       this.shape === 'rect'
-        ? rectMask(doc.width, doc.height, r, o.antialias)
-        : ellipseMask(doc.width, doc.height, r, o.antialias);
+        ? rectMask(doc.width, doc.height, r, antialias)
+        : ellipseMask(doc.width, doc.height, r, antialias);
     if (o.feather > 0) shape = featherMask(shape, o.feather) ?? shape;
     ctx.setSelection(combineMasks(doc.selection, shape, d.op), this.label);
   }

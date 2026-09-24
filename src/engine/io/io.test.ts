@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
+  MAX_PROJECT_LAYERS,
   PROJECT_VERSION,
   ProjectError,
   deserializeProject,
@@ -15,7 +16,7 @@ import { createEffect } from '../doc/effects';
 import type { Doc, RasterLayer, TextLayer } from '../doc/types';
 import { Surface } from '../raster/surface';
 import { encodeBase64 } from '../util/base64';
-import { deflate } from '../util/compress';
+import { OutputLimitError, deflate, inflate } from '../util/compress';
 import { seededRandom } from '../test-helpers';
 
 function randomize(s: Surface, seed: number): void {
@@ -63,6 +64,16 @@ describe('.reskin projects', () => {
     expect(back.seq).toBeGreaterThanOrEqual(3);
   });
 
+  it('snapshots pixels when serialization starts', async () => {
+    const doc = createDocument({ pixelArt: 16 });
+    const s = (doc.layers[0] as RasterLayer).surface;
+    s.fill(1, 2, 3, 255);
+    const pending = serializeProject(doc);
+    s.fill(9, 9, 9, 9); // an edit while the compressor is still running
+    const back = await deserializeProject(await pending);
+    expect((back.layers[0] as RasterLayer).surface.getPixel(5, 5)).toEqual([1, 2, 3, 255]);
+  });
+
   it('round-trips pixel-art documents', async () => {
     const doc = createDocument({ pixelArt: 24 });
     randomize((doc.layers[0] as RasterLayer).surface, 9);
@@ -72,11 +83,11 @@ describe('.reskin projects', () => {
   });
 
   it('migrates version 0 (opacity 0..100, no ids/effects)', async () => {
-    const px = new Uint8Array(4 * 4 * 4).fill(200);
+    const px = new Uint8Array(16 * 16 * 4).fill(200);
     const v0 = {
       format: 'reskin',
       version: 0,
-      size: 4,
+      size: 16,
       name: 'Old',
       layers: [
         { name: 'Base', visible: true, opacity: 100, pixels: encodeBase64(await deflate(px)) },
@@ -91,7 +102,8 @@ describe('.reskin projects', () => {
     ]);
     expect(p.activeLayerId).toBe('L2');
     const doc = await deserializeProject(v0);
-    expect(doc.width).toBe(4);
+    expect(doc.width).toBe(16);
+    expect(doc.pixelArt).toEqual({ grid: 16 });
     expect(doc.layers[1].blend).toBe('multiply');
     expect((doc.layers[0] as RasterLayer).surface.getPixel(3, 3)).toEqual([200, 200, 200, 200]);
     expect(doc.meta.name).toBe('Old');
@@ -127,11 +139,50 @@ describe('.reskin projects', () => {
     ).rejects.toThrow(/effects\[0\]\.type/);
   });
 
+  it('only accepts the 512 master or a pixel-art grid as the document size', async () => {
+    const good = JSON.parse(await serializeProject(createDocument({ pixelArt: 16 })));
+    await expect(deserializeProject({ ...good, width: 16, height: 16, pixelArt: null })).rejects.toThrow(
+      /width: expected 512/,
+    );
+    await expect(deserializeProject({ ...good, width: 4096, height: 4096, pixelArt: null })).rejects.toThrow(/width/);
+    await expect(deserializeProject({ ...good, width: 20, height: 20, pixelArt: { grid: 20 } })).rejects.toThrow(
+      /pixelArt\.grid/,
+    );
+    const v0 = { format: 'reskin', version: 0, size: 100, layers: [] };
+    expect(() => migrateProject(v0)).toThrow(/size: expected 512/);
+  });
+
+  it('caps the layer count', async () => {
+    const good = JSON.parse(await serializeProject(createDocument({ pixelArt: 16 })));
+    const layers = Array.from({ length: MAX_PROJECT_LAYERS + 1 }, (_, i) => ({ ...good.layers[0], id: `L${i + 1}` }));
+    await expect(deserializeProject({ ...good, layers })).rejects.toThrow(/at most 256 layers/);
+  });
+
+  it('stops inflating pixel blobs that decompress past the layer size (zip bombs)', async () => {
+    const good = JSON.parse(await serializeProject(createDocument({ pixelArt: 16 })));
+    // 1 MB of zeros deflates to about 1 KB, but a 16×16 layer holds only 1024 bytes.
+    good.layers[0].pixels = encodeBase64(await deflate(new Uint8Array(1 << 20)));
+    await expect(deserializeProject(good)).rejects.toThrow(/layers\[0\]\.pixels: more than 1024 bytes/);
+    good.layers[0].pixels = 'A'.repeat(4096);
+    await expect(deserializeProject(good)).rejects.toThrow(/pixel data is too long/);
+  });
+
   it('fills missing effect fields from defaults', async () => {
     const good = JSON.parse(await serializeProject(createDocument({ pixelArt: 16 })));
     good.layers[0].effects = [{ type: 'outerGlow', size: 3 }];
     const doc = await deserializeProject(good);
     expect(doc.layers[0].effects[0]).toEqual({ ...createEffect('outerGlow'), size: 3 });
+  });
+});
+
+describe('zlib helpers', () => {
+  it('round-trip and enforce an output limit', async () => {
+    const data = Uint8Array.from({ length: 100_000 }, (_, i) => (i * 7) % 251);
+    const z = await deflate(data);
+    expect(await inflate(z)).toEqual(data);
+    expect(await inflate(z, data.length)).toEqual(data);
+    await expect(inflate(z, data.length - 1)).rejects.toBeInstanceOf(OutputLimitError);
+    await expect(inflate(Uint8Array.of(1, 2, 3))).rejects.toThrow();
   });
 });
 

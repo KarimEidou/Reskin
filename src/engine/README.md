@@ -134,15 +134,15 @@ pressure is normalised to 1.
 
 | id | Shortcut | Options (defaults) |
 | --- | --- | --- |
-| `move` | V | `handleTolerance` 7 (screen px). First drag moves; then handles scale (Shift keeps ratio, Alt from centre), outside corners rotate (Shift 15°). Enter/tool switch commits; Esc/undo cancels. Moves the selected pixels and the selection when there is one. |
-| `selectRect` / `selectEllipse` | M / Shift+M | `mode` replace/add/subtract/intersect, `antialias`, `feather`. Shift/Alt at press = add/subtract (both = intersect); during drag Shift = square, Alt = from centre; click = deselect. |
-| `brush` | B | `size` 24, `hardness` 0.8, `spacing` 0.15 (× diameter), `flow` 1, `opacity` 1, `pressureSize` true, `pressureOpacity` false, `minSize` 0.2, `smoothing` 0.3 (1€), `catchUp` true. Right button paints the secondary colour. |
+| `move` | V | `handleTolerance` 7 (screen px). First drag moves; then handles scale (Shift keeps ratio, Alt from centre), outside corners rotate (Shift 15°). Enter/tool switch commits the whole session as one entry; undo or Esc cancels it — Esc (or pointercancel) *during* a drag reverts only that drag. Moves the selected pixels and the selection when there is one. |
+| `selectRect` / `selectEllipse` | M / Shift+M | `mode` replace/add/subtract/intersect, `antialias` (default off for rectangles — they snap to whole pixels — on for ellipses; always off in pixel-art documents), `feather`. Shift/Alt at press = add/subtract (both = intersect); during drag Shift = square, Alt = from centre; click = deselect. |
+| `brush` | B | `size` 24, `hardness` 0.8, `spacing` 0.15 (× diameter), `flow` 1, `opacity` 1, `pressureSize` true, `pressureOpacity` false (pressure caps how opaque each dab can build up to, so a light touch stays light), `minSize` 0.2, `smoothing` 0.3 (1€), `catchUp` true. Right button paints the secondary colour. |
 | `pencil` | P | `size` 1, `pixelPerfect` true (removes L-corners), `opacity` 1. |
 | `eraser` | E | Same as brush (hardness 0.9). |
 | `fill` | G | `tolerance` 32 (0..255, max channel Δ on premultiplied RGBA), `contiguous` true, `sampleMerged` false, `opacity` 1. |
 | `gradient` | Shift+G | `kind` linear/radial/conic, `spread` pad/repeat/reflect, `source` 'colors' (primary→secondary) or 'custom' (`stops`), `reverse`, `opacity`, `dither` true. Shift snaps 15°. |
 | `shape` | U | `kind` rect/roundedRect/ellipse/line/arrow/polygon/star/heart/squircle, `fill`, `stroke`, `strokeWidth` 8, `cornerRadius` 64, `sides` 6, `innerRatio` 0.5, `opacity`. Fill = primary; stroke = secondary when both are on. Shift constrains, Alt from centre. |
-| `text` | T | `fontFamily` 'Segoe UI', `fontSize` 64, `weight` 600, `italic`, `align` 'center'. Click empty space → new text layer + `textEdit`; click text → edit; drag text → move. |
+| `text` | T | `fontFamily` 'Segoe UI', `fontSize` 64, `weight` 600, `italic`, `align` 'center'. Click empty space → new text layer + `textEdit` (closing the previous edit first); click text → edit; drag text → move (one "Move text" entry on release; Esc reverts). |
 | `eyedropper` | I | `sample` composite/layer, `size` 1/3/5. Right button/Alt → secondary. |
 | `hand` | H | — (needs `screenX/screenY` on input and a viewport) |
 | `zoom` | Z | `zoomOut` false. Click steps, horizontal drag scrubs. |
@@ -166,7 +166,12 @@ label, fn(surface))` (any custom pixel edit as one undo step; only changed
 tiles are stored), `layerThumbnail(id, size)`, `thumbnail(size)`.
 
 Refused operations (locked layer, last layer, nothing below to merge…)
-return `false`/`null` and emit a `message`.
+return `false`/`null` and emit a `message`. Values are clamped into the
+supported ranges (opacity 0..1, effect sizes/distances and font size up to
+`MAX_PARAM_PX` = 4096, line height 0.5..10, weight 100..900, colours; non-finite
+numbers are ignored — see `normalizeEffect`, `normalizeTextProps`,
+`clampRgba`), the same ranges the `.reskin` loader accepts, so every document
+the engine produces can be saved and loaded again.
 
 Blend modes (`BLEND_MODES`): normal, multiply, screen, overlay, darken,
 lighten, color-dodge, color-burn, hard-light, soft-light, difference,
@@ -180,7 +185,10 @@ shadow, inner outline on top) and blended with the layer's mode and opacity.
 
 `beginTextEdit(id)`, `updateText(id, patch)` (typing merges into one entry
 per edit session), `endTextEdit()` (a new text left empty disappears without
-history entries), `textLayout(layer)` (measured lines; use with `textQuad`
+history entries; an existing text emptied is deleted as one step). Undo while
+a new text is still empty removes it (and nothing else). The engine emits
+`textEdit: null` itself whenever the edited layer goes away (deleted, merged,
+rasterized, undone). `textLayout(layer)` (measured lines; use with `textQuad`
 to place an inline editor). Text layers keep `text, fontFamily, fontSize,
 weight, italic, align, color, x, y, rotation, lineHeight`; `(x, y)` is the top
 of the first line at the left/centre/right edge per `align`, rotation is
@@ -244,13 +252,19 @@ const [png] = await toSizedPngs(engine.doc, [256]);           // or exportPng(do
   (`format: 'reskin', version: 1`), pixels as base64 zlib RGBA. Older files
   are upgraded by `migrateProject` (v0 → v1 is the reference migration).
   Everything is validated; errors name the field (`layers[2].opacity: …`).
+  Loaded files must be 512 px (or the pixel-art grid) with at most
+  `MAX_PROJECT_LAYERS` (256) layers, and pixel blobs are inflated with a hard
+  output limit (`inflate(bytes, maxBytes)`), so hostile files cannot exhaust
+  memory.
 - `new Autosave({ produce: () => engine.serialize(), save: (d) =>
   commands.autosave(d), delayMs, maxWaitMs })` — call `schedule()` on
   `history`/`layers` events, `flush()` before closing, `dispose()`.
 - `fitAndCenter(surface, { size, padding, fit, allowUpscale, resample,
   trim })`, `importLayer(doc, surface, name)`, `surfaceFromImageData`,
   `bestFrameIndex(frames)`; in the browser `decodeImage(bytes | Blob |
-  base64 | dataURL)` → `Surface` (PNG, JPEG, GIF, WebP, BMP, ICO, SVG). E.g.
+  base64 | dataURL, fallbackSize = 512, maxSize = 4096)` → `Surface` (PNG,
+  JPEG, GIF, WebP, BMP, ICO, SVG; larger images are scaled down to `maxSize`
+  while decoding). E.g.
   `engine.importImage(await decodeImage(frames[bestFrameIndex(frames)].png), item.name)`.
 
 ## Colour
