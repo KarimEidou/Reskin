@@ -170,10 +170,10 @@ fn restarted_unelevated(argv: &[String]) -> bool {
 }
 
 /// What the error box says when the history (`journal.json` at `path`)
-/// cannot be loaded at start-up. A damaged file is set aside and replaced
-/// by itself, so what is left is: another Reskin process holding the
-/// journal lock (wait), a journal a newer Reskin wrote (update), or a file
-/// Reskin can neither read nor set aside.
+/// cannot be loaded at start-up. A damaged file is normally set aside and
+/// replaced by itself, so what is left is: another Reskin process holding
+/// the journal lock (wait), a journal a newer Reskin wrote (update), or a
+/// file Reskin cannot read, or cannot set aside when it is damaged.
 fn journal_problem(e: &reskin_core::Error, path: &std::path::Path) -> String {
     match e {
         reskin_core::Error::Busy(_) => "Another Reskin process (for example the restore \
@@ -187,11 +187,11 @@ fn journal_problem(e: &reskin_core::Error, path: &std::path::Path) -> String {
             path.display()
         ),
         other => format!(
-            "Reskin could not read its history file, and could not set it aside either:\n\
-             {other}\n\nAnother program (a backup, sync or antivirus tool) may be holding it, \
-             or it is damaged. Try again in a moment. If this keeps happening, move\n{}\nsomewhere \
-             else and start Reskin again: it starts with an empty history, and icons it changed \
-             keep their look but can no longer be restored from Reskin.",
+            "Reskin could not read or repair its history file:\n{other}\n\nIt may be damaged, \
+             or another program (a backup, sync or antivirus tool) may be holding it. Try again \
+             in a moment. If this keeps happening, move\n{}\nsomewhere else and start Reskin \
+             again: it starts with an empty history, and icons it changed keep their look but \
+             can no longer be restored from Reskin.",
             path.display()
         ),
     }
@@ -448,7 +448,7 @@ mod tests {
         assert!(says(1, "newer version"), "{}", messages[1]);
         assert!(says(1, &path.display().to_string()), "{}", messages[1]);
         assert!(
-            says(2, "could not read its history file"),
+            says(2, "could not read or repair its history file"),
             "{}",
             messages[2]
         );

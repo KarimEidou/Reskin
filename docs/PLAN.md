@@ -69,7 +69,8 @@ from the drop point into the box with squash and stretch), `busy` (progress ring
 (`SHQueryUserNotificationState`). Click opens the editor's Start view. Right-click calls `box_menu` → native popup menu:
 Open editor, Library, System icons ▸, Restore all icons…, Settings, Hide box, Quit Reskin. Tray icon has the same menu; its
 item follows the box: *Hide box* while it shows, else *Show box*, which shows it (closing an open editor into it) — over a
-fullscreen app too, until that app goes away or the box is hidden again. Global hotkey (default `Ctrl+Alt+Shift+R`,
+fullscreen app too (also the one just left for the tray), until no fullscreen app has been seen for 30 s or the box is hidden
+again. Global hotkey (default `Ctrl+Alt+Shift+R`,
 rebindable) and a tray click toggle the box (while a fullscreen app hides it: open the editor). Starting Reskin again brings
 the open editor to the front, else shows the box. **First run** (until the welcome is finished: `Settings.onboarded`;
 not at an `--autostart` start): editor opens on a short animated welcome, then morphs down into the box with the hint "drag a
@@ -118,8 +119,8 @@ Fluent, Duotone, Sketch. Colour: HSV picker + hex/RGB/alpha + recents; palettes 
 dominant colours (median cut); gradient editor. Undo/redo + history panel (tile snapshots, 256 MB LRU), zoom/pan, pixel grid,
 Windows keyline guides, before/after (hold `\` or split view). Previews 16–256 px through the real export path; icon on your
 actual wallpaper with its label; taskbar light/dark previews. Import from dialog (images, icons, shortcuts, programs and
-`.reskin` projects), drop, paste, or another shortcut's icon (popover: layer or queue?). Export `.ico`, `.png`, clipboard, `.reskin`. Library of saved designs + per-target history,
-Restore original / Restore all. Autosave + crash recovery.
+`.reskin` projects), drop, paste, or another shortcut's icon (popover: layer or queue?). Export `.ico`, `.png`, clipboard,
+`.reskin`. Library of saved designs + per-target history, Restore original / Restore all. Autosave + crash recovery.
 
 **App:** command palette (Ctrl+K), shortcuts overlay (`?`), toasts; themes dark/light/system + Windows accent; animation speed and
 reduced motion (Windows `SPI_GETCLIENTAREAANIMATION`, read live, + media query; the pages re-read accent and animation effects
@@ -196,5 +197,6 @@ Morph glitches → ack protocol + invariant + shared BoxVisual + 400 ms crossfad
 mailbox, box created visible, recreate editor if mailbox silent 2 s. Transparency failures → no cursor toggling/minimize/idle
 animation + compatibility mode. Stale icon cache → content-hashed paths, SHChangeNotify, `ie4uinit -show`. Elevation/UIPI → app
 always non-elevated (started as administrator, it restarts unelevated through Explorer; `--restore-all` restarts as the
-desktop user); privileged writes only via the validated helper. Desktop lookup fails → celebrate in place. Unsigned exe SmartScreen → documented. Missing WebView2 →
-bootstrapper + CI step; the portable exe checks for the runtime before building any window and offers Microsoft's download.
+desktop user); privileged writes only via the validated helper. Desktop lookup fails → celebrate in place. Unsigned exe
+SmartScreen → documented. Missing WebView2 → bootstrapper + CI step; the portable exe checks for the runtime before building
+any window and offers Microsoft's download.

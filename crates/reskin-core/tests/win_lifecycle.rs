@@ -4,9 +4,9 @@
 //!
 //! Every test is `#[ignore]`d: they run on Windows CI with
 //! `cargo test -- --include-ignored` (starting a process as the desktop
-//! user needs administrator rights, which CI has). They use their own registry value
-//! names and temp folders and remove them again, also when an assertion
-//! fails (drop guards).
+//! user needs administrator rights, which CI has). They use their own
+//! registry value names and temp folders and remove them again, also when
+//! an assertion fails (drop guards).
 #![cfg(windows)]
 
 use std::ffi::OsString;

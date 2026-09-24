@@ -135,8 +135,8 @@ the empty picture (`box:collapse` hide + `box:shown`) when it may show.
 
 The box at rest is shown exactly when it may be (`rules::box_allowed`): the
 user has not hidden it (tray / menu / hotkey / Settings) and no fullscreen
-app hides it — one runs (with auto-hide on) and the user has not shown the
-box over it (`state::FullscreenHide`). Outside a handoff `settle_box`
+app hides it — one runs in front (with auto-hide on) and the user has not
+shown the box over it (`state::FullscreenHide`). Outside a handoff `settle_box`
 enforces that (on each toggle and every 1.5 s from the fullscreen watcher);
 while the editor is open a wish is only recorded, and the close asks the
 same question — a box that stays hidden is not moved. The hotkey / tray
@@ -145,8 +145,12 @@ hides it — opens the editor. The menus' box item (tray and box, `menu.rs`)
 follows the box's actual visibility and does what it says: *Hide box*
 hides it; *Show box* shows it — closing an open editor into it — and keeps
 it on screen over a fullscreen app until that app goes away or the user
-hides the box again. Reskin started again without paths (single-instance)
-brings the open editor to the front, else does what *Show box* does.
+hides the box again. A fullscreen app only counts while it is in front, and
+reaching the tray takes the user out of it, so both ends are measured with
+`SHOWN_ANYWAY_GRACE` (30 s): *Show box* covers a fullscreen app seen that
+recently, and the app has gone away once none has been seen for that long.
+Reskin started again without paths (single-instance) brings the open editor
+to the front, else does what *Show box* does.
 Invariant: a window hides only when its content is transparent and shows only
 over an identical picture (the editor over the box at open; the box under
 the editor's proxy at close, which goes only once the box has painted it).
@@ -265,11 +269,11 @@ one switches the sidebar tab and asks the panel through
 
 ## Rust: reskin-core module contracts
 
-Error type: `reskin_core::Error { AccessDenied, NotFound, Unsupported, Cancelled, Busy, Other }`
-with `Result<T> = std::result::Result<T, Error>`; `From<windows_core::Error>`
-maps `E_ACCESSDENIED`. `Busy`: another process held what was needed (the
-journal lock) for longer than the call waits; trying again later can work.
-Pixels: `pixels::Rgba` (straight alpha RGBA8).
+Error type: `reskin_core::Error { AccessDenied, NotFound, Unsupported,
+Cancelled, Busy, Other }` with `Result<T> = std::result::Result<T, Error>`;
+`From<windows_core::Error>` maps `E_ACCESSDENIED`. `Busy`: another process
+held what was needed (the journal lock) for longer than the call waits;
+trying again later can work. Pixels: `pixels::Rgba` (straight alpha RGBA8).
 
 Pure (all hosts, unit tested on Linux):
 
@@ -348,11 +352,11 @@ Pure (all hosts, unit tested on Linux):
   **Sharing between processes:** every read-modify-write holds an exclusive
   lock on `journal.json.lock` (`LockFileEx`; waits up to `LOCK_TIMEOUT` =
   30 s, then fails with `Error::Busy` saying another Reskin process holds
-  it) and reloads the
-  file first (skipped when its SHA-256 is unchanged); `locked(f)` holds it
-  across several steps, `refresh()` just reloads. The app keeps one
-  `Journal` behind a mutex and takes that first. Holders keep the lock for
-  one read-modify-write or one shell write, never across a UAC prompt.
+  it) and reloads the file first (skipped when its SHA-256 is unchanged);
+  `locked(f)` holds it across several steps, `refresh()` just reloads. The
+  app keeps one `Journal` behind a mutex and takes that first. Holders keep
+  the lock for one read-modify-write or one shell write, never across a UAC
+  prompt.
 * `job` — `ElevatedJob { version, id, created_at, ops }`,
   `JobOp::{SetShortcutIcon, SetUrlIcon, RestoreShortcutIcon, RestoreUrlIcon,
   DeleteIcon}` (`JobOp::set_icon`, `restore_icon`, `delete_icon`), `new_job`,
@@ -425,13 +429,13 @@ Windows (`win/`, `#[cfg(windows)]`, type-checked on Linux with
   Runtime → an error box offering Microsoft's download, exit 1; a history
   that cannot be loaded → an error box saying which of three it is (another
   Reskin process holds the journal lock, `Error::Busy`: try again in a
-  moment; a journal a newer Reskin wrote; a file it can neither read nor
-  set aside), exit 1. Builder: single-instance first (a second start with
-  `--edit` paths opens them, without paths `actions::bring_forward`: the
-  open editor to the front, else *Show box*), then dialog, opener,
-  global-shortcut; `setup`
-  creates the box (visible; a failure is reported, not returned into Tauri),
-  reconciles the OS-backed settings on a thread (`commands::settings::
+  moment; a journal a newer Reskin wrote; a file it cannot read, or cannot
+  set aside when it is damaged), exit 1. Builder: single-instance first (a
+  second start with `--edit` paths opens them, without paths
+  `actions::bring_forward`: the open editor to the front, else *Show
+  box*), then dialog, opener, global-shortcut; `setup` creates the box
+  (visible; a failure is reported, not returned into Tauri), reconciles the
+  OS-backed settings on a thread (`commands::settings::
   reconcile_at_startup`) and schedules the editor pre-warm (skipped in
   low-memory mode unless the welcome or `--edit` opens it; the welcome,
   due while `!onboarded`, never opens at an `--autostart` start);
@@ -443,8 +447,9 @@ Windows (`win/`, `#[cfg(windows)]`, type-checked on Linux with
 * `AppState::system_reduced_motion()` reads `SPI_GETCLIENTAREAANIMATION` live;
   `first_run()` clears once the welcome sets `onboarded`;
   `hidden_for_fullscreen()` follows `FullscreenHide` (the watcher's
-  `set_fullscreen_busy`, `show_box_anyway()` for *Show box*, ended by the
-  app going away or `set_box_hidden_by_user(true)`).
+  `set_fullscreen_busy(busy, elapsed)`, `show_box_anyway()` for *Show box*,
+  ended by no fullscreen app for `SHOWN_ANYWAY_GRACE` or
+  `set_box_hidden_by_user(true)`).
 * `menu.rs` / `tray.rs`: one menu for the box's popup and the tray; its box
   item is `hide-box` ("Hide box") while the box shows, else `show-box`
   ("Show box", `actions::show_box`). A tray click and the hotkey run
@@ -465,10 +470,10 @@ Windows (`win/`, `#[cfg(windows)]`, type-checked on Linux with
   outcome with a hint. The flourish plays only while the box may be on
   screen (`morph::box_allowed`: not hidden by the user or a fullscreen
   app); otherwise the change is made in place. With the flourish a new
-  shortcut is created before
-  the collapse (a failure leaves the editor open); a failure after the
-  collapse reaches the box as exactly one `error` flight; without a
-  visible desktop icon the box celebrates in place and glides home. System
+  shortcut is created before the collapse (a failure leaves the editor
+  open); a failure after the collapse reaches the box as exactly one
+  `error` flight; without a visible desktop icon the box celebrates in
+  place and glides home. System
   icons fly to `::{CLSID}` (the Recycle Bin only in the state whose icon
   changed). Matching pins join the apply's group, also after an elevated
   apply; `box:undo` carries the main entry.
