@@ -1,9 +1,15 @@
 import { describe, expect, it } from 'vitest';
+import { defaultSettings } from '$lib/settings/defaults';
 import {
+  FIRST_RUN_HINT,
+  handoffProps,
   iconRect,
   ICON_FRACTION,
+  RING_GAP,
+  RING_STROKE,
   metricsFor,
   physicalToCss,
+  ringRadius,
   ringRect,
   roundedRectPath,
   STATE_TRANSFORM,
@@ -60,6 +66,21 @@ describe('box geometry', () => {
     }
   });
 
+  it('puts the compat-mode ring inside the visual box (the window region)', () => {
+    for (const size of ['small', 'medium', 'large'] as const) {
+      const m = metricsFor(size);
+      const v = visualRect(m);
+      const ring = ringRect(m, undefined, true);
+      // Stroke included, the ring stays inside the clipped visual box.
+      expect(ring.x - RING_STROKE / 2).toBeGreaterThan(v.x);
+      expect(ring.x + ring.w + RING_STROKE / 2).toBeLessThan(v.x + v.w);
+      expect(ring.w).toBeCloseTo(m.visual - 2 * RING_GAP, 9);
+      expect(ringRadius(m, true)).toBe(m.radius - RING_GAP);
+      expect(ringRadius(m)).toBe(m.radius + RING_GAP);
+    }
+    expect(ringRect(M, { x: 100, y: 10 }, true)).toEqual({ x: 119, y: 29, w: 110, h: 110 });
+  });
+
   it('formats transforms', () => {
     expect(transformCss(STATE_TRANSFORM.idle)).toBe('none');
     expect(transformCss(STATE_TRANSFORM.armed)).toBe('scale(1.08, 1.08)');
@@ -78,5 +99,27 @@ describe('box geometry', () => {
   it('converts physical drop positions to CSS px', () => {
     expect(physicalToCss({ x: 150, y: 75 }, 1.5)).toEqual({ x: 100, y: 50 });
     expect(physicalToCss({ x: 10, y: 10 }, 0)).toEqual({ x: 10, y: 10 });
+  });
+
+  it('describes the handoff picture the editor proxy must reproduce', () => {
+    const settings = { ...defaultSettings(), boxSkin: 'aurora' as const, boxSize: 'large' as const, idleOpacity: 0.6 };
+    const items = [{ icon: 'data:image/png;base64,AAA' }, { icon: null }];
+    expect(handoffProps(settings, items, true)).toEqual({
+      metrics: metricsFor('large'),
+      skin: 'aurora',
+      state: 'idle',
+      icon: 'data:image/png;base64,AAA',
+      count: 2,
+      progress: null,
+      opacity: 0.6,
+      compat: false,
+      reducedMotion: true,
+      hint: null,
+    });
+    // A click handoff (start view) shows the empty box; the first-run
+    // welcome collapses onto the hint the box then shows.
+    expect(handoffProps(settings, [], false)).toMatchObject({ icon: null, count: 0, hint: null });
+    expect(handoffProps(settings, [], false, undefined, FIRST_RUN_HINT).hint).toBe(FIRST_RUN_HINT);
+    expect(handoffProps(settings, items, false, undefined, FIRST_RUN_HINT).hint).toBeNull();
   });
 });

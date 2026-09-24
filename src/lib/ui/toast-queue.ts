@@ -7,6 +7,10 @@
 //   its timer (e.g. "Saving…" → "Saved").
 // * At most `max` toasts are visible; the oldest is dropped.
 // * Toasts with an action stay at least ACTION_MIN_MS (the 6 s Undo window).
+// * Auto-dismiss times stay within UI.md's 4–6 s.
+// * Emptying the stack un-pauses it: the toast that was hovered or focused
+//   is gone, and removed elements do not reliably report pointerleave /
+//   focusout, so a stale pause must not freeze the next toasts.
 
 export type ToastKind = 'info' | 'success' | 'warning' | 'error';
 
@@ -37,7 +41,7 @@ export const DEFAULT_TIMEOUT: Record<ToastKind, number> = {
   info: 4000,
   success: 4000,
   warning: 6000,
-  error: 8000,
+  error: 6000,
 };
 export const ACTION_MIN_MS = 6000;
 
@@ -170,6 +174,7 @@ export class ToastQueue {
   }
 
   #emit(): void {
+    if (this.#toasts.length === 0) this.#paused = false;
     this.#onChange(this.#toasts);
   }
 }

@@ -105,7 +105,7 @@
 <span class="anchor" bind:this={anchor} {@attach wire}>{@render children()}</span>
 
 {#if open}
-  <div class="tooltip" role="tooltip" {id} {@attach portal()} {@attach floating({ anchor: target, placement, offset: 8 })}>
+  <div class="tooltip" role="tooltip" {id} {@attach portal(target)} {@attach floating({ anchor: target, placement, offset: 8 })}>
     <span>{text}</span>
     {#if shortcut}<Kbd keys={shortcut} size="sm" />{/if}
   </div>

@@ -34,6 +34,12 @@ export const BOX_STATES: readonly BoxVisualState[] = [
 export const ICON_FRACTION = 0.62;
 
 /**
+ * The hint the box shows after the first-run welcome collapses into it
+ * (pass it to `handoffProps` for that collapse so the pictures match).
+ */
+export const FIRST_RUN_HINT = 'Drag a shortcut onto me';
+
+/**
  * The absorb ("gulp") animation BoxVisual plays in the `absorbing` state,
  * at animation speed 1. The box inhales, then squashes on impact at
  * `ABSORB_IMPACT_AT` of the way through — time an incoming icon to land
@@ -58,7 +64,8 @@ export function metricsFor(size: SizeClass): BoxMetrics {
 /**
  * The resting transform BoxVisual gives the visual box in each state (the
  * value its transitions settle on; keyframed states rest at identity).
- * Scale is around the box centre.
+ * Scale is around the box centre. Compatibility mode keeps the box at
+ * identity (the window region is the visual box; nothing may grow past it).
  */
 export interface BoxTransform {
   scaleX: number;
@@ -126,14 +133,24 @@ export function visualRadius(m: BoxMetrics, state: BoxVisualState = 'idle'): num
   return m.radius * Math.min(t.scaleX, t.scaleY);
 }
 
-/** Bounds of the progress ring's stroke centre line (window-relative). */
-export function ringRect(m: BoxMetrics, origin: Point = ZERO): Rect {
+/**
+ * Bounds of the progress ring's stroke centre line (window-relative): in
+ * the margin around the visual box, or — in compatibility mode, where Rust
+ * clips the opaque window to the visual box — just inside it.
+ */
+export function ringRect(m: BoxMetrics, origin: Point = ZERO, compat = false): Rect {
+  const d = compat ? RING_GAP : -RING_GAP;
   return {
-    x: origin.x + m.margin - RING_GAP,
-    y: origin.y + m.margin - RING_GAP,
-    w: m.visual + 2 * RING_GAP,
-    h: m.visual + 2 * RING_GAP,
+    x: origin.x + m.margin + d,
+    y: origin.y + m.margin + d,
+    w: m.visual - 2 * d,
+    h: m.visual - 2 * d,
   };
+}
+
+/** Corner radius of the ring's stroke centre line (see `ringRect`). */
+export function ringRadius(m: BoxMetrics, compat = false): number {
+  return Math.max(0, m.radius + (compat ? -RING_GAP : RING_GAP));
 }
 
 /**
@@ -177,13 +194,15 @@ export interface BoxVisualProps {
  * The picture the box shows while it hands over to the editor (after a
  * click or an absorbed drop, until `box:shown`). The editor's morph proxy
  * renders BoxVisual with exactly these props so the two windows show an
- * identical picture at the swap.
+ * identical picture at the swap. `hint`: `FIRST_RUN_HINT` when collapsing
+ * the first-run welcome (the box shows it once it is back), else null.
  */
 export function handoffProps(
   settings: Pick<Settings, 'boxSize' | 'boxSkin' | 'idleOpacity' | 'compatibilityMode'>,
   items: ReadonlyArray<Pick<ItemInfo, 'icon'>>,
   reducedMotion: boolean,
   metrics: BoxMetrics = metricsFor(settings.boxSize),
+  hint: string | null = null,
 ): BoxVisualProps {
   return {
     metrics,
@@ -195,7 +214,7 @@ export function handoffProps(
     opacity: settings.idleOpacity,
     compat: settings.compatibilityMode,
     reducedMotion,
-    hint: null,
+    hint: items.length === 0 ? hint : null,
   };
 }
 

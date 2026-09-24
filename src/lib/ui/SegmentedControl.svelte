@@ -6,7 +6,7 @@
 <script lang="ts" generics="T extends string">
   import { rovingIndex } from './focus';
   import Tooltip from './Tooltip.svelte';
-  import { ICON_SIZE, type ControlSize, type Option } from './types';
+  import { ICON_SIZE, ICON_STROKE, type ControlSize, type Option } from './types';
 
   interface Props {
     value?: T;
@@ -82,7 +82,7 @@
         disabled={disabled || option.disabled}
         onclick={() => select(i)}
       >
-        {#if option.icon}<option.icon size={ICON_SIZE[size]} aria-hidden="true" />{/if}
+        {#if option.icon}<option.icon size={ICON_SIZE[size]} strokeWidth={ICON_STROKE} aria-hidden="true" />{/if}
         {#if !iconOnly}<span>{option.label}</span>{/if}
       </button>
     {/snippet}

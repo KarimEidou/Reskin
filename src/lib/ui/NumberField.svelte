@@ -4,6 +4,8 @@
   PageUp/PageDown step ×10, Home/End jump to min/max, Escape reverts.
 -->
 <script lang="ts">
+  import { formatNumber, rangeDecimals, snapToStep } from './number';
+
   interface Props {
     value?: number;
     min?: number;
@@ -36,28 +38,28 @@
   let editing = $state(false);
   let draft = $state('');
 
-  const decimals = $derived(Math.max(0, (String(step).split('.')[1] ?? '').length));
-  const format = (v: number) => (Number.isFinite(v) ? v.toFixed(decimals).replace(/\.?0+$/, '') || '0' : '');
-  const shown = $derived(editing ? draft : format(value));
+  // Without a step grid, show up to 6 decimals.
+  const decimals = $derived(step > 0 ? rangeDecimals({ min, step }) : 6);
+  const shown = $derived(editing ? draft : formatNumber(value, decimals));
 
-  function normalise(v: number): number {
-    const base = Number.isFinite(min) ? min : 0;
-    const snapped = step > 0 ? base + Math.round((v - base) / step) * step : v;
-    return Number(Math.min(max, Math.max(min, snapped)).toFixed(decimals));
+  /** The typed draft as a number (a decimal comma is accepted); NaN if unusable. */
+  function parseDraft(): number {
+    const text = draft.trim();
+    return text === '' ? Number.NaN : Number(text.replace(',', '.'));
   }
 
   function commit(next: number): void {
-    const v = normalise(next);
+    const v = snapToStep(next, { min, max, step });
     editing = false;
-    if (v === value) return;
+    if (v === value || !Number.isFinite(v)) return;
     value = v;
     onchange?.(v);
   }
 
   function commitDraft(): void {
     if (!editing) return;
-    const parsed = Number(draft.replace(',', '.').trim());
-    if (draft.trim() === '' || !Number.isFinite(parsed)) {
+    const parsed = parseDraft();
+    if (!Number.isFinite(parsed)) {
       editing = false;
       return;
     }
@@ -66,7 +68,8 @@
 
   function onKeyDown(e: KeyboardEvent): void {
     const big = step * 10;
-    const current = editing && Number.isFinite(Number(draft)) ? Number(draft) : value;
+    const typed = editing ? parseDraft() : Number.NaN;
+    const current = Number.isFinite(typed) ? typed : value;
     switch (e.key) {
       case 'ArrowUp':
         commit(current + (e.shiftKey ? big : step));

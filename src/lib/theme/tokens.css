@@ -310,7 +310,8 @@
 
 :where(html) {
   font-family: var(--font-ui);
-  font-size: var(--text-base);
+  /* UI.md: 13 px base. */
+  font-size: var(--text-md);
   line-height: var(--leading-normal);
   color: var(--text);
   -webkit-font-smoothing: antialiased;

@@ -7,7 +7,7 @@
   import type { Snippet } from 'svelte';
   import type { HTMLButtonAttributes } from 'svelte/elements';
   import Spinner from './Spinner.svelte';
-  import { ICON_SIZE, type ControlSize, type IconComponent } from './types';
+  import { ICON_SIZE, ICON_STROKE, type ControlSize, type IconComponent } from './types';
 
   interface Props extends Omit<HTMLButtonAttributes, 'children'> {
     variant?: 'primary' | 'secondary' | 'ghost' | 'danger';
@@ -48,10 +48,10 @@
   {#if loading}
     <Spinner size={iconSize} label="" />
   {:else if Icon}
-    <Icon size={iconSize} aria-hidden="true" />
+    <Icon size={iconSize} strokeWidth={ICON_STROKE} aria-hidden="true" />
   {/if}
   {#if children}<span class="label">{@render children()}</span>{/if}
-  {#if IconRight}<IconRight size={iconSize} aria-hidden="true" />{/if}
+  {#if IconRight}<IconRight size={iconSize} strokeWidth={ICON_STROKE} aria-hidden="true" />{/if}
 </button>
 
 <style>

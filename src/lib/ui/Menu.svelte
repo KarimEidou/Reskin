@@ -1,7 +1,8 @@
 <!--
   Dropdown menu button. Keyboard: ↓/Enter/Space open on the first item, ↑
   on the last; ↑/↓/Home/End move, typing jumps to a label, Enter/Space
-  choose, Escape closes (focus returns to the trigger), Tab closes.
+  choose, Escape and Tab close (focus returns to the trigger: the menu is
+  portalled, so a native Tab would leave the page).
     <Menu label="More" iconOnly icon={Ellipsis} items={[…]} onselect={(id) => …} />
   A custom trigger gets every prop it needs (spread them onto a button):
     <Menu {items} label="Export" onselect={…}>
@@ -48,7 +49,7 @@
   import IconButton from './IconButton.svelte';
   import Kbd from './Kbd.svelte';
   import type { Placement } from './position';
-  import type { ControlSize } from './types';
+  import { ICON_STROKE, type ControlSize } from './types';
 
   interface Props {
     items: readonly MenuEntry[];
@@ -121,7 +122,8 @@
 
   function onMenuKey(e: KeyboardEvent): void {
     if (e.key === 'Tab') {
-      closeMenu(false);
+      e.preventDefault();
+      closeMenu(true);
       return;
     }
     if ((e.key === 'Enter' || e.key === ' ') && active >= 0) {
@@ -187,7 +189,7 @@
     aria-labelledby="{uid}-trigger"
     tabindex="-1"
     onkeydown={onMenuKey}
-    {@attach portal()}
+    {@attach portal(() => triggerEl)}
     {@attach floating({ anchor: () => triggerEl, placement, offset: 4 })}
     {@attach dismissable((reason) => closeMenu(reason === 'escape'), () => [triggerEl])}
   >
@@ -214,7 +216,11 @@
           }}
         >
           <span class="lead" aria-hidden="true">
-            {#if entry.checked}<Check size={15} />{:else if entry.icon}<entry.icon size={15} />{/if}
+            {#if entry.checked}
+              <Check size={16} strokeWidth={ICON_STROKE} />
+            {:else if entry.icon}
+              <entry.icon size={16} strokeWidth={ICON_STROKE} />
+            {/if}
           </span>
           <span class="text">{entry.label}</span>
           {#if entry.shortcut}<Kbd keys={entry.shortcut} size="sm" />{/if}

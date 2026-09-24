@@ -12,6 +12,8 @@ import { applyTheme } from '$lib/theme/theme';
 
 let booting: Promise<BootInfo> | null = null;
 let info: BootInfo | null = null;
+/** Stops following settings changes (replaced when a failed boot is retried). */
+let unfollow: (() => void) | null = null;
 
 async function run(): Promise<BootInfo> {
   const b = await commands.appBoot();
@@ -20,7 +22,8 @@ async function run(): Promise<BootInfo> {
   applyTheme({ settings: b.settings, accent: b.accent });
   initMotion(b);
   setSoundEnabled(b.settings.sounds);
-  onSettingsChange((s) => {
+  unfollow?.();
+  unfollow = onSettingsChange((s) => {
     applyTheme({ settings: s, accent: b.accent });
     updateMotion(s);
     setSoundEnabled(s.sounds);

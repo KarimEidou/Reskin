@@ -15,8 +15,11 @@ export type IconComponent = Component<{
 
 export type ControlSize = 'sm' | 'md' | 'lg';
 
-/** Icon pixel size that matches each control size. */
-export const ICON_SIZE: Record<ControlSize, number> = { sm: 14, md: 16, lg: 18 };
+/** Icon pixel size that matches each control size (UI.md: 18 px at the default size). */
+export const ICON_SIZE: Record<ControlSize, number> = { sm: 16, md: 18, lg: 20 };
+
+/** Lucide stroke width used throughout the UI (UI.md). */
+export const ICON_STROKE = 1.75;
 
 export interface Option<T extends string = string> {
   value: T;

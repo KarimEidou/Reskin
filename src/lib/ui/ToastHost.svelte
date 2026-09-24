@@ -1,7 +1,9 @@
 <!--
   Renders the toast stack (bottom centre). Mount once per page. Hovering or
-  focusing the stack pauses auto-dismissal. Info/success toasts are polite
-  status messages; warnings and errors are alerts.
+  focusing the stack pauses auto-dismissal. The stack is a persistent polite
+  live region (a live region inserted together with its text is often not
+  announced), so info/success toasts are read politely; warnings and errors
+  are alerts.
 -->
 <script lang="ts">
   import { flip } from 'svelte/animate';
@@ -14,7 +16,7 @@
   import { dur } from '$lib/motion/speed.svelte';
   import IconButton from './IconButton.svelte';
   import { dismissToast, pauseToasts, resumeToasts, runToastAction, toasts, type ToastKind } from './toasts.svelte';
-  import type { IconComponent } from './types';
+  import { ICON_STROKE, type IconComponent } from './types';
 
   interface Props {
     /** Distance from the bottom of the window (CSS length). */
@@ -47,17 +49,17 @@
   }
 </script>
 
-<section class="host" aria-label="Notifications" style:bottom={inset} {@attach pauseWhileEngaged}>
+<section class="host" aria-label="Notifications" aria-live="polite" style:bottom={inset} {@attach pauseWhileEngaged}>
   {#each toasts() as t (t.id)}
     {@const Icon = ICONS[t.kind]}
     <div
       class="toast kind-{t.kind}"
-      role={t.kind === 'error' || t.kind === 'warning' ? 'alert' : 'status'}
+      role={t.kind === 'error' || t.kind === 'warning' ? 'alert' : undefined}
       animate:flip={{ duration: dur(220) }}
       in:fly={{ y: 14, duration: dur(260), opacity: 0 }}
       out:fade={{ duration: dur(160, 'fade') }}
     >
-      <span class="icon" aria-hidden="true"><Icon size={18} /></span>
+      <span class="icon" aria-hidden="true"><Icon size={18} strokeWidth={ICON_STROKE} /></span>
       <p class="message">{t.message}</p>
       {#if t.action}
         <button type="button" class="action" onclick={() => runToastAction(t.id)}>{t.action.label}</button>

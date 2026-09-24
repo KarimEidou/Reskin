@@ -20,6 +20,7 @@
 <script lang="ts">
   import type { Snippet } from 'svelte';
   import { rovingIndex } from './focus';
+  import { ICON_STROKE } from './types';
 
   interface Props {
     tabs: readonly TabItem[];
@@ -89,7 +90,7 @@
         disabled={tab.disabled}
         onclick={() => activate(i, false)}
       >
-        {#if tab.icon}<tab.icon size={15} aria-hidden="true" />{/if}
+        {#if tab.icon}<tab.icon size={16} strokeWidth={ICON_STROKE} aria-hidden="true" />{/if}
         <span>{tab.label}</span>
         {#if tab.badge !== undefined}<span class="badge">{tab.badge}</span>{/if}
       </button>

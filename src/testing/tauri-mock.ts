@@ -51,8 +51,10 @@
  *   position is PHYSICAL px, as Tauri sends it; `emitted`, listenerCount(e)
  * - pushEditorCmd(cmd), acks, waitForAck(session, stage, timeout?)
  * - simulateOpen(items | paths, view = 'edit', opts): Rust's open FSM —
- *   Prepare → wait 'prepared' (400 ms; late → morph=false crossfade) →
- *   Reveal → wait 'revealed' → Expand{morph} → wait 'expanded'.
+ *   Prepare → wait 'prepared' (400 ms) → Reveal → wait 'revealed' →
+ *   Expand{morph} → wait 'expanded'. A late 'prepared' takes Rust's
+ *   fallback: Reveal and Expand{morph: false} (crossfade) back to back,
+ *   without waiting for 'revealed'.
  * - simulateClose(then = 'hide', opts): Collapse → wait 'collapsed' →
  *   Clear → wait 'cleared'. `editor` shows the FSM phase.
  * - knobs: setApplyOutcome, setInspectOverride, setInspectDelay,
@@ -346,7 +348,9 @@ export function install(kind: 'box' | 'editor'): E2EApi {
     fsm.phase = 'revealing';
     fsm.visible = true;
     pushEditorCmd({ type: 'reveal', session });
-    if (!(await waitForAck(session, 'revealed', ackTimeout))) timedOut.push('revealed');
+    // Like morph.rs: the swap waits for the proxy only when it was prepared
+    // in time; the fallback hides the box and crossfades right away.
+    if (preparedInTime && !(await waitForAck(session, 'revealed', ackTimeout))) timedOut.push('revealed');
 
     fsm.phase = 'expanding';
     boxVisible = false;

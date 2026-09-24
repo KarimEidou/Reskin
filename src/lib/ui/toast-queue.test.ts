@@ -48,6 +48,36 @@ describe('ToastQueue', () => {
     expect(queue.toasts).toHaveLength(0);
   });
 
+  it('auto-dismisses within 4–6 s (UI.md)', () => {
+    for (const ms of Object.values(DEFAULT_TIMEOUT)) {
+      expect(ms).toBeGreaterThanOrEqual(4000);
+      expect(ms).toBeLessThanOrEqual(6000);
+    }
+  });
+
+  it('un-pauses when the stack empties so later toasts still time out', () => {
+    const { queue, advance } = makeQueue();
+    const id = queue.show({ message: 'Hovered' });
+    queue.pause();
+    // The hovered toast is closed; its element leaves without a pointerleave.
+    queue.dismiss(id);
+    expect(queue.paused).toBe(false);
+    queue.show({ message: 'Next' });
+    advance(DEFAULT_TIMEOUT.info);
+    expect(queue.toasts).toHaveLength(0);
+  });
+
+  it('stays paused while other toasts remain', () => {
+    const { queue, advance } = makeQueue();
+    const a = queue.show({ message: 'A' });
+    queue.show({ message: 'B' });
+    queue.pause();
+    queue.dismiss(a);
+    expect(queue.paused).toBe(true);
+    advance(60_000);
+    expect(queue.toasts.map((t) => t.message)).toEqual(['B']);
+  });
+
   it('keeps sticky toasts (timeout 0) until dismissed', () => {
     const { queue, advance, pending } = makeQueue();
     const id = queue.show({ message: 'Needs you', timeout: 0 });
