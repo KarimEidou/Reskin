@@ -175,3 +175,35 @@ describe('EditorSession', () => {
     s.dispose();
   });
 });
+
+describe('EditorSession robustness', () => {
+  it('does not switch to Edit if the view changed while loading', async () => {
+    let release!: () => void;
+    const gate = new Promise<void>((r) => (release = r));
+    const red = { width: 8, height: 8, png: await pngOf(8, 8, [255, 0, 0, 255]) };
+    const deps = makeDeps({ a: [red] }, applied);
+    const slow = deps.commands.itemFrames as unknown as ReturnType<typeof vi.fn>;
+    slow.mockImplementationOnce(async () => {
+      await gate;
+      return [red];
+    });
+    const s = new EditorSession(deps, new Engine());
+    const opening = s.openItems([item('a')]);
+    s.navigate('library');
+    release();
+    await opening;
+    expect(s.view).toBe('library');
+    s.dispose();
+  });
+
+  it('serialises item switches', async () => {
+    const f = async (c: [number, number, number, number]) => [{ width: 8, height: 8, png: await pngOf(8, 8, c) }];
+    const deps = makeDeps({ a: await f([255, 0, 0, 255]), b: await f([0, 255, 0, 255]), c: await f([0, 0, 255, 255]) }, applied);
+    const s = new EditorSession(deps, new Engine());
+    await s.openItems([item('a'), item('b'), item('c')]);
+    await Promise.all([s.select(1), s.select(2), s.select(0)]);
+    expect(s.currentIndex).toBe(0);
+    expect(s.queue.filter((q) => q.project !== null).length).toBeGreaterThanOrEqual(2);
+    s.dispose();
+  });
+});

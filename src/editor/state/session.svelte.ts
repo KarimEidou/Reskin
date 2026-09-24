@@ -185,6 +185,12 @@ export class EditorSession {
    * editing, images become layers and projects replace the design.
    */
   async openItems(items: ItemInfo[], opts: { replace?: boolean } = {}): Promise<void> {
+    // Loading can take a moment; don't yank the user back to the Edit view
+    // if they (or Rust) navigated elsewhere meanwhile.
+    const viewAtStart = this.view;
+    const showEdit = () => {
+      if (this.view === viewAtStart) this.view = 'edit';
+    };
     if (opts.replace) {
       await this.stashCurrent();
       this.queue = [];
@@ -204,15 +210,26 @@ export class EditorSession {
       const [first, ...rest] = sources;
       await this.startFromSource(first!);
       for (const s of rest) await this.addSource(s);
-      this.view = 'edit';
+      showEdit();
       return;
     }
     for (const s of sources) await this.addSource(s);
-    if (this.queue.length > 0 || sources.length > 0) this.view = 'edit';
+    if (this.queue.length > 0 || sources.length > 0) showEdit();
   }
 
-  /** Switches to queue entry `index`, keeping the current design. */
-  async select(index: number): Promise<void> {
+  /**
+   * Switches to queue entry `index`, keeping the current design. Calls are
+   * serialised: a switch requested while another is loading runs after it.
+   */
+  select(index: number): Promise<void> {
+    const run = this.switching.then(() => this.selectNow(index));
+    this.switching = run.catch(() => {});
+    return run;
+  }
+
+  private switching: Promise<void> = Promise.resolve();
+
+  private async selectNow(index: number): Promise<void> {
     if (index === this.currentIndex || !this.queue[index]) return;
     await this.stashCurrent();
     this.currentIndex = index;
@@ -368,6 +385,7 @@ export class EditorSession {
       case 'applied':
         entry.status = 'applied';
         entry.info = { ...entry.info, reskinned: true, customIcon: true };
+        this.cancelAutosave();
         void this.deps.commands.autosave(null);
         play('success');
         break;
@@ -561,6 +579,11 @@ export class EditorSession {
     this.autosaveTimer = setTimeout(() => void this.flushAutosave(), AUTOSAVE_DELAY_MS);
   }
 
+  private cancelAutosave(): void {
+    if (this.autosaveTimer) clearTimeout(this.autosaveTimer);
+    this.autosaveTimer = null;
+  }
+
   async flushAutosave(): Promise<void> {
     if (this.autosaveTimer) clearTimeout(this.autosaveTimer);
     this.autosaveTimer = null;
@@ -588,6 +611,7 @@ export class EditorSession {
   }
 
   discardAutosave(): Promise<void> {
+    this.cancelAutosave();
     return this.deps.commands.autosave(null);
   }
 
@@ -605,6 +629,7 @@ export class EditorSession {
 
   /** Forgets the queue (after the editor closed). */
   reset(): void {
+    this.cancelAutosave();
     this.queue = [];
     this.currentIndex = -1;
     this.elevation = null;
