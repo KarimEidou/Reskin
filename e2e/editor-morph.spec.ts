@@ -207,6 +207,52 @@ test.describe('handoff protocol', () => {
     expect(painted).toBe(0);
   });
 
+  test('a modal scrim never paints the transparent shadow margin', async ({ openEditor, page }) => {
+    await openEditor();
+    await simulateOpen(page, [], 'start');
+    await page.waitForTimeout(400);
+    const shot = async () => PNG.sync.read(await page.screenshot({ omitBackground: true }));
+    const alphaIn = (png: PNG, x: number, y: number) => png.data[(y * png.width + x) * 4 + 3]!;
+    const before = await shot();
+    await page.getByRole('button', { name: 'Restore all icons…' }).click();
+    await expect(page.getByRole('dialog', { name: 'Restore all icons?' })).toBeVisible();
+    await page.waitForTimeout(400);
+    const after = await shot();
+    const { width: w, height: h } = after;
+    // The 12 px margin around the panel (corners, edge midpoints) looks the
+    // same as without the dialog: only the panel's own shadow, no scrim…
+    for (const [x, y] of [
+      [2, 2],
+      [w - 3, 2],
+      [2, h - 3],
+      [w - 3, h - 3],
+      [Math.round(w / 2), 3],
+      [3, Math.round(h / 2)],
+      [w - 4, Math.round(h / 2)],
+      [Math.round(w / 2), h - 4],
+    ] as const) {
+      expect(Math.abs(alphaIn(after, x, y) - alphaIn(before, x, y)), `alpha at ${x},${y}`).toBeLessThanOrEqual(1);
+    }
+    expect(alphaIn(after, 2, 2)).toBe(0);
+    // …while the panel under the scrim is painted.
+    expect(alphaIn(after, 40, 200)).toBeGreaterThan(200);
+  });
+
+  test('a closing editor ignores the keyboard', async ({ openEditor, page }) => {
+    await openEditor({ settings: { animationSpeed: 0.5 } });
+    const { session } = await simulateOpen(page, [SAMPLE_PATHS.steam], 'edit');
+    await designLoaded(page);
+    const tool = () => page.evaluate(() => (window as unknown as { __reskinSession: { engine: { selectedToolId: string } } }).__reskinSession.engine.selectedToolId);
+    const before = await tool();
+    await pushEditorCmd(page, { type: 'collapse', session, boxRect: { x: 32, y: 32, w: 148, h: 148 }, then: 'hide', icon: null, morph: true });
+    await expect(page.locator('html')).toHaveAttribute('data-stage', 'animating');
+    await page.keyboard.press('e');
+    await page.keyboard.press('Escape');
+    expect(await waitForAck(page, session, 'collapsed')).toBe(true);
+    expect(await tool()).toBe(before);
+    expect(await calls(page, 'editor_close')).toHaveLength(0);
+  });
+
   test('Escape closes the editor (editor_close user)', async ({ openEditor, page }) => {
     await openEditor();
     await simulateOpen(page, [], 'start');
@@ -339,12 +385,27 @@ test.describe('mailbox commands', () => {
   });
 });
 
+/**
+ * Pauses every running animation at `fraction` of its own timeline (delay
+ * included), so a screenshot shows one exact moment of the morph.
+ */
+async function freezeAt(page: Page, fraction: number): Promise<void> {
+  await page.evaluate((f) => {
+    for (const a of document.getAnimations()) {
+      a.pause();
+      const t = a.effect?.getComputedTiming();
+      a.currentTime = (Number(t?.delay ?? 0) + Number(t?.activeDuration ?? 0)) * f;
+    }
+  }, fraction);
+}
+
 test.describe('morph gallery', () => {
   for (const tone of ['dark', 'light'] as const) {
     test(`mid-morph frames (${tone})`, async ({ openEditor, page }) => {
       test.slow();
-      await openEditor({ settings: { theme: tone, animationSpeed: 0.5 }, accent: '#0078d4' });
+      await openEditor({ settings: { theme: tone }, accent: '#0078d4' });
       await wallpaper(page, tone);
+      const suffix = tone === 'light' ? '-light' : '';
       const items = await makeItems(page, [SAMPLE_PATHS.steam]);
       const boxRect = { x: 1080, y: 520, w: 148, h: 148 };
       await pushEditorCmd(page, {
@@ -357,15 +418,27 @@ test.describe('morph gallery', () => {
         morph: true,
       });
       await waitForAck(page, 1, 'prepared');
-      await shoot(page, `editor-shell-morph-0-proxy${tone === 'light' ? '-light' : ''}.png`);
+      await shoot(page, `editor-shell-morph-0-proxy${suffix}.png`);
       await pushEditorCmd(page, { type: 'reveal', session: 1 });
       await waitForAck(page, 1, 'revealed');
       await pushEditorCmd(page, { type: 'expand', session: 1, morph: true });
-      for (const [i, ms] of [70, 140, 320].entries()) {
-        await page.waitForTimeout(i === 0 ? ms : ms - [70, 140, 320][i - 1]!);
-        await shoot(page, `editor-shell-morph-${i + 1}${tone === 'light' ? '-light' : ''}.png`);
+      await page.waitForFunction(() => document.getAnimations().length >= 3);
+      // Three moments of the expand, then let it finish.
+      for (const [i, f] of [0.08, 0.2, 0.45].entries()) {
+        await freezeAt(page, f);
+        await shoot(page, `editor-shell-morph-${i + 1}${suffix}.png`);
       }
+      await page.evaluate(() => document.getAnimations().forEach((a) => a.play()));
       expect(await waitForAck(page, 1, 'expanded')).toBe(true);
+      await expect(frame(page)).toHaveAttribute('data-mode', 'open');
+
+      // And one moment of the collapse back into the box.
+      await pushEditorCmd(page, { type: 'collapse', session: 1, boxRect, then: 'hide', icon: null, morph: true });
+      await page.waitForFunction(() => document.getAnimations().length >= 3);
+      await freezeAt(page, 0.3);
+      await shoot(page, `editor-shell-morph-4-collapse${suffix}.png`);
+      await page.evaluate(() => document.getAnimations().forEach((a) => a.play()));
+      expect(await waitForAck(page, 1, 'collapsed')).toBe(true);
     });
   }
 });

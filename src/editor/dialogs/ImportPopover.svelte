@@ -154,7 +154,11 @@
       <FolderOpen size={18} aria-hidden="true" />
       <span>
         <strong>{projects.length > 0 ? 'Open the project' : 'Open as a new design'}</strong>
-        <small>Replaces what you're editing now.</small>
+        <small>
+          {projects.length === 0 && session.queue.length > 1
+            ? `Replaces what you're editing and clears the queue (${session.queue.length} icons).`
+            : "Replaces what you're editing now."}
+        </small>
       </span>
     </button>
     <button type="button" class="cancel" onclick={() => (open = false)}>Cancel</button>

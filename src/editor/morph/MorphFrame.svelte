@@ -35,7 +35,10 @@
     compat?: boolean;
     /** Panel content (title bar + views). */
     children: Snippet;
-    /** Rest mode changes (after an animation settled). */
+    /**
+     * Every mode change, including 'animating' when a morph or fade starts
+     * (the shell stops being interactive right away, e.g. as a close begins).
+     */
     onmode?: (mode: FrameMode) => void;
   }
 
@@ -69,8 +72,9 @@
   }
 
   function setMode(next: FrameMode): void {
+    if (mode === next) return;
     mode = next;
-    if (next !== 'animating') onmode?.(next);
+    onmode?.(next);
   }
 
   function geometry(): MorphGeometry | null {

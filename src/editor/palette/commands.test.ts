@@ -89,6 +89,7 @@ beforeEach(() => {
     openPalette: vi.fn(() => {}),
     openShortcuts: vi.fn(() => {}),
     openImage: vi.fn(async () => {}),
+    newBlank: vi.fn(async () => {}),
     restoreAll: vi.fn(async () => {}),
     refreshIcons: vi.fn(async () => {}),
     openReleases: vi.fn(async () => {}),
@@ -233,6 +234,24 @@ describe('commandForKey', () => {
     expect(commandForKey(bindings, press('z', { ctrlKey: true }), ctx)).toBeNull(); // nothing to undo
     session.hasDesign = false;
     expect(commandForKey(bindings, press('b'), ctx)).toBeNull();
+  });
+
+  it('keeps design-changing shortcuts to the Edit view', () => {
+    session.engine.addLayer();
+    session.view = 'library';
+    // A tool letter, Ctrl+Z, a layer command or Save & Apply on another page do nothing…
+    expect(commandForKey(bindings, press('b'), ctx)).toBeNull();
+    expect(commandForKey(bindings, press('z', { ctrlKey: true }), ctx)).toBeNull();
+    expect(commandForKey(bindings, press('j', { ctrlKey: true }), ctx)).toBeNull();
+    expect(commandForKey(bindings, press('Enter', { ctrlKey: true, code: 'Enter' }), ctx)).toBeNull();
+    // …while app-level and non-destructive shortcuts still work there.
+    expect(commandForKey(bindings, press('k', { ctrlKey: true }), ctx)?.id).toBe('app.palette');
+    expect(commandForKey(bindings, press('s', { ctrlKey: true }), ctx)?.id).toBe('library.save');
+    // The palette still offers the tools (and switches to Edit when run).
+    expect(availableCommands(commands, ctx).map((c) => c.id)).toContain('tool.brush');
+    session.view = 'edit';
+    expect(commandForKey(bindings, press('b'), ctx)?.id).toBe('tool.brush');
+    expect(commandForKey(bindings, press('Enter', { ctrlKey: true, code: 'Enter' }), ctx)?.id).toBe('apply');
   });
 
   it('ignores bare keys while typing or in menus, but not Ctrl+K', () => {

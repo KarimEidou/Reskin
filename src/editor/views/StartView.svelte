@@ -34,21 +34,21 @@
 
   let designs = $state.raw<LibraryEntry[] | null>(null);
   let changes = $state.raw<HistoryEntry[] | null>(null);
-  let recovery = $state<string | null>(null);
   let busy = $state<string | null>(null);
 
   const s = $derived(settings());
   const boxMetrics = metricsFor('small');
+  /** Offer the autosave only when nothing is open (an open design autosaves itself). */
+  const recovery = $derived(session.hasDesign ? null : shell.recovery);
 
   async function load(): Promise<void> {
-    const [lib, hist, auto] = await Promise.all([
+    const [lib, hist] = await Promise.all([
       commands.libraryList().catch(() => [] as LibraryEntry[]),
       commands.historyList().catch(() => [] as HistoryEntry[]),
-      session.recoverable(),
+      shell.refreshRecovery(),
     ]);
     designs = lib.slice(0, 6);
     changes = hist.slice(0, 4);
-    recovery = auto;
   }
 
   $effect(() => {
@@ -83,26 +83,20 @@
     const json = recovery;
     if (!json) return;
     try {
-      await session.restoreAutosave(json);
-      recovery = null;
+      await shell.restoreRecovery(json);
     } catch (e) {
       toast({ message: `Could not restore the design: ${errorText(e)}`, kind: 'error' });
     }
   }
 
   async function discardDraft(): Promise<void> {
-    recovery = null;
     try {
-      await session.discardAutosave();
+      await shell.discardRecovery();
     } catch (e) {
       toast({ message: `Could not discard: ${errorText(e)}`, kind: 'error' });
     }
   }
 
-  function blank(): void {
-    session.newBlank();
-    session.navigate('edit');
-  }
 </script>
 
 <ViewScaffold
@@ -137,7 +131,7 @@
       <p>…or onto the box on your desktop. Several at once become a queue you can style in one go.</p>
       <div class="actions">
         <Button variant="primary" icon={ImagePlus} onclick={() => shell.openImage()}>Open image…</Button>
-        <Button icon={FilePlus} onclick={blank}>New blank icon</Button>
+        <Button icon={FilePlus} onclick={() => shell.newBlank()}>New blank icon</Button>
         <Button icon={Monitor} onclick={() => shell.navigate('systemIcons')}>System icons</Button>
         <Button icon={Library} onclick={() => shell.navigate('library')}>Library</Button>
       </div>

@@ -11,6 +11,7 @@
   import Button from '$lib/ui/Button.svelte';
   import Dialog from '$lib/ui/Dialog.svelte';
   import { getSession } from '../state/context';
+  import { autofocus } from './autofocus';
 
   const session = getSession();
 
@@ -28,7 +29,7 @@
   <Dialog
     bind:open
     title="Administrator permission needed"
-    size="md"
+    size="lg"
     onclose={() => session.dismissElevation()}
   >
     <div class="body" data-testid="elevation-dialog">
@@ -58,7 +59,7 @@
       {#if canCopy}
         <Button icon={Copy} onclick={() => void session.personalCopy()}>Make a personal copy</Button>
       {/if}
-      <Button variant="primary" icon={ShieldCheck} onclick={() => void session.approveElevation()}>
+      <Button variant="primary" icon={ShieldCheck} onclick={() => void session.approveElevation()} {@attach autofocus}>
         Allow (administrator)
       </Button>
     {/snippet}

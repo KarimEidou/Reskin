@@ -53,6 +53,14 @@ test.describe('elevation', () => {
     await expect(dialog).toContainText('Firefox');
     await expect(dialog).toContainText('Public Desktop');
     await expect(dialog).toContainText('Access is denied.');
+    // Every button fits inside the dialog.
+    const box = (await dialog.boundingBox())!;
+    for (const name of ['Cancel', 'Make a personal copy', 'Allow (administrator)']) {
+      const b = (await dialog.getByRole('button', { name, exact: true }).boundingBox())!;
+      expect(b.x, name).toBeGreaterThanOrEqual(box.x);
+      expect(b.x + b.width, name).toBeLessThanOrEqual(box.x + box.width);
+    }
+    await expect(dialog.getByRole('button', { name: 'Allow (administrator)' })).toBeFocused();
     if (process.env.RESKIN_SCREENSHOTS === '1') {
       mkdirSync(SHOTS_DIR, { recursive: true });
       writeFileSync(join(SHOTS_DIR, 'editor-shell-elevation.png'), await page.screenshot());

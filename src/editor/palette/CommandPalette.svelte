@@ -217,7 +217,7 @@
   </div>
 
   <footer class="hints" aria-hidden="true">
-    <span><Kbd keys={['↑', '↓']} size="sm" /> navigate</span>
+    <span><Kbd keys="↑" size="sm" /><Kbd keys="↓" size="sm" /> navigate</span>
     <span><span class="enter"><CornerDownLeft size={11} /></span> run</span>
     <span><Kbd keys="Esc" size="sm" /> close</span>
   </footer>

@@ -35,7 +35,15 @@ export class Shell {
   /** Bumped when the Library changed outside the Library view. */
   libraryEpoch = $state(0);
 
+  /**
+   * An autosaved design offered for recovery (the Start banner and the
+   * crash-recovery dialog share it; null once restored or discarded).
+   */
+  recovery = $state<string | null>(null);
+
   private chain: Promise<void> = Promise.resolve();
+  private picking = false;
+  private recoveryVersion = 0;
 
   constructor(session: EditorSession) {
     this.session = session;
@@ -59,8 +67,11 @@ export class Shell {
   openItems(items: ItemInfo[], opts: { replace?: boolean } = {}): Promise<void> {
     if (items.length === 0 && !opts.replace) return Promise.resolve();
     this.loading += 1;
+    // A load still queued when the editor closed and reopened belongs to
+    // the old open: skip it rather than leak its items into the new one.
+    const epoch = this.openEpoch;
     const next = this.chain
-      .then(() => this.session.openItems(items, opts))
+      .then(() => (epoch === this.openEpoch ? this.session.openItems(items, opts) : undefined))
       .catch((e: unknown) => {
         toast({ message: `Could not open ${items.length === 1 ? items[0]!.name : 'the items'}: ${errorText(e)}`, kind: 'error' });
         play('error');
@@ -79,12 +90,17 @@ export class Shell {
 
   /** "Open image…": native picker, then open/add what was picked. */
   async openImage(): Promise<void> {
+    // One picker at a time (double clicks, Ctrl+O while it is open).
+    if (this.picking) return;
+    this.picking = true;
     let picked: ItemInfo[];
     try {
       picked = await commands.pickFiles('import');
     } catch (e) {
       toast({ message: `Could not open the file picker: ${errorText(e)}`, kind: 'error' });
       return;
+    } finally {
+      this.picking = false;
     }
     if (picked.length === 0) return;
     await this.openItems(picked);
@@ -92,6 +108,47 @@ export class Shell {
     if (targets > 0 && this.session.queue.length > 1) {
       toast({ message: `Added ${targets} item${targets === 1 ? '' : 's'} to the queue.`, kind: 'info' });
     }
+  }
+
+  /**
+   * Starts a blank design in the Edit view. It replaces the open design
+   * (and its undo history), so unsaved edits are confirmed first.
+   */
+  async newBlank(): Promise<void> {
+    const { session } = this;
+    if (session.hasDesign && session.engine.canUndo) {
+      const ok = await confirm({
+        title: 'Start a blank icon?',
+        message: 'Your changes to the current design will be lost. Save it to the Library first to keep it.',
+        confirmLabel: 'Start blank',
+        danger: true,
+      });
+      if (!ok) return;
+    }
+    session.newBlank();
+    session.navigate('edit');
+  }
+
+  /** Re-reads the autosave offered for recovery. */
+  async refreshRecovery(): Promise<void> {
+    const asked = this.recoveryVersion;
+    const draft = await this.session.recoverable();
+    // A Restore / Discard made while reading wins over the stale answer.
+    if (asked === this.recoveryVersion) this.recovery = draft;
+  }
+
+  /** Opens the autosaved design (rejects when it can't be loaded). */
+  async restoreRecovery(json: string): Promise<void> {
+    await this.session.restoreAutosave(json);
+    this.recoveryVersion += 1;
+    this.recovery = null;
+  }
+
+  /** Forgets the autosaved design (rejects when the file can't be cleared). */
+  async discardRecovery(): Promise<void> {
+    this.recoveryVersion += 1;
+    this.recovery = null;
+    await this.session.discardAutosave();
   }
 
   /** Asks, then puts back every original icon Reskin changed. */

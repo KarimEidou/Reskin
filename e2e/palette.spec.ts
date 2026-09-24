@@ -154,6 +154,45 @@ test.describe('global shortcuts', () => {
     expect(await toolId(page)).toBe('brush');
   });
 
+  test('tool keys and undo only act in the Edit view', async ({ openEditor, page }) => {
+    await openEditor();
+    await openWithDesign(page);
+    await page.keyboard.press('Control+Shift+N');
+    const layers = await layerCount(page);
+    await page.getByRole('button', { name: 'History' }).first().click();
+    await expect(page.getByTestId('history-view')).toBeVisible();
+    await page.locator('body').click({ position: { x: 600, y: 400 } });
+    await page.keyboard.press('e');
+    await page.keyboard.press('Control+z');
+    // Nothing changed out of sight, and the page stayed put.
+    expect(await toolId(page)).not.toBe('eraser');
+    expect(await layerCount(page)).toBe(layers);
+    await expect(page.getByTestId('history-view')).toBeVisible();
+    // Back in Edit they work.
+    await page.getByRole('button', { name: 'Edit', exact: true }).click();
+    await page.keyboard.press('e');
+    expect(await toolId(page)).toBe('eraser');
+  });
+
+  test('Ctrl+N asks before dropping unsaved edits', async ({ openEditor, page }) => {
+    await openEditor();
+    await openWithDesign(page);
+    await page.keyboard.press('Control+Shift+N');
+    const layers = await layerCount(page);
+    await page.keyboard.press('Control+n');
+    const confirm = page.getByRole('dialog', { name: 'Start a blank icon?' });
+    await expect(confirm).toBeVisible();
+    await confirm.getByRole('button', { name: 'Cancel' }).click();
+    await expect(confirm).toBeHidden();
+    expect(await layerCount(page)).toBe(layers);
+    await page.keyboard.press('Control+n');
+    await confirm.getByRole('button', { name: 'Start blank' }).click();
+    await expect(confirm).toBeHidden();
+    // A fresh blank document (for the queued item) replaced the edited one.
+    await expect.poll(() => layerCount(page)).toBe(1);
+    expect(await page.evaluate(() => (window as unknown as { __reskinSession: { engine: { canUndo: boolean } } }).__reskinSession.engine.canUndo)).toBe(false);
+  });
+
   test('Ctrl+, opens Settings', async ({ openEditor, page }) => {
     await openEditor();
     await simulateOpen(page, [], 'start');

@@ -81,9 +81,10 @@
         <button
           type="button"
           class="card"
-          disabled={loaded && !slot.info}
+          class:failed={slot.error !== null}
+          disabled={!slot.info}
           onclick={() => edit(slot)}
-          aria-label={slot.info ? `Edit ${slot.info.name}` : undefined}
+          aria-label={slot.info ? `Edit ${slot.info.name}` : slot.error ? `Unavailable: ${slot.error}` : 'Loading'}
         >
           <span class="icon" class:skeleton={!slot.info}>
             {#if slot.info?.icon}<img src={slot.info.icon} alt="" draggable="false" />{/if}
@@ -148,7 +149,11 @@
     outline-offset: 2px;
   }
   .card:disabled {
+    cursor: progress;
+  }
+  .card.failed {
     opacity: 0.55;
+    cursor: default;
   }
   .icon {
     display: grid;

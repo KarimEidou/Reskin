@@ -106,14 +106,17 @@
   }
 
   function onRenameKey(e: KeyboardEvent, entry: LibraryEntry): void {
+    if (e.key !== 'Enter' && e.key !== 'Escape') return;
+    e.preventDefault();
+    // Keyboard users continue from the card's menu button, not from <body>.
+    const card = (e.currentTarget as HTMLElement).closest('li');
     if (e.key === 'Enter') {
-      e.preventDefault();
       void commitRename(entry);
-    } else if (e.key === 'Escape') {
-      e.preventDefault();
+    } else {
       e.stopPropagation();
       renaming = null;
     }
+    void tick().then(() => card?.querySelector<HTMLElement>('.more-btn')?.focus());
   }
 
   async function remove(entry: LibraryEntry): Promise<void> {

@@ -79,6 +79,10 @@
   /** Swatch metrics for the skin picker (a small box). */
   const SWATCH = { window: 76, visual: 56, margin: 10, radius: 15 };
 
+  /** Opacity shown by the preview while the slider is dragged (null: the saved value). */
+  let dragOpacity = $state<number | null>(null);
+  const previewOpacity = $derived(dragOpacity ?? s.idleOpacity);
+
   let active = $state<SettingsSection>('appearance');
   let scroller: HTMLElement | undefined = $state();
   const sectionEls: Partial<Record<SettingsSection, HTMLElement>> = {};
@@ -99,6 +103,14 @@
     } catch (e) {
       toast({ message: `Couldn't use that shortcut: ${errorText(e)}`, kind: 'error' });
       throw new Error(errorText(e));
+    }
+  }
+
+  async function openLicense(): Promise<void> {
+    try {
+      await commands.openExternal('license');
+    } catch (e) {
+      toast({ message: `Could not open the license: ${errorText(e)}`, kind: 'error' });
     }
   }
 
@@ -188,7 +200,7 @@
               <BoxVisual
                 metrics={metricsFor(s.boxSize)}
                 skin={s.boxSkin}
-                opacity={s.idleOpacity}
+                opacity={previewOpacity}
                 compat={s.compatibilityMode}
                 reducedMotion={motion.reduced}
               />
@@ -227,7 +239,10 @@
               step={0.01}
               value={s.idleOpacity}
               format={(v) => `${Math.round(v * 100)} %`}
-              onchange={(v) => set({ idleOpacity: v })}
+              oninput={(v) => (dragOpacity = v)}
+              onchange={(v) => {
+                void set({ idleOpacity: v }).finally(() => (dragOpacity = null));
+              }}
             />
           </div>
         </div>
@@ -380,7 +395,7 @@
           </div>
           <div class="about-actions">
             <Button icon={ExternalLink} onclick={() => shell.openReleases()}>Releases</Button>
-            <Button variant="ghost" icon={Scale} onclick={() => void commands.openExternal('license').catch(() => {})}>
+            <Button variant="ghost" icon={Scale} onclick={openLicense}>
               MIT license
             </Button>
           </div>

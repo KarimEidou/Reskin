@@ -43,6 +43,8 @@ export interface CommandContext {
   openShortcuts(): void;
   /** File picker → open or add the picked images/shortcuts. */
   openImage(): Promise<void>;
+  /** A blank design (asks first when the open one has unsaved edits). */
+  newBlank(): Promise<void>;
   /** Asks for confirmation, then restores every icon Reskin changed. */
   restoreAll(): Promise<void>;
   refreshIcons(): Promise<void>;
@@ -65,6 +67,12 @@ export interface Command {
   global?: boolean;
   /** Keeps firing while the key is held (undo, zoom). */
   repeatable?: boolean;
+  /**
+   * The shortcut only fires in the Edit view, where its effect is visible
+   * (a tool letter or Ctrl+Z pressed on the Library page must not change
+   * the design out of sight). The palette still lists the command.
+   */
+  editOnly?: boolean;
   /** Available right now? (palette lists it / shortcut fires). */
   when?(ctx: CommandContext): boolean;
   run(ctx: CommandContext): unknown;
@@ -121,6 +129,7 @@ export function createCommands(tools: ToolInfo): Command[] {
       label: 'Save & Apply',
       group: 'Apply & export',
       keys: 'Ctrl+Enter',
+      editOnly: true,
       keywords: ['apply', 'change icon', 'save'],
       when: (c) => editing(c) && c.session.canApply,
       run: (c) => c.session.apply(),
@@ -200,6 +209,7 @@ export function createCommands(tools: ToolInfo): Command[] {
       label: `${tool.label} tool`,
       group: 'Tools',
       keys: tool.shortcut || undefined,
+      editOnly: true,
       keywords: [id],
       when: editing,
       run: (c) => {
@@ -216,6 +226,7 @@ export function createCommands(tools: ToolInfo): Command[] {
       label: 'Undo',
       group: 'Edit',
       keys: 'Ctrl+Z',
+      editOnly: true,
       repeatable: true,
       when: (c) => editing(c) && c.session.engine.canUndo,
       run: (c) => c.session.engine.undo(),
@@ -225,6 +236,7 @@ export function createCommands(tools: ToolInfo): Command[] {
       label: 'Redo',
       group: 'Edit',
       keys: 'Ctrl+Y',
+      editOnly: true,
       altKeys: ['Ctrl+Shift+Z'],
       repeatable: true,
       when: (c) => editing(c) && c.session.engine.canRedo,
@@ -262,6 +274,7 @@ export function createCommands(tools: ToolInfo): Command[] {
       label: 'New layer',
       group: 'Edit',
       keys: 'Ctrl+Shift+N',
+      editOnly: true,
       keywords: ['add layer'],
       when: editing,
       run: (c) => {
@@ -274,6 +287,7 @@ export function createCommands(tools: ToolInfo): Command[] {
       label: 'Duplicate layer',
       group: 'Edit',
       keys: 'Ctrl+J',
+      editOnly: true,
       keywords: ['copy layer'],
       when: (c) => editing(c) && c.session.engine.activeLayer !== null,
       run: (c) => c.session.engine.duplicateLayer(),
@@ -283,6 +297,7 @@ export function createCommands(tools: ToolInfo): Command[] {
       label: 'Merge layer down',
       group: 'Edit',
       keys: 'Ctrl+E',
+      editOnly: true,
       keywords: ['combine'],
       when: (c) => editing(c) && c.session.engine.doc.layers.length > 1,
       run: (c) => c.session.engine.mergeDown(),
@@ -522,10 +537,7 @@ export function createCommands(tools: ToolInfo): Command[] {
       keys: 'Ctrl+N',
       keywords: ['empty', 'create', 'draw'],
       when: idle,
-      run: (c) => {
-        c.session.newBlank();
-        c.session.navigate('edit');
-      },
+      run: (c) => c.newBlank(),
     },
     {
       id: 'app.restoreAll',
@@ -607,7 +619,8 @@ export interface KeyEventInfo extends KeyLike {
 /**
  * The command a keydown should run, or null. Shortcuts without Ctrl/Alt
  * never fire while typing or inside widgets with their own letter keys
- * (menus, listboxes); `global` commands always may.
+ * (menus, listboxes); `global` commands always may. `editOnly` shortcuts
+ * need the Edit view.
  */
 export function commandForKey(
   bindings: readonly CompiledBinding[],
@@ -617,8 +630,10 @@ export function commandForKey(
   const target = e.target as Parameters<typeof isTypingTarget>[0];
   const typing = isTypingTarget(target);
   const widget = isWidgetTarget(target);
+  const editView = ctx.session.view === 'edit';
   for (const { combo, command } of bindings) {
     if (!matchesCombo(combo, e)) continue;
+    if (command.editOnly && !editView) continue;
     if (!command.global) {
       if (typing) continue;
       if (widget && isBareKey(combo)) continue;

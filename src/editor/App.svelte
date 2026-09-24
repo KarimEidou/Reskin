@@ -88,6 +88,7 @@
       shell.shortcutsOpen = true;
     },
     openImage: () => shell.openImage(),
+    newBlank: () => shell.newBlank(),
     restoreAll: async () => {
       await shell.restoreAll();
     },
@@ -115,7 +116,8 @@
     applySettingsFromMailbox(cmd.settings);
     session.reset();
     shell.openEpoch += 1;
-    const view = cmd.items.length > 0 ? 'edit' : cmd.view;
+    // Items open in Edit; "edit" without anything to edit is the Start page.
+    const view = cmd.items.length > 0 ? 'edit' : cmd.view === 'edit' ? 'start' : cmd.view;
     shell.navigate(view);
     // The items load in the background; only the proxy must be ready.
     if (cmd.items.length > 0) void shell.openItems(cmd.items, { replace: true });
@@ -349,6 +351,13 @@
   /* Portalled menus / popovers / tooltips only show over the open panel. */
   :global(html:not([data-stage='open']) body > :not(#app)) {
     visibility: hidden;
+  }
+  /* Modal scrims cover the panel only: the window's 12 px shadow margin is
+     transparent desktop, and a scrim there would outline the window's
+     square bounds. (Compatibility mode: the panel fills the window.) */
+  :global(html:not([data-compat='true']) dialog::backdrop) {
+    inset: 12px;
+    border-radius: 16px;
   }
   .toasts {
     visibility: hidden;

@@ -134,6 +134,8 @@ test.describe('start', () => {
     await view.getByRole('button', { name: 'Restore all icons…' }).click();
     const confirm = page.getByRole('dialog', { name: 'Restore all icons?' });
     await expect(confirm).toBeVisible();
+    // A destructive question starts on Cancel, so Enter can't restore by accident.
+    await expect(confirm.getByRole('button', { name: 'Cancel' })).toBeFocused();
     await confirm.getByRole('button', { name: 'Cancel' }).click();
     await expect(confirm).toBeHidden();
     expect((await calls(page, 'restore')).length).toBe(1);
@@ -252,6 +254,8 @@ test.describe('library', () => {
     await nameField.fill('Steam — Neon');
     await page.keyboard.press('Enter');
     await expect(card).toContainText('Steam — Neon');
+    // Keyboard focus continues from the card, not from the page.
+    await expect(card.getByRole('button', { name: 'More actions for Steam — Neon' })).toBeFocused();
     const saves = await calls(page, 'library_save');
     const renamed = saves.at(-1)!.args.entry as LibrarySave;
     const [stored] = await page.evaluate(() => window.__e2e!.library);
@@ -435,8 +439,8 @@ test.describe('settings', () => {
 });
 
 test.describe('recovery', () => {
-  test('Restore opens the design; Discard deletes it', async ({ openEditor, page }) => {
-    await openEditor();
+  /** Leaves an autosaved Steam design behind, as a crash would. */
+  async function leaveAutosave(page: Page): Promise<void> {
     await simulateOpen(page, [SAMPLE_PATHS.steam], 'edit');
     await hasDesign(page);
     await page.evaluate(async () => {
@@ -447,19 +451,55 @@ test.describe('recovery', () => {
       await invoke('autosave', { data: json });
     });
     await simulateClose(page);
+  }
+
+  const dialogOf = (page: Page) => page.getByRole('dialog', { name: 'Restore your unsaved design?' });
+  const bannerOf = (page: Page) => page.getByRole('region', { name: 'Unsaved design' });
+
+  test('Restore opens the design (focused by default)', async ({ openEditor, page }) => {
+    await openEditor();
+    await leaveAutosave(page);
     // The first Start view of this page offers it.
     await simulateOpen(page, [], 'start');
-    const dialog = page.getByRole('dialog', { name: 'Restore your unsaved design?' });
+    const dialog = dialogOf(page);
     await expect(dialog).toBeVisible();
-    await dialog.getByRole('button', { name: 'Restore' }).click();
+    await expect(dialog.getByRole('button', { name: 'Restore' })).toBeFocused();
+    await page.keyboard.press('Enter');
     await expect(dialog).toBeHidden();
     await hasDesign(page);
     await expect(page.locator('[data-view-host]')).toHaveAttribute('data-view', 'edit');
     await expect(titleBar(page)).toContainText('Steam');
-
-    // The Start view keeps offering it until discarded.
+    // While that design is open the Start page doesn't offer it again.
     await page.getByRole('button', { name: 'Start page' }).click();
-    const banner = page.getByRole('region', { name: 'Unsaved design' });
+    await expect(page.getByTestId('start-view')).toBeVisible();
+    await expect(bannerOf(page)).toHaveCount(0);
+  });
+
+  test('Discard in the dialog deletes it everywhere', async ({ openEditor, page }) => {
+    await openEditor();
+    await leaveAutosave(page);
+    await simulateOpen(page, [], 'start');
+    const dialog = dialogOf(page);
+    await expect(dialog).toBeVisible();
+    await dialog.getByRole('button', { name: 'Discard' }).click();
+    await expect(dialog).toBeHidden();
+    await waitForCall(page, 'autosave', { data: null });
+    // The Start page's own offer went with it.
+    await expect(bannerOf(page)).toHaveCount(0);
+    expect(await page.evaluate(() => window.__e2e!.callsOf('restore').length)).toBe(0);
+  });
+
+  test('dismissing the dialog keeps it on the Start page until discarded', async ({ openEditor, page }) => {
+    await openEditor();
+    await leaveAutosave(page);
+    await simulateOpen(page, [], 'start');
+    const dialog = dialogOf(page);
+    await expect(dialog).toBeVisible();
+    await page.keyboard.press('Escape');
+    await expect(dialog).toBeHidden();
+    // Esc went to the dialog, not to closing the editor.
+    expect(await calls(page, 'editor_close')).toHaveLength(0);
+    const banner = bannerOf(page);
     await expect(banner).toBeVisible();
     await banner.getByRole('button', { name: 'Discard' }).click();
     await expect(banner).toBeHidden();

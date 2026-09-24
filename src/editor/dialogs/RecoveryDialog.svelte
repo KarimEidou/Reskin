@@ -1,15 +1,17 @@
 <!--
   Crash recovery: a design autosaved in an earlier session was never applied
-  or saved. Restore opens it; Discard deletes the autosave; Later keeps it
-  (the Start view offers it again).
+  or saved. Restore opens it; Discard deletes the autosave; closing the
+  dialog keeps it (the Start view's banner still offers it). Both share
+  shell.recovery, so a choice here updates the banner too.
 -->
 <script lang="ts">
   import LifeBuoy from '@lucide/svelte/icons/life-buoy';
   import Button from '$lib/ui/Button.svelte';
   import Dialog from '$lib/ui/Dialog.svelte';
   import { toast } from '$lib/ui/toasts.svelte';
-  import { getSession } from '../state/context';
+  import { getShell } from '../chrome/shell.svelte';
   import { errorText } from '../state/session.svelte';
+  import { autofocus } from './autofocus';
 
   interface Props {
     /** The autosaved project JSON, or null when there is nothing to offer. */
@@ -18,7 +20,7 @@
   }
 
   let { draft, onclose }: Props = $props();
-  const session = getSession();
+  const shell = getShell();
   let open = $state(false);
   let busy = $state(false);
 
@@ -30,7 +32,7 @@
     if (!draft) return;
     busy = true;
     try {
-      await session.restoreAutosave(draft);
+      await shell.restoreRecovery(draft);
       onclose();
     } catch (e) {
       toast({ message: `Could not restore the design: ${errorText(e)}`, kind: 'error' });
@@ -42,7 +44,7 @@
   async function discard(): Promise<void> {
     busy = true;
     try {
-      await session.discardAutosave();
+      await shell.discardRecovery();
     } catch (e) {
       toast({ message: `Could not discard it: ${errorText(e)}`, kind: 'error' });
     } finally {
@@ -60,7 +62,7 @@
     </div>
     {#snippet footer()}
       <Button variant="ghost" disabled={busy} onclick={discard}>Discard</Button>
-      <Button variant="primary" loading={busy} onclick={restore}>Restore</Button>
+      <Button variant="primary" loading={busy} onclick={restore} {@attach autofocus}>Restore</Button>
     {/snippet}
   </Dialog>
 {/if}

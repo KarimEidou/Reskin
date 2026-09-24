@@ -164,8 +164,8 @@
     align-items: center;
     gap: var(--space-2);
     flex: none;
-    height: 44px;
-    padding: 0 var(--space-2) 0 var(--space-2);
+    height: 40px;
+    padding: 0 var(--space-2);
     border-bottom: 1px solid var(--divider);
     user-select: none;
   }
