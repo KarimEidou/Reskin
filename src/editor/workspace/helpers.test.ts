@@ -23,7 +23,8 @@ describe('tool rail groups', () => {
   it('marks symmetry tools the engine replicates', () => {
     const tools = createTools();
     for (const id of TOOL_ORDER) expect(SYMMETRY_TOOLS.includes(id)).toBe(tools[id].usesSymmetry);
-    expect(SELECTION_TOOLS).toEqual(['selectRect', 'selectEllipse']);
+    expect(SELECTION_TOOLS).toEqual(['selectRect', 'selectEllipse', 'lasso', 'magicWand']);
+    expect(SYMMETRY_TOOLS).toEqual(['brush', 'spray', 'pencil', 'eraser', 'stamp', 'smudge', 'blurSharpen', 'dodgeBurn']);
   });
 
   it('uses unique group ids', () => {

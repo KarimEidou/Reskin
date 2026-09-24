@@ -1,22 +1,16 @@
 // Canvas-local keyboard handling, as a pure function (unit tested).
 //
-// The workspace owns the keys that act on the canvas itself: hold Space for
-// the hand tool, hold `\` for before/after, K for keyline guides, Ctrl+0 /
-// Ctrl+1 / Ctrl +/- for the view, X / D for the colour chips, and it
-// forwards Enter / Escape / arrows (and Delete) to the active tool while
-// the canvas has focus. Tool letters, undo/redo and the rest live in the
-// app-wide command registry.
+// The workspace owns the keys that act on the canvas itself (STAGE_KEYS):
+// hold Space for the hand tool, hold `\` for before/after, and it forwards
+// Enter / Escape / arrows / Delete / Backspace to the active tool while the
+// canvas has focus. Everything else, view and colour keys included (K, X,
+// D, Ctrl+0 / Ctrl+1 / Ctrl +/-), belongs to the app-wide command registry
+// (palette/commands.ts): every key has exactly one owner.
 
 export type StageKeyAction =
   | { type: 'hand'; on: boolean }
   | { type: 'compare'; on: boolean }
-  | { type: 'fit' }
-  | { type: 'actualSize' }
-  | { type: 'zoom'; direction: 1 | -1 }
-  | { type: 'keylines' }
-  | { type: 'swapColors' }
-  | { type: 'resetColors' }
-  /** Forward to `engine.keyDown(key, mods)` (Enter, Escape, arrows, Delete). */
+  /** Forward to `engine.keyDown(key, mods)` (Enter, Escape, arrows, Delete, Backspace). */
   | { type: 'tool'; key: string }
   /** Modifier keys changed during a drag: `engine.updateModifiers`. */
   | { type: 'modifiers' };
@@ -61,6 +55,34 @@ export interface KeyContext {
 const TOOL_KEYS = new Set(['Enter', 'Escape', 'ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight', 'Delete', 'Backspace']);
 const MODIFIER_KEYS = new Set(['Shift', 'Alt', 'Control', 'Meta']);
 
+/**
+ * Every key chord the stage acts on, in shortcut notation (palette/keys.ts):
+ * the holds and the tool keys, alone or with Shift (Shift+arrow nudges
+ * further). The command registry must bind none of them.
+ */
+export const STAGE_KEYS: readonly string[] = [
+  'Space',
+  '\\',
+  'Enter',
+  'Escape',
+  'Up',
+  'Down',
+  'Left',
+  'Right',
+  'Delete',
+  'Backspace',
+].flatMap((k) => [k, `Shift+${k}`]);
+
+/** The stage's keys as the shortcuts overlay lists them (shortcut notation, or a key cap's text). */
+export const STAGE_SHORTCUTS: ReadonlyArray<{ label: string; keys: readonly string[]; note?: string }> = [
+  { label: 'Pan the canvas', keys: ['Space'], note: 'hold + drag' },
+  { label: 'Compare with the original', keys: ['\\'], note: 'hold' },
+  { label: 'Commit a transform, text or lasso polygon', keys: ['Enter'] },
+  { label: 'Cancel the current operation', keys: ['Esc'] },
+  { label: 'Remove the last lasso corner', keys: ['Backspace'] },
+  { label: 'Nudge the layer or selection', keys: ['↑ ↓ ← →'], note: 'Shift: 10 px' },
+];
+
 function isBackslash(e: Pick<KeyLike, 'key' | 'code'>): boolean {
   return e.code === 'Backslash' || e.code === 'IntlBackslash' || e.key === '\\';
 }
@@ -82,19 +104,7 @@ export function stageKeyAction(e: KeyLike, c: KeyContext): StageKeyAction | null
   }
 
   if (MODIFIER_KEYS.has(e.key)) return c.interacting ? { type: 'modifiers' } : null;
-  if (c.typing) return null;
-
-  // View shortcuts work from anywhere in the editor except text fields.
-  if (e.ctrlKey && !e.altKey && !e.metaKey && !c.inOverlay) {
-    if (e.code === 'Digit0' || e.code === 'Numpad0' || e.key === '0') return { type: 'fit' };
-    if (e.code === 'Digit1' || e.code === 'Numpad1' || e.key === '1') return { type: 'actualSize' };
-    if (e.key === '+' || e.key === '=' || e.code === 'NumpadAdd' || e.code === 'Equal') return { type: 'zoom', direction: 1 };
-    if (e.key === '-' || e.key === '_' || e.code === 'NumpadSubtract' || e.code === 'Minus') {
-      return { type: 'zoom', direction: -1 };
-    }
-    return null;
-  }
-  if (!plain || c.inOverlay) return null;
+  if (c.typing || !plain || c.inOverlay) return null;
 
   // Holds: Space pans while the pointer is over the canvas (or nothing
   // else wants the key); a button reached with the keyboard keeps Space
@@ -114,18 +124,7 @@ export function stageKeyAction(e: KeyLike, c: KeyContext): StageKeyAction | null
     if (e.key === 'Escape' && (c.interacting || c.toolBusy)) return { type: 'tool', key: e.key };
     return c.canvasFocus ? { type: 'tool', key: e.key } : null;
   }
-
-  if (e.repeat || e.shiftKey) return null;
-  switch (e.key.toLowerCase()) {
-    case 'k':
-      return { type: 'keylines' };
-    case 'x':
-      return { type: 'swapColors' };
-    case 'd':
-      return { type: 'resetColors' };
-    default:
-      return null;
-  }
+  return null;
 }
 
 /** Minimal element shape for `focusContext` (unit tests pass plain objects). */

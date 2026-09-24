@@ -59,5 +59,5 @@ export function missingFromRail(order: readonly ToolId[] = TOOL_ORDER): ToolId[]
 /** Tools that paint strokes and therefore take the symmetry settings. */
 export const SYMMETRY_TOOLS: readonly ToolId[] = TOOL_ORDER.filter((id) => TOOL_META[id].usesSymmetry);
 
-/** Selection tools (the options bar adds select all / deselect / invert / feather). */
-export const SELECTION_TOOLS: readonly ToolId[] = ['selectRect', 'selectEllipse'];
+/** Selection tools (the options bar adds the Selection menu: select all, invert, feather, grow…). */
+export const SELECTION_TOOLS: readonly ToolId[] = ['selectRect', 'selectEllipse', 'lasso', 'magicWand'];

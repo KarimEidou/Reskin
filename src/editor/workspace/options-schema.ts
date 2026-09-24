@@ -105,37 +105,103 @@ const brushSpecs: SpecsFor<ToolOptionsMap['brush']> = [
   },
 ];
 
-const selectSpecs: SpecsFor<ToolOptionsMap['selectRect']> = [
-  {
-    kind: 'choice',
-    key: 'mode',
-    label: 'Selection mode',
-    iconOnly: true,
-    options: [
-      { value: 'replace', label: 'New selection', icon: 'selReplace' },
-      { value: 'add', label: 'Add to selection (Shift)', icon: 'selAdd' },
-      { value: 'subtract', label: 'Subtract from selection (Alt)', icon: 'selSubtract' },
-      { value: 'intersect', label: 'Intersect with selection (Shift+Alt)', icon: 'selIntersect' },
-    ],
-    priority: 1,
-  },
-  { kind: 'slider', key: 'feather', label: 'Feather', min: 0, max: 64, step: 1, unit: 'px', priority: 1 },
-  { kind: 'toggle', key: 'antialias', label: 'Smooth edges', priority: 2 },
-];
+/** How a new selection combines with the current one (every selection tool). */
+const selectionMode: ChoiceSpec<'mode'> = {
+  kind: 'choice',
+  key: 'mode',
+  label: 'Selection mode',
+  iconOnly: true,
+  options: [
+    { value: 'replace', label: 'New selection', icon: 'selReplace' },
+    { value: 'add', label: 'Add to selection (Shift)', icon: 'selAdd' },
+    { value: 'subtract', label: 'Subtract from selection (Alt)', icon: 'selSubtract' },
+    { value: 'intersect', label: 'Intersect with selection (Shift+Alt)', icon: 'selIntersect' },
+  ],
+  priority: 1,
+};
+
+/** Feather radius of a new selection, document px. */
+const feather = (priority: Priority): SliderSpec<'feather'> => ({
+  kind: 'slider',
+  key: 'feather',
+  label: 'Feather',
+  min: 0,
+  max: 64,
+  step: 1,
+  unit: 'px',
+  priority,
+});
+
+const smoothEdges: ToggleSpec<'antialias'> = { kind: 'toggle', key: 'antialias', label: 'Smooth edges', priority: 2 };
+
+const selectSpecs: SpecsFor<ToolOptionsMap['selectRect']> = [selectionMode, feather(1), smoothEdges];
+
+/** Brush diameter of the retouching tools, document px. */
+const retouchSize: SliderSpec<'size'> = {
+  kind: 'slider',
+  key: 'size',
+  label: 'Size',
+  min: 1,
+  max: 512,
+  step: 1,
+  unit: 'px',
+  log: true,
+  priority: 1,
+};
+
+/** An option stored as `min`..`max` of 1 and shown as a percentage. */
+const percent = <K extends string>(key: K, label: string, priority: Priority, min = 0, max = 1): SliderSpec<K> => ({
+  kind: 'slider',
+  key,
+  label,
+  min,
+  max,
+  step: 1,
+  percent: true,
+  unit: '%',
+  priority,
+});
+
+/** Dab spacing of the retouching tools, a fraction of the diameter (engine range 0.02..1). */
+const retouchSpacing: SliderSpec<'spacing'> = percent('spacing', 'Spacing', 2, 0.02, 1);
 
 export const TOOL_OPTION_SPECS: { readonly [K in ToolId]: SpecsFor<ToolOptionsMap[K]> } = {
   move: [],
-  // Placeholders until the options bar gets controls for these tools.
-  lasso: [],
-  magicWand: [],
-  spray: [],
-  stamp: [],
-  smudge: [],
-  blurSharpen: [],
-  dodgeBurn: [],
   selectRect: selectSpecs,
   selectEllipse: selectSpecs,
+  lasso: [
+    {
+      kind: 'choice',
+      key: 'kind',
+      label: 'Lasso type',
+      iconOnly: true,
+      options: [
+        { value: 'freehand', label: 'Freehand lasso', icon: 'lassoFreehand' },
+        { value: 'polygon', label: 'Polygonal lasso', icon: 'lassoPolygon' },
+      ],
+      priority: 1,
+    },
+    selectionMode,
+    feather(1),
+    smoothEdges,
+  ],
+  magicWand: [
+    selectionMode,
+    { kind: 'slider', key: 'tolerance', label: 'Tolerance', min: 0, max: 255, step: 1, priority: 1 },
+    { kind: 'toggle', key: 'contiguous', label: 'Contiguous', priority: 1 },
+    { kind: 'toggle', key: 'sampleMerged', label: 'All layers', priority: 1 },
+    smoothEdges,
+    feather(2),
+  ],
   brush: brushSpecs,
+  spray: [
+    { kind: 'slider', key: 'radius', label: 'Radius', min: 1, max: 256, step: 1, unit: 'px', log: true, priority: 1 },
+    percent('density', 'Density', 1, 0.01),
+    { kind: 'slider', key: 'dotSize', label: 'Dot size', min: 0.5, max: 32, step: 0.5, unit: 'px', priority: 1 },
+    percent('opacity', 'Opacity', 1),
+    percent('flow', 'Flow', 2, 0.01),
+    { kind: 'toggle', key: 'pressureDensity', label: 'Pressure controls density', priority: 2 },
+  ],
   eraser: brushSpecs,
   pencil: [
     { kind: 'slider', key: 'size', label: 'Size', min: 1, max: 64, step: 1, unit: 'px', priority: 1 },
@@ -278,6 +344,78 @@ export const TOOL_OPTION_SPECS: { readonly [K in ToolId]: SpecsFor<ToolOptionsMa
       priority: 1,
     },
   ],
+  stamp: [
+    {
+      kind: 'slider',
+      key: 'scale',
+      label: 'Scale',
+      min: 0.01,
+      max: 16,
+      step: 1,
+      percent: true,
+      unit: '%',
+      log: true,
+      priority: 1,
+    },
+    { kind: 'slider', key: 'rotation', label: 'Rotation', min: -180, max: 180, step: 1, unit: '°', priority: 1 },
+    percent('opacity', 'Opacity', 1),
+  ],
+  smudge: [
+    retouchSize,
+    percent('strength', 'Strength', 1),
+    percent('hardness', 'Hardness', 1),
+    retouchSpacing,
+    { kind: 'toggle', key: 'pressureStrength', label: 'Pressure controls strength', priority: 2 },
+  ],
+  blurSharpen: [
+    {
+      kind: 'choice',
+      key: 'mode',
+      label: 'Blur or sharpen',
+      hideCaption: true,
+      options: [
+        { value: 'blur', label: 'Blur' },
+        { value: 'sharpen', label: 'Sharpen' },
+      ],
+      priority: 1,
+    },
+    retouchSize,
+    percent('strength', 'Strength', 1),
+    { kind: 'slider', key: 'blurRadius', label: 'Blur radius', min: 0.3, max: 16, step: 0.1, unit: 'px', priority: 2 },
+    percent('hardness', 'Hardness', 2),
+    retouchSpacing,
+    { kind: 'toggle', key: 'pressureStrength', label: 'Pressure controls strength', priority: 2 },
+  ],
+  dodgeBurn: [
+    {
+      kind: 'choice',
+      key: 'mode',
+      label: 'Dodge or burn',
+      hideCaption: true,
+      options: [
+        { value: 'dodge', label: 'Dodge' },
+        { value: 'burn', label: 'Burn' },
+      ],
+      priority: 1,
+    },
+    {
+      kind: 'choice',
+      key: 'range',
+      label: 'Range',
+      dropdown: true,
+      options: [
+        { value: 'shadows', label: 'Shadows' },
+        { value: 'midtones', label: 'Midtones' },
+        { value: 'highlights', label: 'Highlights' },
+      ],
+      priority: 1,
+    },
+    percent('exposure', 'Exposure', 1),
+    retouchSize,
+    percent('hardness', 'Hardness', 2),
+    retouchSpacing,
+    { kind: 'toggle', key: 'pressureExposure', label: 'Pressure controls exposure', priority: 2 },
+  ],
   eyedropper: [
     {
       kind: 'choice',
@@ -397,13 +535,16 @@ export function keyStep(spec: SliderSpec, value: number, key: string, shift = fa
   return fromDisplay(spec, toDisplay(spec, value) + (up ? 1 : -1) * spec.step * steps);
 }
 
-/** "24 px", "80 %", "6". */
+/** Units written right after the number ("80%", "45°"); others get a space ("24 px"). */
+const TIGHT_UNITS = new Set(['%', '°']);
+
+/** "24 px", "80%", "45°", "6". */
 export function formatOption(spec: SliderSpec, value: number): string {
   const d = toDisplay(spec, value);
   const decimals = spec.step < 1 ? Math.min(3, (String(spec.step).split('.')[1] ?? '').length) : 0;
   const text = d.toFixed(decimals);
   if (!spec.unit) return text;
-  return spec.unit === '%' ? `${text}%` : `${text} ${spec.unit}`;
+  return TIGHT_UNITS.has(spec.unit) ? `${text}${spec.unit}` : `${text} ${spec.unit}`;
 }
 
 function clampTo(spec: SliderSpec, value: number): number {
