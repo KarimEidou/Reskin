@@ -1,5 +1,6 @@
 //! Reskin's platform logic, kept out of the Tauri crate so it can be unit
-//! tested on any host. Windows-only shell integration lives in [`win`].
+//! tested on any host. Windows-only shell integration lives in the `win`
+//! module (compiled on Windows only).
 
 pub mod geom;
 pub mod grpicon;
