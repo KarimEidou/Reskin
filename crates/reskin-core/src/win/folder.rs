@@ -20,14 +20,13 @@ use windows::Win32::Storage::FileSystem::{
 };
 use windows::Win32::System::WindowsProgramming::WritePrivateProfileStringW;
 use windows::Win32::UI::Shell::{
-    FCS_FORCEWRITE, FCS_READ, FCSM_ICONFILE, PathMakeSystemFolderW, PathUnmakeSystemFolderW,
+    FCS_FORCEWRITE, FCSM_ICONFILE, PathMakeSystemFolderW, PathUnmakeSystemFolderW,
     SHFOLDERCUSTOMSETTINGS, SHGetSetFolderCustomSettings,
 };
 use windows::core::{PCWSTR, PWSTR, w};
 
 use super::util::{
-    ComScope, ResultExt, from_wide, parse_icon_location, paths_equal_ci, pcwstr, resolve_icon_path,
-    wide,
+    ComScope, ResultExt, parse_icon_location, paths_equal_ci, pcwstr, resolve_icon_path, wide,
 };
 use crate::urlini::UrlFile;
 use crate::{Error, Result};
@@ -64,20 +63,13 @@ fn settings(icon_file: PWSTR, capacity: u32, index: i32) -> SHFOLDERCUSTOMSETTIN
 /// The folder's custom icon as stored in `desktop.ini` (raw: may contain
 /// `%VARS%` or be relative to the folder) and its index; `None` when the
 /// folder has no custom icon.
+///
+/// `desktop.ini` is read directly: it is the only place the setting lives,
+/// and `SHGetSetFolderCustomSettings(FCS_READ)` can answer from the shell's
+/// cache after the file changed (Windows CI showed a cleared icon still
+/// being reported).
 pub fn read_folder_icon(path: &Path) -> Result<Option<(String, i32)>> {
     ensure_folder(path)?;
-    let _com = ComScope::enter()?;
-    let mut buf = vec![0u16; 2048];
-    let mut fcs = settings(PWSTR(buf.as_mut_ptr()), buf.len() as u32, 0);
-    let w = wide(path);
-    // SAFETY: `buf` outlives the call and its capacity is passed along.
-    if unsafe { SHGetSetFolderCustomSettings(&mut fcs, pcwstr(&w), FCS_READ) }.is_ok() {
-        let file = from_wide(&buf);
-        if !file.trim().is_empty() {
-            return Ok(Some((file, fcs.iIconIndex)));
-        }
-    }
-    // The API only reports some spellings; read desktop.ini ourselves.
     read_ini_icon(path)
 }
 
@@ -261,6 +253,11 @@ fn clear_icon(path: &Path) -> Result<()> {
             };
             Ok(())
         })?;
+        if read_ini_icon(path)?.is_some() {
+            // The profile API left a key behind (odd spellings, duplicate
+            // sections): rewrite the file ourselves, keeping its encoding.
+            rewrite_without_icon(&ini)?;
+        }
         if UrlFile::parse(&std::fs::read(&ini)?).is_empty() {
             // Nothing else customises the folder: drop desktop.ini and the
             // folder's "read desktop.ini" flag.
@@ -280,4 +277,27 @@ fn clear_icon(path: &Path) -> Result<()> {
             path.display()
         ))),
     }
+}
+
+/// Removes every icon key from `desktop.ini` by rewriting it. The file is
+/// hidden + system, and `CREATE_ALWAYS` refuses to replace such files, so
+/// its attributes are cleared for the write and put back afterwards.
+fn rewrite_without_icon(ini: &Path) -> Result<()> {
+    let mut parsed = UrlFile::parse(&std::fs::read(ini)?);
+    for key in ICON_KEYS {
+        while parsed.remove(SECTION, key) {}
+    }
+    let ini_w = wide(ini);
+    // SAFETY: valid NUL-terminated path.
+    let attrs = unsafe { GetFileAttributesW(pcwstr(&ini_w)) };
+    // SAFETY: as above.
+    unsafe { SetFileAttributesW(pcwstr(&ini_w), FILE_ATTRIBUTE_NORMAL) }
+        .ctx("make desktop.ini writable")?;
+    let written = std::fs::write(ini, parsed.to_bytes());
+    if attrs != INVALID_FILE_ATTRIBUTES {
+        // SAFETY: as above.
+        let _ = unsafe { SetFileAttributesW(pcwstr(&ini_w), FILE_FLAGS_AND_ATTRIBUTES(attrs)) };
+    }
+    written?;
+    Ok(())
 }

@@ -25,6 +25,7 @@ use std::path::Path;
 
 use windows::Win32::System::Registry::{
     HKEY_CLASSES_ROOT, HKEY_CURRENT_USER, KEY_QUERY_VALUE, KEY_READ, KEY_SET_VALUE, REG_EXPAND_SZ,
+    REG_SZ, REG_VALUE_TYPE,
 };
 use windows::Win32::UI::Shell::{SHQUERYRBINFO, SHQueryRecycleBinW};
 use windows::core::PCWSTR;
@@ -92,6 +93,17 @@ fn original_from(raw: Option<String>) -> OriginalIcon {
 }
 
 /// The value as the registry would store it for `original`.
+/// Registry type for a restored value: Windows stores icon locations that
+/// use `%VARS%` as `REG_EXPAND_SZ` and plain paths as `REG_SZ`; restoring
+/// by the same rule puts originals back exactly.
+fn value_type(value: &str) -> REG_VALUE_TYPE {
+    if value.contains('%') {
+        REG_EXPAND_SZ
+    } else {
+        REG_SZ
+    }
+}
+
 fn value_of(original: &OriginalIcon) -> String {
     match &original.location {
         Some(location) => format_icon_location(location, original.index),
@@ -143,7 +155,8 @@ pub fn restore_system_icon(id: SystemIconId, original: &OriginalIcon) -> Result<
     let name = id.value_name();
     let current = key.string(name).ok().flatten();
     if original.existed {
-        key.set_string(name, value_of(original), REG_EXPAND_SZ)?;
+        let value = value_of(original);
+        key.set_string(name, &value, value_type(&value))?;
     } else {
         key.delete_value(name)?;
     }
@@ -151,7 +164,8 @@ pub fn restore_system_icon(id: SystemIconId, original: &OriginalIcon) -> Result<
         let mirror = key.string("").ok().flatten();
         if mirror.is_some() && mirror == current {
             if original.existed {
-                key.set_string("", value_of(original), REG_EXPAND_SZ)?;
+                let value = value_of(original);
+                key.set_string("", &value, value_type(&value))?;
             } else {
                 key.delete_value("")?;
             }
