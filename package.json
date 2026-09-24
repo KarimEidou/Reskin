@@ -11,13 +11,14 @@
   },
   "scripts": {
     "dev": "vite",
-    "build": "vite build",
+    "build": "vite build && node scripts/third-party-notices.mjs --if-tauri",
     "preview": "vite preview --port 1420 --strictPort",
     "check": "svelte-check --tsconfig ./tsconfig.json --fail-on-warnings",
-    "test": "vitest run",
+    "test": "vitest run && node --test \"scripts/*.test.mjs\"",
     "e2e": "playwright test",
     "tauri": "tauri",
     "bundle:budget": "node scripts/check-bundle-budget.mjs",
+    "notices": "node scripts/third-party-notices.mjs",
     "bindings": "cargo test -p reskin-core --features ts export_bindings"
   },
   "dependencies": {

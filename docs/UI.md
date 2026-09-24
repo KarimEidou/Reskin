@@ -96,8 +96,11 @@ The visual and interaction contract for the box and the editor. Tokens live in
   morph/crossfade, flourish), Behaviour (hotkey recorder, start with Windows,
   Explorer context menu, auto-hide in fullscreen, also update pins, sounds),
   Advanced (compatibility mode, low-memory mode, refresh desktop icons (quick /
-  rebuild cache), export sizes), About (version, build, Releases link,
-  licenses).
+  rebuild cache), export sizes), About (version, build, Releases link, MIT
+  license, and "Open-source licenses": a dialog, loaded when first opened,
+  with the third-party notices shipped in the app). A saved hotkey Windows
+  won't register (another app holds it) shows a warning under the recorder;
+  recording it again retries it. The accent swatch follows Windows live.
 
 ## Dialogs & overlays
 

@@ -1,12 +1,15 @@
 // Page bootstrap shared by the box and the editor:
 //   const info = await boot();
 // fetches BootInfo, seeds the settings store, applies theme, motion and
-// sound preferences, and keeps them in sync with later settings changes.
+// sound preferences, and keeps them in sync with later settings changes and
+// with what Windows changes meanwhile (accent colour, animation effects:
+// re-read when the window gains focus or becomes visible).
 
 import { commands } from '$lib/ipc/commands';
 import type { BootInfo } from '$lib/ipc/types';
 import { initMotion, updateMotion } from '$lib/motion/speed.svelte';
-import { initSettings, onSettingsChange } from '$lib/settings/store.svelte';
+import { initSettings, onSettingsChange, settings } from '$lib/settings/store.svelte';
+import { followSystem, system } from '$lib/settings/system.svelte';
 import { setSoundEnabled } from '$lib/sound/synth';
 import { applyTheme } from '$lib/theme/theme';
 
@@ -24,9 +27,14 @@ async function run(): Promise<BootInfo> {
   setSoundEnabled(b.settings.sounds);
   unfollow?.();
   unfollow = onSettingsChange((s) => {
-    applyTheme({ settings: s, accent: b.accent });
+    applyTheme({ settings: s, accent: system.accent });
     updateMotion(s);
     setSoundEnabled(s.sounds);
+  });
+  followSystem(b, (next) => {
+    const s = settings();
+    applyTheme({ settings: s, accent: next.accent });
+    initMotion({ settings: s, systemReducedMotion: next.reducedMotion });
   });
   await initSettings(b);
   return b;

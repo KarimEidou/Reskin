@@ -21,10 +21,15 @@ build: string,
  */
 smoke: boolean, 
 /**
- * No settings.json existed at startup.
+ * The first-run welcome hasn't been finished (`Settings::onboarded`).
  */
 firstRun: boolean, boxMetrics: BoxMetrics, 
 /**
  * Windows 11 or later (rounded corners, Mica-era visuals).
  */
-windows11: boolean, };
+windows11: boolean, 
+/**
+ * Why the saved global hotkey doesn't work right now (another app
+ * held it when Reskin tried to register it); absent when it works.
+ */
+hotkeyError?: string, };

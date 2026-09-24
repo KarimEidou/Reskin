@@ -63,7 +63,8 @@ fn check(name: &str, f: impl FnOnce() -> Result<String, String>) -> SelfTestChec
     }
 }
 
-fn webview2_version() -> Result<String, String> {
+/// The installed WebView2 Runtime version; an error when there is none.
+pub fn webview2_version() -> Result<String, String> {
     use webview2_com::Microsoft::Web::WebView2::Win32::GetAvailableCoreWebView2BrowserVersionString;
     use windows::Win32::System::Com::CoTaskMemFree;
     use windows::core::{PCWSTR, PWSTR};

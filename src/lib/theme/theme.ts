@@ -14,7 +14,7 @@ export type ResolvedTheme = 'dark' | 'light';
 
 export interface ThemeInput {
   settings: Pick<Settings, 'theme' | 'useAccent' | 'compatibilityMode'>;
-  /** Windows accent `#rrggbb` (from boot / `accent_color`). */
+  /** Windows accent `#rrggbb` (BootInfo, re-read when the window gains focus). */
   accent?: string | null;
   /** Force the system scheme instead of reading `prefers-color-scheme`. */
   systemDark?: boolean;
