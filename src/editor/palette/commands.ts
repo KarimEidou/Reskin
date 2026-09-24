@@ -304,11 +304,8 @@ export function createCommands(tools: ToolInfo): Command[] {
       label: 'Apply style to all queued icons',
       group: 'Apply & export',
       keywords: ['batch', 'queue'],
-      when: (c) =>
-        editing(c) &&
-        idle(c) &&
-        c.session.recipe !== null &&
-        c.session.queue.filter((q) => q.status !== 'applied').length > 1,
+      // Like the queue strip's button: not while a job runs or an item loads.
+      when: (c) => editing(c) && !c.session.queueLocked && c.session.recipe !== null && c.session.styleTargets.length > 0,
       run: (c) => c.session.applyStyleToAll(),
     },
     {

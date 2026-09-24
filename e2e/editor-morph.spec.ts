@@ -137,7 +137,7 @@ test.describe('handoff protocol', () => {
   test('acks follow the protocol for one session: open, then close', async ({ openEditor, page }) => {
     await openEditor();
     const open = await simulateOpen(page, [SAMPLE_PATHS.steam], 'edit');
-    expect(open).toEqual({ session: 1, morph: true, preparedInTime: true, timedOut: [] });
+    expect(open).toEqual({ session: 1, morph: true, preparedInTime: true, boxPainted: null, timedOut: [] });
     await expect(frame(page)).toHaveAttribute('data-mode', 'open');
     await expect(page.locator('html')).toHaveAttribute('data-phase', 'open');
     expect(await acks(page)).toEqual(['1:prepared', '1:revealed', '1:expanded']);

@@ -88,7 +88,7 @@ export const STAGE_SHORTCUTS: ReadonlyArray<{ label: string; keys: readonly stri
   { label: 'Commit a transform, text or lasso polygon', keys: ['Enter'] },
   { label: 'Cancel the current operation', keys: ['Esc'] },
   { label: 'Clear the selection (the layer without one)', keys: ['Delete', 'Backspace'] },
-  { label: 'Remove the last lasso corner', keys: ['Backspace'] },
+  { label: 'Remove the last lasso corner', keys: ['Backspace', 'Delete'] },
   { label: 'Nudge the layer or selection', keys: ['↑ ↓ ← →'], note: 'Shift: 10 px' },
 ];
 

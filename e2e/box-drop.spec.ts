@@ -495,15 +495,47 @@ test.describe('events from Rust', () => {
     const box = await openBox({ firstRun: true });
     const hint = box.visual.locator('.hint');
     await expect(hint).toHaveText(FIRST_RUN_HINT);
-    // The welcome's proxy draws the empty box without a hint.
-    await emit(page, 'box:handoff', { session: 1, icon: null, count: 0 });
-    await waitForCall(page, 'box_painted', { session: 1 });
+    // Rust opens the welcome: the box takes on the picture of the welcome's
+    // proxy — the empty box, without a hint — and confirms it.
+    await startFakeEditor(page);
+    const open = await simulateOpen(page, [], 'welcome');
+    expect(open.boxPainted).toBe(true);
     await expect(hint).toHaveCount(0);
     await expect(box.icon).toHaveCount(0);
     // "Got it" collapses the welcome back into the box: the hint is back.
+    await simulateClose(page);
     const back = await simulateBoxReturn(page, 'hide');
     expect(back.painted).toBe(true);
     await expect(hint).toHaveText(FIRST_RUN_HINT);
+  });
+
+  test('a hotkey another app holds at start-up: the box says so once, and its description while it lasts', async ({ openBox, page }) => {
+    // Hints stay a few seconds at speed 1; three at speed 2.
+    const box = await openBox({ hotkeyError: 'Ctrl+Alt+Shift+R is already in use by another app', settings: { animationSpeed: 2 } });
+    const hint = box.visual.locator('.hint');
+    await expect(hint).toHaveText('Ctrl+Alt+Shift+R is taken — change it in Settings');
+    const problem = "The global shortcut doesn't work: Ctrl+Alt+Shift+R is already in use by another app. Change it in Settings.";
+    await expect(box.hit).toHaveAccessibleDescription(problem);
+    await expect(box.hit).toHaveAttribute('title', problem);
+    await expect(hint).toHaveCount(0, { timeout: 8000 });
+    // Once: shown again after the editor closed, the box keeps quiet.
+    const back = await simulateBoxReturn(page, 'hide');
+    expect(back.painted).toBe(true);
+    await page.waitForTimeout(400);
+    await expect(hint).toHaveCount(0);
+    await expect(box.hit).toHaveAccessibleDescription(problem);
+    // The other app let go: Windows is asked again when the box gains focus.
+    await page.evaluate(() => window.__e2e!.setHotkeyError(null));
+    await page.evaluate(() => window.dispatchEvent(new Event('focus')));
+    await expect(box.hit).not.toHaveAttribute('title');
+    await expect(box.hit).toHaveAccessibleDescription('');
+  });
+
+  test('a hotkey that works leaves the box quiet', async ({ openBox }) => {
+    const box = await openBox();
+    await expect(box.visual.locator('.hint')).toHaveCount(0);
+    await expect(box.hit).not.toHaveAttribute('title');
+    await expect(box.hit).toHaveAccessibleDescription('');
   });
 
   test('a shake says why: the message shows inside the box until it has been read', async ({ openBox, page }) => {
@@ -725,7 +757,12 @@ test.describe('fake backend', () => {
     await openBox();
     await startFakeEditor(page);
     const open = await simulateOpen(page, [SAMPLE_PATHS.steam], 'edit');
-    expect(open).toEqual({ session: 1, morph: true, preparedInTime: true, timedOut: [] });
+    expect(open).toEqual({ session: 1, morph: true, preparedInTime: true, boxPainted: true, timedOut: [] });
+    // The box took on the picture first: the item's icon, confirmed by box_painted.
+    const [steam] = await makeItems(page, [SAMPLE_PATHS.steam]);
+    const handoffs = await page.evaluate(() => window.__e2e!.emitted.filter((e) => e.event === 'box:handoff').map((e) => e.payload));
+    expect(handoffs).toEqual([{ session: 1, icon: steam!.icon, count: 1 }]);
+    await waitForCall(page, 'box_painted', { session: 1 });
     expect(await editorState(page)).toEqual({ session: 1, phase: 'open', visible: true, morph: true });
     const close = await simulateClose(page, 'fly', { icon: 'data:image/png;base64,AAAA' });
     expect(close).toEqual({ session: 1, timedOut: [] });
@@ -852,6 +889,14 @@ test.describe('fake backend', () => {
       location: 'publicDesktop',
       access: 'needsElevation',
       modes: ['inPlace', 'personalCopy'],
+    });
+    // Like Rust: a Store app's shortcut can change in place, but a classic one shows the icon.
+    expect(byPath[SAMPLE_PATHS.storeApp]).toMatchObject({
+      kind: 'shortcut',
+      name: 'Spotify',
+      storeApp: true,
+      modes: ['inPlace', 'newShortcut'],
+      notes: ['A Store app shortcut — Windows may ignore a custom icon; Reskin can create a classic shortcut instead.'],
     });
     expect(byPath[SAMPLE_PATHS.unreadable]).toBeUndefined();
     for (const item of items) {

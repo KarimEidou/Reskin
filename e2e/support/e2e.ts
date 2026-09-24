@@ -37,6 +37,8 @@ export const SAMPLE_PATHS = {
   exe: 'C:\\Tools\\Paint.exe',
   image: 'C:\\Users\\e2e\\Pictures\\logo.png',
   publicShortcut: 'C:\\Users\\Public\\Desktop\\Firefox.lnk',
+  /** A desktop shortcut to a Store (AppsFolder) app. */
+  storeApp: 'C:\\Users\\e2e\\Desktop\\Store Apps\\Spotify.lnk',
   project: 'C:\\Users\\e2e\\Documents\\My Icon.reskin',
   unreadable: 'C:\\Users\\e2e\\Desktop\\broken.lnk::unreadable',
 } as const;
@@ -51,11 +53,25 @@ export async function openPage(page: Page, kind: PageKind, config: E2EConfig = {
     window.__E2E_CONFIG__ = c;
   }, config);
   await page.goto(`/${kind}.html`);
+  await booted(page, kind);
+}
+
+async function booted(page: Page, kind: PageKind): Promise<void> {
   if (kind === 'box') {
     await expect(page.locator('main.box-page')).toHaveAttribute('data-ready', 'true');
   } else {
     await page.waitForFunction(() => !!window.__e2e?.calls.some((c) => c.cmd === 'editor_next'));
   }
+}
+
+/**
+ * Reloads the page as the next launch of the app (same config): the fake
+ * backend starts afresh, except for what Rust keeps on disk between
+ * launches — the autosave, whose live draft becomes the recovery offer.
+ */
+export async function relaunch(page: Page, kind: PageKind): Promise<void> {
+  await page.reload();
+  await booted(page, kind);
 }
 
 export function calls(page: Page, cmd: CommandName): Promise<E2ECall[]> {

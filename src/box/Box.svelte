@@ -1,8 +1,10 @@
 <!--
   The floating box page. Renders BoxVisual from the box state machine
   (./box-state.ts) and wires it to the pointer, OS drag-and-drop and the
-  Rust events. The root exposes `data-state` (logical state) and
-  `data-ready` (booted and listening) for tests.
+  Rust events. A saved hotkey Windows won't register is said once at
+  start-up (the hint bubble) and in the box's tooltip and description for
+  as long as it doesn't work. The root exposes `data-state` (logical state)
+  and `data-ready` (booted and listening) for tests.
 -->
 <script lang="ts">
   import { onMount, tick } from 'svelte';
@@ -14,6 +16,7 @@
   import { doubleRaf, frames } from '$lib/motion/raf';
   import { dur, motion } from '$lib/motion/speed.svelte';
   import { settings } from '$lib/settings/store.svelte';
+  import { system } from '$lib/settings/system.svelte';
   import { play } from '$lib/sound/synth';
   import BoxVisual from '$lib/ui/BoxVisual.svelte';
   import {
@@ -30,11 +33,13 @@
   } from '$lib/ui/box-geometry';
   import { flyIconIn } from './absorb';
   import { boxReducer, initialBoxState, progressFraction, undoOutcome, type BoxEvent } from './box-state';
+  import { hotkeyHint, hotkeyProblem } from './hotkey-hint';
 
   /**
-   * How long the first-run hint stays once the box is back on screen after
-   * the welcome (UI.md: "for a few seconds"). Until then — the welcome is
-   * still open over the hidden box — it waits.
+   * How long a hint stays once the box is on screen (UI.md: "for a few
+   * seconds"): the first-run hint after the welcome (until then — the
+   * welcome is still open over the hidden box — it waits), the hotkey note
+   * from start-up.
    */
   const HINT_MS = 6000;
   /** Undo chip lifetime after a successful apply. */
@@ -56,6 +61,10 @@
   let showHint = $state(false);
   /** Bumped by `box:shown` while the hint is up: starts its lifetime. */
   let hintClock = $state(0);
+  /** The saved hotkey did not work at start-up: said once, in the hint bubble. */
+  let hotkeyNote = $state<string | null>(null);
+  /** The hotkey note has been on screen: its lifetime runs. */
+  let hotkeyNoteShown = $state(false);
   let undoId = $state<string | null>(null);
   let flyLayer: HTMLDivElement | undefined = $state();
   let hitEl: HTMLDivElement | undefined = $state();
@@ -76,8 +85,10 @@
     box.name === 'absorbing' && gulpEpoch !== box.epoch ? 'armed' : box.name,
   );
   const hint = $derived(
-    showHint && (box.name === 'idle' || box.name === 'hover') && !box.handoff ? FIRST_RUN_HINT : null,
+    (box.name === 'idle' || box.name === 'hover') && !box.handoff ? (showHint ? FIRST_RUN_HINT : hotkeyNote) : null,
   );
+  /** The tooltip and accessible description while the saved hotkey doesn't work (Windows is asked again on focus). */
+  const problem = $derived(system.hotkeyError ? hotkeyProblem(system.hotkeyError) : null);
   const label = $derived(
     box.name === 'armed'
       ? box.count > 1
@@ -121,7 +132,9 @@
     // cancels this absorb; `epoch` alone misses the resets, which keep it.
     const current = () => box.epoch === epoch && box.name === 'absorbing';
     const dropAt = physicalToCss(position, window.devicePixelRatio);
+    // The user is past the hints now.
     showHint = false;
+    hotkeyNote = null;
 
     let items: ItemInfo[] = [];
     let failure = 'None of these items can be reskinned';
@@ -190,6 +203,7 @@
   function openStart(): void {
     if (box.handoff || box.name === 'absorbing' || box.name === 'flying') return;
     showHint = false;
+    hotkeyNote = null;
     send({ type: 'openRequested', icon: null, count: 0 });
     void requestOpen([], 'start');
   }
@@ -283,6 +297,17 @@
     return () => clearTimeout(t);
   });
 
+  /** The box is on screen: the hotkey note's lifetime starts (once). */
+  function hotkeyNoteOnScreen(): void {
+    if (hotkeyNote !== null) hotkeyNoteShown = true;
+  }
+
+  $effect(() => {
+    if (hotkeyNote === null || !hotkeyNoteShown) return;
+    const t = setTimeout(() => (hotkeyNote = null), dur(HINT_MS, 'hold'));
+    return () => clearTimeout(t);
+  });
+
   $effect(() => {
     if (!undoId) return;
     const t = setTimeout(() => (undoId = null), UNDO_MS);
@@ -296,6 +321,7 @@
 
     const onVisibility = () => {
       if (document.visibilityState === 'hidden') send({ type: 'hidden' });
+      else hotkeyNoteOnScreen();
     };
     document.addEventListener('visibilitychange', onVisibility);
 
@@ -303,6 +329,8 @@
       const b = await boot();
       info = b;
       showHint = b.firstRun;
+      if (system.hotkeyError) hotkeyNote = hotkeyHint(system.hotkeyError);
+      if (document.visibilityState === 'visible') hotkeyNoteOnScreen();
       const subscriptions = await Promise.all([
         on('box:flight', (f) => {
           send({ type: 'flight', phase: f.phase, icon: f.icon, message: f.message });
@@ -328,6 +356,7 @@
         on('box:shown', () => {
           send({ type: 'shown' });
           if (showHint) hintClock += 1;
+          hotkeyNoteOnScreen();
           const picture = collapsePicture;
           collapsePicture = null;
           if (picture) void confirmPainted(picture);
@@ -393,6 +422,8 @@
     role="button"
     tabindex="0"
     aria-label={label}
+    aria-describedby={problem ? 'box-problem' : undefined}
+    title={problem ?? undefined}
     aria-busy={box.name === 'busy' || box.name === 'absorbing'}
     onpointerdown={onPointerDown}
     onpointerenter={() => send({ type: 'pointerEnter' })}
@@ -421,6 +452,9 @@
   <div class="flyers" bind:this={flyLayer}></div>
   {#if undoId}
     <button class="undo" type="button" onclick={undo}>Undo</button>
+  {/if}
+  {#if problem}
+    <p class="sr-only" id="box-problem">{problem}</p>
   {/if}
   <p class="sr-only" role="status">
     {#if box.name === 'error' && box.message}{box.message}{:else if box.name === 'busy' && box.progress}Applying

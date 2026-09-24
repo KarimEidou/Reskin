@@ -282,6 +282,36 @@ describe('Autosave', () => {
     expect(saved).toEqual(['produced', 'given']);
   });
 
+  it('write takes data still being produced, in its place in the order', async () => {
+    const saved: string[] = [];
+    const a = new Autosave({
+      produce: () => 'produced',
+      save: async (d) => {
+        await new Promise((r) => setTimeout(r, 100));
+        saved.push(d);
+      },
+      delayMs: 10,
+    });
+    a.schedule();
+    await vi.advanceTimersByTimeAsync(20); // "produced" is being saved
+    let finish!: (d: string) => void;
+    const written = a.write(new Promise<string>((r) => (finish = r)));
+    await vi.advanceTimersByTimeAsync(200);
+    expect(saved).toEqual(['produced']);
+    finish('encoded');
+    await vi.advanceTimersByTimeAsync(200);
+    await written;
+    expect(saved).toEqual(['produced', 'encoded']);
+    // Data that could not be produced fails that write only.
+    const failed = a.write(Promise.reject(new Error('no pixels')));
+    await vi.advanceTimersByTimeAsync(10);
+    await expect(failed).rejects.toThrow('no pixels');
+    const after = a.write('after');
+    await vi.advanceTimersByTimeAsync(200);
+    await after;
+    expect(saved).toEqual(['produced', 'encoded', 'after']);
+  });
+
   it('a change handed to a save that waits for the ones before it is still pending', async () => {
     const saved: string[] = [];
     let current = 'A';

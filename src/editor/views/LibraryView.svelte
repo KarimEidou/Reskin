@@ -102,8 +102,8 @@
     try {
       const data = await commands.libraryLoad(entry.id);
       await commands.librarySave({ id: entry.id, name, thumb: entry.thumb, data });
-      // The open design saves over this entry: it keeps the new name.
-      if (session.hasDesign && session.libraryId === entry.id) session.engine.setDocumentName(name);
+      // The designs that save over this entry keep the new name.
+      session.libraryDesignRenamed(entry.id, name);
       toast({ message: `Renamed to "${name}".`, kind: 'success' });
       await refresh();
     } catch (e) {

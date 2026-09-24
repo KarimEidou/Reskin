@@ -5,7 +5,8 @@
 // overlap — every storage task runs after the ones before it — and a
 // change during a save triggers another save afterwards. `flush()` saves
 // a pending change immediately (e.g. before the window hides); `write()`
-// saves given data in its place (e.g. a design being put away), and
+// saves given data in its place (e.g. a design being put away, or one
+// encoded before it changes further), and
 // `enqueue()` runs any other storage task in the same order.
 
 export interface AutosaveOptions {
@@ -74,10 +75,16 @@ export class Autosave {
     return this.tail;
   }
 
-  /** Saves `data` (after the saves before it) instead of a pending change. */
-  write(data: string): Promise<void> {
+  /**
+   * Saves `data` (after the saves before it) instead of a pending change.
+   * A promise is data produced already (e.g. encoded from the document as
+   * it was when `write` was called), only finished later.
+   */
+  write(data: string | Promise<string>): Promise<void> {
     this.cancel();
-    return this.enqueue(() => this.opts.save(data));
+    // Awaited when its turn comes; a failure before then is not unhandled.
+    if (typeof data !== 'string') data.catch(() => {});
+    return this.enqueue(async () => this.opts.save(await data));
   }
 
   /** Runs `task` once the storage tasks before it are done; rejects when it fails. */

@@ -7,10 +7,11 @@ import { mkdirSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type { Page } from '@playwright/test';
-import type { ApplyMode, ApplyRequest, ItemInfo } from '../src/lib/ipc/types';
+import type { ApplyRequest, ItemInfo } from '../src/lib/ipc/types';
 import {
   calls,
   editorState,
+  emit,
   expect,
   makeItems,
   SAMPLE_PATHS,
@@ -231,6 +232,28 @@ test.describe('a queue', () => {
     expect((await applyRequests(page)).map((r) => r.flourish)).toEqual([false, false, false, true]);
   });
 
+  test('a design source waiting in the queue does not keep the editor open: the last target closes it', async ({ openEditor, page }) => {
+    await openEditor();
+    await openOn(page, [SAMPLE_PATHS.steam, SAMPLE_PATHS.notes]);
+    // An image queued as a design of its own: nothing to apply it to.
+    await emit(page, 'tauri://drag-drop', { paths: [SAMPLE_PATHS.image], position: { x: 600, y: 300 } });
+    const pop = page.getByTestId('import-popover');
+    await pop.getByRole('button', { name: /Queue as new item/ }).click();
+    await expect.poll(() => page.evaluate(() => (window as unknown as Win).__reskinSession.queue.map((q) => q.info.name))).toEqual([
+      'Steam',
+      'Notes',
+      'logo.png',
+    ]);
+    await applyNow(page);
+    await expect.poll(() => statuses(page)).toEqual(['applied', 'editing', 'pending']);
+    expect((await editorState(page)).phase).toBe('open');
+    await idle(page);
+    // Notes is the last target: its apply flourishes and closes the editor.
+    await applyNow(page);
+    await expect.poll(async () => (await editorState(page)).phase).toBe('closed');
+    expect((await applyRequests(page)).map((r) => r.flourish)).toEqual([false, true]);
+  });
+
   test('while a batch runs, neither the queue strip nor the title bar menu switches items', async ({ openEditor, page }) => {
     await openEditor({ applyCollapses: false });
     await openOn(page, [SAMPLE_PATHS.steam, SAMPLE_PATHS.notes, SAMPLE_PATHS.site]);
@@ -324,11 +347,10 @@ test.describe('"Apply style to all" and administrator approval', () => {
 test.describe('Store app shortcuts', () => {
   test('apply as a classic desktop shortcut, and the apply menu says why', async ({ openEditor, page }) => {
     await openEditor({ applyCollapses: false });
-    const [base] = await makeItems(page, [SAMPLE_PATHS.steam]);
     // As Rust reports one: changing it in place works, but Explorer ignores the icon.
-    const modes: ApplyMode[] = ['inPlace', 'newShortcut'];
-    const notes = ['A Store app shortcut — Windows may ignore a custom icon; Reskin can create a classic shortcut instead.'];
-    await openOn(page, [{ ...base!, storeApp: true, modes, notes }]);
+    const [spotify] = await makeItems(page, [SAMPLE_PATHS.storeApp]);
+    expect(spotify).toMatchObject({ storeApp: true, modes: ['inPlace', 'newShortcut'] });
+    await openOn(page, [spotify!]);
     await page.getByTestId('apply-options').click();
     const menu = page.getByRole('dialog', { name: 'Apply options' });
     await expect(menu.locator('.mode.preferred')).toHaveAttribute('data-mode', 'newShortcut');

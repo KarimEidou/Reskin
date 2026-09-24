@@ -60,8 +60,10 @@ The visual and interaction contract for the box and the editor. Tokens live in
   = pan, Ctrl+0 fit, Ctrl+1 100 %, Ctrl+ +/−. Pixel grid appears ≥ 8×. Windows
   keyline guides toggle (K). Before/after: hold `\` shows the original icon;
   split view toggle in the bottom bar. Delete / Backspace clear the selected
-  pixels, or the whole layer without a selection (Backspace first removes
-  the last corner of a lasso polygon being drawn).
+  pixels, or the whole layer without a selection (while a lasso polygon is
+  being drawn they remove its last corner instead). An image pasted or
+  dropped on the canvas goes through the import popover, which opens at
+  the pointer.
 * **Sidebar tabs** (panels are independent components in `src/editor/panels/`):
   Layers, Color, Adjust (filters), Effects (layer effects), Styles (presets),
   Backdrop, Stickers, History. The **Previews** block is always visible at the
@@ -72,17 +74,23 @@ The visual and interaction contract for the box and the editor. Tokens live in
 * **Bottom bar**: batch queue strip (thumbnails of every item dropped; current
   one highlighted; status badges; the tooltip adds why an apply did not go
   through and the item's notes; "Apply style to all" replays the current
-  item's style on every other queued icon), zoom %, pixel-art
-  toggle with grid size, before/after split, **Save to Library**, **Export ▾**
+  item's style — preset, backdrop, adjustments, icon helpers, layer
+  effects — on every other queued icon, the same look at any size: pixel
+  settings scale with each icon's document), zoom %, pixel-art
+  toggle with grid size, before/after split, **Save to Library** (a design
+  that came from or was saved as a Library design names it — Updates
+  "Mono" in your Library — and says so when a new name renames it; **Save
+  changes** updates it, **Save as new** adds another), **Export ▾**
   (.ico / .png / copy to clipboard / .reskin project), and the primary
   **Save & Apply ▾** (dropdown: mode — Change in place / New desktop shortcut /
   Personal copy — disabled when not in `item.modes`; the item's notes;
   "Also update Start menu and taskbar pins"). The main part uses the item's
   preferred mode (New desktop shortcut for Store app shortcuts, whose own
   icon Windows ignores). Apply shows a ring while working. With other
-  queued items still waiting the editor stays open: the item gets its
-  "applied" badge, a toast offers **Undo** for 6 s, and the next item not
-  applied yet opens. The last one collapses the window into the box.
+  queued targets still waiting the editor stays open: the item gets its
+  "applied" badge, a toast offers **Undo** for 6 s, and the next target
+  not applied yet opens. The last target collapses the window into the
+  box — designs without a target left in the queue do not keep it open.
   Queue items cannot be switched or removed while a job runs or an item
   loads (the strip and the title bar's queue menu alike show them
   disabled).
@@ -125,8 +133,12 @@ The visual and interaction contract for the box and the editor. Tokens live in
   Allow approves them one by one, "Make personal copies" copies the ones
   that can be copied.
 * **Import popover** (files dropped, picked or pasted while a design is
-  open): "Add as layer" (another shortcut: "Use its icon as a layer") or
-  "Queue as new item" (shortcuts: "Queue it"); nothing open is replaced.
+  open — a paste on the canvas asks at the pointer, one elsewhere in the
+  middle): "Add as layer" (another shortcut: "Use its icon as a layer") or
+  "Queue as new item" (shortcuts: "Queue it"); nothing open is replaced,
+  and nothing goes in without asking. Work in progress stays: a pending
+  move is committed and an adjustment being tuned kept before the new
+  layer, so Undo takes back just that layer.
   A shortcut dropped on a design without a target offers "Apply this design
   to “…”" first. With nothing open, things open without asking.
 * **Crash recovery** (a design an earlier launch left unsaved): Restore /
@@ -153,6 +165,10 @@ armed (swell, bright rim, inward particles, count badge), absorbing
 (tilt/stretch in flight), celebrate (sparkle ripple), error (shake; a short
 message inside the box says why, up to three lines, and stays until it has
 been read). After an apply it shows an **Undo** chip for 6 s (`box:undo`):
-the box celebrates when the icon is back, or shakes saying why not. When the
-editor opens from elsewhere (tray, menu, Explorer, first run), the box first
-takes on the picture the editor's proxy draws — never the other way round.
+the box celebrates when the icon is back, or shakes saying why not. A saved
+hotkey Windows won't register at start-up (another app holds it) is said
+once, in the hint for a few seconds ("Ctrl+Alt+Shift+R is taken — change
+it in Settings"); the box's tooltip and accessible description
+say it for as long as it doesn't work. When the editor opens from elsewhere
+(tray, menu, Explorer, first run), the box first takes on the picture the
+editor's proxy draws — never the other way round.

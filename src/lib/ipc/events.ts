@@ -2,8 +2,7 @@
 // ./mailbox.ts instead: events to a window created hidden can be dropped.)
 
 import { listen, type UnlistenFn } from '@tauri-apps/api/event';
-import type { BoxHandoff } from './bindings/BoxHandoff';
-import type { BoxCollapse, BoxFlight, BoxProgress, Settings } from './types';
+import type { BoxCollapse, BoxFlight, BoxHandoff, BoxProgress, Settings } from './types';
 
 export const EVENTS = {
   /** Fly-to-icon legs and celebrate/error states for the box. */
