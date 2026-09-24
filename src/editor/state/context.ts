@@ -41,5 +41,10 @@ export function browserDeps(): SessionDeps {
 
 /** Creates the app's session with the canvas text rasterizer installed. */
 export function createSession(deps: SessionDeps = browserDeps()): EditorSession {
-  return new EditorSession(deps, new Engine({ textRasterizer: createCanvasTextRasterizer() }));
+  const session = new EditorSession(deps, new Engine({ textRasterizer: createCanvasTextRasterizer() }));
+  if (__E2E__) {
+    // e2e specs inspect the session / engine directly (pixels, history).
+    (globalThis as unknown as { __reskinSession?: EditorSession }).__reskinSession = session;
+  }
+  return session;
 }
