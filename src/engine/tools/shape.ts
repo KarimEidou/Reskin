@@ -130,6 +130,7 @@ export class ShapeTool implements Tool<ShapeOptions> {
   readonly id = 'shape' as const;
   readonly label = 'Shapes';
   readonly shortcut = 'U';
+  readonly icon = 'shapes';
   readonly usesSymmetry = false;
   private drag: Drag | null = null;
 

@@ -141,6 +141,7 @@ export class GradientTool implements Tool<GradientToolOptions> {
   readonly id = 'gradient' as const;
   readonly label = 'Gradient';
   readonly shortcut = 'Shift+G';
+  readonly icon = 'blend';
   readonly usesSymmetry = false;
   private drag: Drag | null = null;
 

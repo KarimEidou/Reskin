@@ -44,6 +44,8 @@ interface Drag {
 
 export class MarqueeTool implements Tool<SelectOptions> {
   readonly usesSymmetry = false;
+  readonly group = 'marquee' as const;
+  readonly icon: string;
   private drag: Drag | null = null;
 
   constructor(
@@ -51,7 +53,9 @@ export class MarqueeTool implements Tool<SelectOptions> {
     readonly label: string,
     readonly shortcut: string,
     private readonly shape: 'rect' | 'ellipse',
-  ) {}
+  ) {
+    this.icon = shape === 'rect' ? 'square-dashed' : 'circle-dashed';
+  }
 
   defaultOptions(): SelectOptions {
     return defaultSelectOptions(this.shape);

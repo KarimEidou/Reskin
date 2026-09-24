@@ -1,14 +1,29 @@
-// Move / free transform of the active layer (or of the selected pixels).
+// Move / free transform of the active layer (or of the selected pixels),
+// and moving, resizing and rotating text layers.
 //
-// The first drag lifts the content (the whole layer, or base × selection)
-// and starts a transform session; further drags on the handles scale (from
-// the opposite handle, or from the centre with Alt; Shift keeps the aspect
-// ratio on corners), rotate (outside a corner or the top handle; Shift
-// snaps to 15°) or move (inside; Shift locks an axis). Arrow keys nudge by 1
-// px (10 with Shift). The session commits as ONE history entry on Enter or
-// when another tool/command runs; Esc and undo cancel it (Esc during a drag
-// reverts just that drag). Previews and the commit resample bilinearly
-// (nearest in pixel-art documents), and pure translations stay pixel-exact.
+// Raster layers: as soon as the tool is active on a layer with content,
+// the bounding box of that content (the layer's pixels, or base ×
+// selection) is shown with its handles, so the very first drag can already
+// move (inside), scale (from the opposite handle, or from the centre with
+// Alt; Shift keeps the aspect ratio on corners) or rotate (outside a corner
+// or the top handle; Shift snaps to 15°); a press anywhere else moves, and
+// so does a press inside a box too small for its handles (they are then
+// grabbed from just outside; the nearest handle always wins). The
+// first press lifts the content and starts a transform session; further
+// drags adjust it and arrow keys nudge by 1 px (10 with Shift). The session
+// commits as ONE history entry on Enter or when another tool/command runs;
+// Esc and undo cancel it (Esc during a drag reverts just that drag).
+// Previews and the commit resample bilinearly (nearest in pixel-art
+// documents), and pure translations stay pixel-exact.
+//
+// Text layers stay text (they are never rasterized): a drag inside the
+// block moves it (x/y), a corner handle resizes it uniformly through the
+// font size (text cannot be stretched, so there are no edge handles and the
+// aspect ratio is always kept; Alt resizes about the centre), and the
+// rotate handle / outside the corners rotates it about its centre (Shift
+// snaps to 15°). Each drag is ONE history entry ("Move text", "Resize
+// text", "Rotate text"); arrow-key nudges merge into one "Move text" entry
+// per burst. Esc during a drag puts the text back.
 
 import type { CursorHint, Tool, ToolContext } from './types';
 import type { Modifiers, PointerInput } from '../input/pointer';
@@ -17,11 +32,16 @@ import { apply, compose, invert, isIdentity, rotation, scaling, translation } fr
 import type { PixelTransaction } from '../history/pixel-transaction';
 import type { FloatImage } from '../raster/float-image';
 import { createFloatImage } from '../raster/float-image';
-import type { Pixels } from '../raster/surface';
+import type { Pixels, Surface } from '../raster/surface';
 import { sampleBilinear, sampleNearest } from '../raster/sample';
 import type { SelectionMask } from '../selection/mask';
 import { transformMask } from '../selection/mask';
-import { SelectionCommand } from '../history/commands';
+import type { PropPatch } from '../history/commands';
+import { PropsCommand, SelectionCommand } from '../history/commands';
+import type { TextLayer, TextProps } from '../doc/types';
+import { MAX_PARAM_PX } from '../doc/types';
+import type { TextLayout } from '../text/text';
+import { lineStartX } from '../text/text';
 import type { Rect } from '../util/rect';
 import { clipRect, coverRect, unionRect } from '../util/rect';
 import type { OverlayPainter } from '../render/overlay';
@@ -138,10 +158,23 @@ export function hitTestTransform(
   rotateOffset: number,
 ): TransformHandle | null {
   const h = handlePositions(t, rotateOffset);
-  const near = (p: Point, r: number) => Math.hypot(p.x - x, p.y - y) <= r;
+  const dist = (p: Point) => Math.hypot(p.x - x, p.y - y);
+  const near = (p: Point, r: number) => dist(p) <= r;
   if (near(h.rotate, tolerance)) return 'rotate';
-  for (const k of ['nw', 'ne', 'se', 'sw'] as const) if (near(h[k], tolerance)) return k;
-  for (const k of ['n', 'e', 's', 'w'] as const) if (near(h[k], tolerance)) return k;
+  // The nearest corner, then the nearest edge handle (on a small box
+  // several are within reach).
+  for (const group of [['nw', 'ne', 'se', 'sw'], ['n', 'e', 's', 'w']] as const) {
+    let best: TransformHandle | null = null;
+    let bestD = tolerance;
+    for (const k of group) {
+      const d = dist(h[k]);
+      if (d <= bestD) {
+        best = k;
+        bestD = d;
+      }
+    }
+    if (best) return best;
+  }
   const corners = transformCorners(t);
   if (pointInQuad(corners, x, y)) return 'move';
   for (const c of corners) if (near(c, tolerance * 3)) return 'rotate';
@@ -231,6 +264,113 @@ export function transformedBounds(t: TransformParams, width: number, height: num
   return r ? clipRect(r, width, height) : null;
 }
 
+/**
+ * Bounds of what the move tool lifts from `surface`: pixels with alpha > 0
+ * that are inside `selection` (any coverage), or null when there are none.
+ */
+export function liftableBounds(surface: Surface, selection: SelectionMask | null): Rect | null {
+  if (!selection || selection.width !== surface.width || selection.height !== surface.height) {
+    return surface.alphaBounds();
+  }
+  const { width: w, height: h, data } = surface;
+  const m = selection.data;
+  let minX = w, minY = h, maxX = -1, maxY = -1;
+  for (let y = 0; y < h; y++) {
+    for (let x = 0, i = y * w; x < w; x++, i++) {
+      if (m[i] === 0 || data[i * 4 + 3] === 0) continue;
+      if (x < minX) minX = x;
+      if (x > maxX) maxX = x;
+      if (y < minY) minY = y;
+      maxY = y;
+    }
+  }
+  return maxX < 0 ? null : { x: minX, y: minY, w: maxX - minX + 1, h: maxY - minY + 1 };
+}
+
+// ---------------------------------------------------------------------------
+// Text layers as transform boxes
+// ---------------------------------------------------------------------------
+
+/** The text props the move tool changes. */
+export type TextPlacement = Pick<TextProps, 'x' | 'y' | 'fontSize' | 'rotation'>;
+
+/**
+ * Transform params describing a text block: `box` is the unrotated block
+ * centred on the block's real centre, `angle` its rotation (radians).
+ * Empty blocks get a 1 px box.
+ */
+export function textTransformParams(props: TextProps, layout: TextLayout): TransformParams {
+  const w = Math.max(1, layout.width);
+  const h = Math.max(1, layout.height);
+  const angle = (props.rotation * Math.PI) / 180;
+  const lx = lineStartX(props.align, layout.width) + layout.width / 2;
+  const ly = layout.height / 2;
+  const c = Math.cos(angle);
+  const s = Math.sin(angle);
+  const cx = props.x + lx * c - ly * s;
+  const cy = props.y + lx * s + ly * c;
+  return { box: { x: cx - w / 2, y: cy - h / 2, w, h }, cx, cy, sx: 1, sy: 1, angle };
+}
+
+/** Degrees normalised to (−180, 180] and rounded to 1e-9 (snapped angles stay exact). */
+function normalizeDegrees(deg: number): number {
+  let d = deg % 360;
+  if (d <= -180) d += 360;
+  else if (d > 180) d -= 360;
+  return Math.round(d * 1e9) / 1e9;
+}
+
+/**
+ * Where a text layer goes when `handle` is dragged from `from` to `to`
+ * (see the file comment). `start` holds the props before the drag and
+ * `layout` their layout. Edge handles act like 'move': text only scales
+ * uniformly, through its font size.
+ */
+export function dragText(
+  start: TextProps,
+  layout: TextLayout,
+  handle: TransformHandle,
+  from: Point,
+  to: Point,
+  mods: Pick<Modifiers, 'shift' | 'alt'>,
+): TextPlacement {
+  const t0 = textTransformParams(start, layout);
+  const same: TextPlacement = { x: start.x, y: start.y, fontSize: start.fontSize, rotation: start.rotation };
+  if (handle === 'move' || handle === 'n' || handle === 's' || handle === 'e' || handle === 'w') {
+    const m = dragTransform(t0, 'move', from, to, mods);
+    return { ...same, x: start.x + (m.cx - t0.cx), y: start.y + (m.cy - t0.cy) };
+  }
+  const dx = start.x - t0.cx;
+  const dy = start.y - t0.cy;
+  if (handle === 'rotate') {
+    const r = dragTransform(t0, 'rotate', from, to, mods);
+    const delta = r.angle - t0.angle;
+    // The block turns about its centre; the anchor turns with it.
+    const c = Math.cos(delta);
+    const s = Math.sin(delta);
+    return {
+      ...same,
+      x: t0.cx + dx * c - dy * s,
+      y: t0.cy + dx * s + dy * c,
+      rotation: normalizeDegrees(mods.shift ? (r.angle * 180) / Math.PI : start.rotation + (delta * 180) / Math.PI),
+    };
+  }
+  // Corner: uniform scale about the opposite corner (Alt: about the centre).
+  const scaled = dragTransform(t0, handle, from, to, { shift: true, alt: mods.alt });
+  const size = Math.max(1, start.fontSize);
+  const k = scaled.sx > 0 ? Math.min(MAX_PARAM_PX / size, Math.max(1 / size, scaled.sx)) : 1 / size;
+  const [hx, hy] = HANDLE_DIRS[handle];
+  const ax = mods.alt ? 0 : (-hx * t0.box.w) / 2;
+  const ay = mods.alt ? 0 : (-hy * t0.box.h) / 2;
+  const c = Math.cos(t0.angle);
+  const s = Math.sin(t0.angle);
+  // The anchor A = C0 + R·a stays put, so C1 = A − k·R·a; offsets from the
+  // centre scale by k because the layout scales with the font size.
+  const cx = t0.cx + (ax * c - ay * s) * (1 - k);
+  const cy = t0.cy + (ax * s + ay * c) * (1 - k);
+  return { ...same, x: cx + dx * k, y: cy + dy * k, fontSize: start.fontSize * k };
+}
+
 // ---------------------------------------------------------------------------
 // Tool
 // ---------------------------------------------------------------------------
@@ -265,6 +405,21 @@ interface Gesture {
   start: TransformParams;
 }
 
+interface TextDrag {
+  layer: TextLayer;
+  /** Props and layout when the drag started. */
+  start: TextProps;
+  layout: TextLayout;
+  handle: TransformHandle;
+  from: Point;
+}
+
+/** What the box is drawn around: a raster session/preview or a text block. */
+interface Target {
+  params: TransformParams;
+  text: boolean;
+}
+
 const CURSORS: Record<TransformHandle, string> = {
   move: 'move',
   rotate: 'grab',
@@ -278,13 +433,34 @@ const CURSORS: Record<TransformHandle, string> = {
   se: 'nwse-resize',
 };
 
+const EDGE_HANDLES = ['n', 'e', 's', 'w'] as const;
+const CORNER_HANDLES = ['nw', 'ne', 'se', 'sw'] as const;
+
+function textSnapshot(l: TextLayer): TextProps {
+  return {
+    text: l.text,
+    fontFamily: l.fontFamily,
+    fontSize: l.fontSize,
+    weight: l.weight,
+    italic: l.italic,
+    align: l.align,
+    color: { ...l.color },
+    x: l.x,
+    y: l.y,
+    rotation: l.rotation,
+    lineHeight: l.lineHeight,
+  };
+}
+
 export class TransformTool implements Tool<TransformOptions> {
   readonly id = 'move' as const;
   readonly label = 'Move / Transform';
   readonly shortcut = 'V';
+  readonly icon = 'move';
   readonly usesSymmetry = false;
   private session: Session | null = null;
   private gesture: Gesture | null = null;
+  private textDrag: TextDrag | null = null;
   private hoverHandle: TransformHandle | null = null;
 
   defaultOptions(): TransformOptions {
@@ -301,26 +477,50 @@ export class TransformTool implements Tool<TransformOptions> {
   }
 
   cursor(): CursorHint {
-    const h = this.gesture?.handle ?? this.hoverHandle ?? 'move';
-    return { css: this.gesture && h === 'rotate' ? 'grabbing' : CURSORS[h], radius: 0 };
+    const dragging = this.gesture?.handle ?? this.textDrag?.handle ?? null;
+    const h = dragging ?? this.hoverHandle ?? 'move';
+    return { css: dragging && h === 'rotate' ? 'grabbing' : CURSORS[h], radius: 0 };
+  }
+
+  /**
+   * The box the tool shows right now: the pending session, else the active
+   * layer's content bounds or text block (null when there is nothing the
+   * tool could move: no content, a hidden or a locked layer).
+   */
+  previewParams(ctx: ToolContext): TransformParams | null {
+    const t = this.target(ctx);
+    return t ? { ...t.params, box: { ...t.params.box } } : null;
   }
 
   hover(ctx: ToolContext, p: PointerInput | null, o: TransformOptions): void {
     const prev = this.hoverHandle;
-    this.hoverHandle = p && this.session ? this.hit(ctx, this.session.params, p, o) : null;
+    const t = p ? this.target(ctx) : null;
+    this.hoverHandle = p && t ? this.hit(ctx, t, p, o) : null;
     if (prev !== this.hoverHandle) ctx.overlayChanged();
   }
 
   pointerDown(ctx: ToolContext, p: PointerInput, o: TransformOptions): void {
-    const fresh = !this.session;
-    if (fresh && !this.begin(ctx)) return;
+    this.gesture = null;
+    this.textDrag = null;
+    if (!this.session) {
+      const layer = ctx.activeLayer();
+      if (layer?.kind === 'text') {
+        this.beginTextDrag(ctx, layer, p, o);
+        return;
+      }
+      if (!this.begin(ctx)) return;
+    }
     const s = this.session as Session;
-    // Handles only exist once the box is shown: the first press always moves.
-    const handle = fresh ? 'move' : (this.hit(ctx, s.params, p, o) ?? 'move');
+    const handle = this.hit(ctx, { params: s.params, text: false }, p, o) ?? 'move';
     this.gesture = { handle, from: { x: p.x, y: p.y }, start: s.params };
   }
 
   pointerMove(ctx: ToolContext, p: PointerInput): void {
+    const td = this.textDrag;
+    if (td) {
+      this.placeText(ctx, td.layer, dragText(td.start, td.layout, td.handle, td.from, { x: p.x, y: p.y }, p.modifiers));
+      return;
+    }
     const g = this.gesture;
     const s = this.session;
     if (!g || !s) return;
@@ -329,6 +529,14 @@ export class TransformTool implements Tool<TransformOptions> {
   }
 
   pointerUp(ctx: ToolContext, p: PointerInput): void {
+    const td = this.textDrag;
+    if (td) {
+      this.pointerMove(ctx, p);
+      this.textDrag = null;
+      this.recordText(ctx, td);
+      ctx.overlayChanged();
+      return;
+    }
     this.pointerMove(ctx, p);
     this.gesture = null;
     ctx.overlayChanged();
@@ -354,7 +562,20 @@ export class TransformTool implements Tool<TransformOptions> {
     };
     const delta = d[key];
     if (!delta) return false;
-    if (!this.session && !this.begin(ctx)) return true;
+    if (!this.session) {
+      const layer = ctx.activeLayer();
+      if (layer?.kind === 'text') {
+        if (this.canMoveText(ctx, layer)) {
+          ctx.execute(
+            new PropsCommand('Move text', layer, { x: layer.x, y: layer.y }, { x: layer.x + delta[0], y: layer.y + delta[1] }),
+            { mergeKey: `move-text-nudge:${layer.id}` },
+          );
+          ctx.overlayChanged();
+        }
+        return true;
+      }
+      if (!this.begin(ctx)) return true;
+    }
     const s = this.session as Session;
     s.params = { ...s.params, cx: s.params.cx + delta[0], cy: s.params.cy + delta[1] };
     this.render(ctx, s);
@@ -385,9 +606,17 @@ export class TransformTool implements Tool<TransformOptions> {
    * During a drag (pointercancel, Esc while dragging, a command that has to
    * settle first) only that drag is reverted, so earlier drags of the session
    * survive and can still be committed. Without a drag the whole session is
-   * discarded (Esc, undo).
+   * discarded (Esc, undo). A text drag puts the text back.
    */
   cancel(ctx: ToolContext): void {
+    const td = this.textDrag;
+    if (td) {
+      this.textDrag = null;
+      const { x, y, fontSize, rotation: r } = td.start;
+      this.placeText(ctx, td.layer, { x, y, fontSize, rotation: r });
+      ctx.overlayChanged();
+      return;
+    }
     const s = this.session;
     const g = this.gesture;
     this.gesture = null;
@@ -403,21 +632,90 @@ export class TransformTool implements Tool<TransformOptions> {
     ctx.overlayChanged();
   }
 
-  drawOverlay(painter: OverlayPainter): void {
-    const s = this.session;
-    if (!s) return;
-    const t = s.params;
-    const q = transformCorners(t);
+  drawOverlay(painter: OverlayPainter, ctx: ToolContext): void {
+    const t = this.target(ctx);
+    if (!t) return;
+    const q = transformCorners(t.params);
     painter.polyline(q.flatMap((p) => [p.x, p.y]), true);
-    const h = handlePositions(t, ROTATE_HANDLE_PX / painter.scale);
+    const h = handlePositions(t.params, ROTATE_HANDLE_PX / painter.scale);
     painter.line(h.n.x, h.n.y, h.rotate.x, h.rotate.y);
-    for (const k of ['nw', 'n', 'ne', 'e', 'se', 's', 'sw', 'w'] as const) painter.handle(h[k].x, h[k].y, 'square');
+    for (const k of CORNER_HANDLES) painter.handle(h[k].x, h[k].y, 'square');
+    if (!t.text) for (const k of EDGE_HANDLES) painter.handle(h[k].x, h[k].y, 'square');
     painter.handle(h.rotate.x, h.rotate.y, 'circle');
   }
 
-  private hit(ctx: ToolContext, t: TransformParams, p: PointerInput, o: TransformOptions): TransformHandle | null {
+  private target(ctx: ToolContext): Target | null {
+    if (this.session) return { params: this.session.params, text: false };
+    const layer = ctx.activeLayer();
+    if (!layer || !layer.visible || layer.locked) return null;
+    if (layer.kind === 'text') {
+      if (layer.text.trim() === '') return null;
+      return { params: textTransformParams(layer, ctx.textLayout(layer)), text: true };
+    }
+    const bounds = ctx.contentBounds ? ctx.contentBounds(layer) : liftableBounds(layer.surface, ctx.doc.selection);
+    return bounds ? { params: initialTransform(bounds), text: false } : null;
+  }
+
+  private hit(ctx: ToolContext, t: Target, p: PointerInput, o: TransformOptions): TransformHandle | null {
     const scale = Math.max(ctx.viewScale, 1e-6);
-    return hitTestTransform(t, p.x, p.y, o.handleTolerance / scale, ROTATE_HANDLE_PX / scale);
+    const tolerance = o.handleTolerance / scale;
+    const h = hitTestTransform(t.params, p.x, p.y, tolerance, ROTATE_HANDLE_PX / scale);
+    if (h === null || h === 'move' || h === 'rotate') return h;
+    // On a box too small for its handles (they would cover all of it), a
+    // press inside moves; its handles are still reachable from outside.
+    const { box, sx, sy } = t.params;
+    if (
+      Math.min(Math.abs(box.w * sx), Math.abs(box.h * sy)) < 4 * tolerance &&
+      pointInQuad(transformCorners(t.params), p.x, p.y)
+    ) {
+      return 'move';
+    }
+    // Text has no edge handles (it only scales uniformly).
+    if (t.text && (h === 'n' || h === 's' || h === 'e' || h === 'w')) return 'move';
+    return h;
+  }
+
+  private canMoveText(ctx: ToolContext, layer: TextLayer): boolean {
+    if (layer.locked) {
+      ctx.message(`${layer.name} is locked`, 'warning');
+      return false;
+    }
+    if (!layer.visible) {
+      ctx.message(`${layer.name} is hidden`, 'warning');
+      return false;
+    }
+    return true;
+  }
+
+  private beginTextDrag(ctx: ToolContext, layer: TextLayer, p: PointerInput, o: TransformOptions): void {
+    if (!this.canMoveText(ctx, layer)) return;
+    const layout = ctx.textLayout(layer);
+    const start = textSnapshot(layer);
+    const handle = this.hit(ctx, { params: textTransformParams(start, layout), text: true }, p, o) ?? 'move';
+    this.textDrag = { layer, start, layout, handle, from: { x: p.x, y: p.y } };
+    ctx.overlayChanged();
+  }
+
+  /** Applies a placement live (not recorded). */
+  private placeText(ctx: ToolContext, layer: TextLayer, to: TextPlacement): void {
+    if (layer.x === to.x && layer.y === to.y && layer.fontSize === to.fontSize && layer.rotation === to.rotation) return;
+    layer.x = to.x;
+    layer.y = to.y;
+    layer.fontSize = to.fontSize;
+    layer.rotation = to.rotation;
+    ctx.emitChanges([{ kind: 'layers' }]);
+  }
+
+  /** Records a finished text drag as one entry. */
+  private recordText(ctx: ToolContext, td: TextDrag): void {
+    const l = td.layer;
+    const s = td.start;
+    if (l.x === s.x && l.y === s.y && l.fontSize === s.fontSize && l.rotation === s.rotation) return;
+    const move = l.fontSize === s.fontSize && l.rotation === s.rotation;
+    const before: PropPatch = move ? { x: s.x, y: s.y } : { x: s.x, y: s.y, fontSize: s.fontSize, rotation: s.rotation };
+    const after: PropPatch = move ? { x: l.x, y: l.y } : { x: l.x, y: l.y, fontSize: l.fontSize, rotation: l.rotation };
+    const label = move ? 'Move text' : td.handle === 'rotate' ? 'Rotate text' : 'Resize text';
+    ctx.execute(new PropsCommand(label, l, before, after));
   }
 
   /** Lifts the content of the active layer; false when there is nothing to move. */

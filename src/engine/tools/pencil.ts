@@ -84,6 +84,7 @@ export class PencilTool implements Tool<PencilOptions> {
   readonly id = 'pencil' as const;
   readonly label = 'Pencil';
   readonly shortcut = 'P';
+  readonly icon = 'pencil';
   readonly usesSymmetry = true;
   private stroke: PencilStroke | null = null;
 
