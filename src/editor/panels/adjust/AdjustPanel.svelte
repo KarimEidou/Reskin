@@ -103,10 +103,13 @@
     values = initial(info);
     shown = $state.snapshot(values) as Record<string, unknown>;
     editing = info;
-    // Kept, the adjustment on the canvas joins the design's recipe.
+    // Kept, the adjustment on the canvas joins the design's recipe (its
+    // pixel sizes are this document's: the preview ends if its size changes).
+    const size = engine.doc.width;
     session.previewRecipe = {
       preview,
-      recipe: () => chainRecipes(session.recipe, t.kind === 'filter' ? filterRecipe(t.id, info.label, shown) : helperRecipe(t.id, info.label, shown)),
+      recipe: () =>
+        chainRecipes(session.recipe, t.kind === 'filter' ? filterRecipe(t.id, info.label, shown, size) : helperRecipe(t.id, info.label, shown, size)),
     };
     compute();
     void tick().then(() => editorEl?.querySelector<HTMLElement>('input, button:not(.back), select')?.focus());

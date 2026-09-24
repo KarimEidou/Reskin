@@ -1,4 +1,9 @@
-<!-- "Save to Library": asks for a name, then session.saveToLibrary(name). -->
+<!--
+  "Save to Library": asks for a name, then session.saveToLibrary(name). A
+  design linked to a Library design (it came from it or was saved as it)
+  says so: Save changes updates that design — the notice names it, and
+  says so when the typed name renames it — and "Save as new" adds another.
+-->
 <script lang="ts">
   import BookmarkPlus from '@lucide/svelte/icons/bookmark-plus';
   import Button from '$lib/ui/Button.svelte';
@@ -12,13 +17,18 @@
   let open = $state(false);
   let anchor: HTMLElement | undefined = $state();
   let name = $state('');
-  let saving = $state(false);
+  /** Which save runs: over the linked Library design, or as a new one. */
+  let saving = $state<'update' | 'new' | null>(null);
   const id = $props.id();
+
+  /** The name of the Library design a save updates, or null when it adds one. */
+  const linked = $derived(session.libraryId !== null ? session.libraryName : null);
+  const typed = $derived(name.trim());
 
   function toggle(): void {
     if (!open) {
       const docName = session.engine.doc.meta.name?.trim();
-      name = docName && docName !== 'Untitled' ? docName : (session.item?.name ?? 'My icon');
+      name = linked ?? (docName && docName !== 'Untitled' ? docName : (session.item?.name ?? 'My icon'));
     }
     open = !open;
   }
@@ -29,17 +39,21 @@
     anchor?.querySelector('button')?.focus({ preventScroll: true });
   }
 
-  async function save(e: SubmitEvent): Promise<void> {
-    e.preventDefault();
-    const trimmed = name.trim();
-    if (!trimmed || saving) return;
-    saving = true;
+  async function save(asNew: boolean): Promise<void> {
+    if (!typed || saving) return;
+    saving = asNew ? 'new' : 'update';
     commitPendingWork(session.engine);
     try {
-      if ((await session.saveToLibrary(trimmed)) && open) close();
+      if ((await session.saveToLibrary(typed, { asNew })) && open) close();
     } finally {
-      saving = false;
+      saving = null;
     }
+  }
+
+  function submit(e: SubmitEvent): void {
+    e.preventDefault();
+    // Only the form that names the linked design ever saves over it.
+    void save(linked === null);
   }
 
   function selectAll(node: HTMLInputElement) {
@@ -70,15 +84,40 @@
   label="Save to Library"
   placement="top-end"
   offset={8}
-  width="280px"
+  width={linked === null ? '280px' : '320px'}
   initialFocus="first"
 >
-  <form class="form" onsubmit={save}>
-    <label class="label" for="{id}-name">Save this design to your Library as</label>
-    <input id="{id}-name" type="text" autocomplete="off" spellcheck="false" maxlength="80" bind:value={name} {@attach selectAll} />
+  <form class="form" onsubmit={submit}>
+    {#if linked === null}
+      <label class="label" for="{id}-name">Save this design to your Library as</label>
+    {:else}
+      <p class="linked" id="{id}-linked" data-testid="library-link">
+        {#if typed && typed !== linked}
+          Updates "{linked}" in your Library and renames it "{typed}".
+        {:else}
+          Updates "{linked}" in your Library.
+        {/if}
+      </p>
+      <label class="label" for="{id}-name">Name</label>
+    {/if}
+    <input
+      id="{id}-name"
+      type="text"
+      autocomplete="off"
+      spellcheck="false"
+      maxlength="80"
+      aria-describedby={linked === null ? undefined : `${id}-linked`}
+      bind:value={name}
+      {@attach selectAll}
+    />
     <div class="actions">
       <Button size="sm" variant="ghost" onclick={close}>Cancel</Button>
-      <Button size="sm" variant="primary" type="submit" loading={saving} disabled={!name.trim()}>Save</Button>
+      {#if linked === null}
+        <Button size="sm" variant="primary" type="submit" loading={saving !== null} disabled={!typed}>Save</Button>
+      {:else}
+        <Button size="sm" loading={saving === 'new'} disabled={!typed || saving === 'update'} onclick={() => save(true)}>Save as new</Button>
+        <Button size="sm" variant="primary" type="submit" loading={saving === 'update'} disabled={!typed || saving === 'new'}>Save changes</Button>
+      {/if}
     </div>
   </form>
 </Popover>
@@ -96,6 +135,12 @@
   .label {
     color: var(--text-2);
     font-size: var(--text-sm);
+  }
+  .linked {
+    margin: 0;
+    color: var(--text);
+    font-size: var(--text-sm);
+    overflow-wrap: anywhere;
   }
   input {
     height: var(--control-md);

@@ -219,6 +219,28 @@ fn windows_path_helpers_work_on_strings() {
 }
 
 #[test]
+fn a_rewrite_goes_through_a_temporary_file_beside_the_original() {
+    assert_eq!(
+        paths::rewrite_temp_name("Steam.url"),
+        "Steam.url.reskin-tmp"
+    );
+    assert_eq!(
+        paths::rewrite_temp_name("Café 星.url"),
+        "Café 星.url.reskin-tmp"
+    );
+    // A single plain name in the same folder: the elevated helper creates
+    // it there (and only accepts plain names).
+    for name in ["Steam.url", "Café 星.url", "desktop.ini", ".url"] {
+        let temp = paths::rewrite_temp_name(name);
+        assert!(reskin_core::job::is_plain_file_name(&temp), "{temp:?}");
+        assert!(paths::is_directly_under(
+            &format!(r"C:\Users\Public\Desktop\{temp}"),
+            r"C:\Users\Public\Desktop"
+        ));
+    }
+}
+
+#[test]
 fn app_dirs_layout_and_ensure() {
     let tmp = TempDir::new("dirs");
     let dirs = AppDirs::at(tmp.path());

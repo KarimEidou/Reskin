@@ -21,6 +21,12 @@ use crate::commands::CmdResult;
 use crate::state::AppState;
 
 const MAX_ITEMS: usize = 4096;
+/// Most paths one `inspect_paths` call inspects. Each costs shell work on
+/// the single STA thread (icon extraction) and a preview of up to 256 px in
+/// the answer, which the box waits for while the user is still dragging;
+/// 64 keeps even a drop of a whole desktop responsive. How many were left
+/// out is reported in the first item's `skipped`.
+const MAX_INSPECT: usize = 64;
 /// Largest project file Reskin will read.
 const MAX_PROJECT_BYTES: u64 = 64 * 1024 * 1024;
 
@@ -109,12 +115,17 @@ pub fn modes_for(kind: ItemKind, access: Access, store_app: bool) -> Vec<ApplyMo
 
 fn notes_for(ins: &Inspected) -> Vec<String> {
     let mut notes = Vec::new();
-    match ins.location {
-        ItemLocation::PublicDesktop => notes.push(
+    match (ins.location, ins.access) {
+        // Only what the elevated helper can change is offered elevation
+        // (`access::probe_writable`).
+        (_, Access::NeedsElevation) => notes.push(
             "On the Public Desktop (all users) — changing it needs administrator approval, or Reskin can make a personal copy."
                 .into(),
         ),
-        ItemLocation::TaskbarPin => notes.push("A taskbar pin — Explorer may cache its icon until you sign out.".into()),
+        (ItemLocation::PublicDesktop, _) => {
+            notes.push("On the Public Desktop — every user of this PC sees it.".into())
+        }
+        (ItemLocation::TaskbarPin, _) => notes.push("A taskbar pin — Explorer may cache its icon until you sign out.".into()),
         _ => {}
     }
     if ins.store_app {
@@ -168,6 +179,7 @@ fn to_info(state: &AppState, ins: &Inspected) -> ItemInfo {
         store_app: ins.store_app,
         system_icon: None,
         notes: notes_for(ins),
+        skipped: None,
     }
 }
 
@@ -239,12 +251,31 @@ fn frames_to_ipc(frames: Vec<Rgba>) -> Vec<IconFrame> {
 // Commands
 // ---------------------------------------------------------------------------
 
+/// Inspects the first [`MAX_INSPECT`] of `paths`; the first item says how
+/// many more there were ([`with_skipped`]).
 #[tauri::command]
 pub async fn inspect_paths(app: AppHandle, paths: Vec<String>) -> CmdResult<Vec<ItemInfo>> {
-    let paths: Vec<PathBuf> = paths.into_iter().take(64).map(PathBuf::from).collect();
-    tauri::async_runtime::spawn_blocking(move || inspect_blocking(&app, &paths))
-        .await
-        .map_err(|e| e.to_string())
+    let skipped = paths.len().saturating_sub(MAX_INSPECT);
+    let paths: Vec<PathBuf> = paths
+        .into_iter()
+        .take(MAX_INSPECT)
+        .map(PathBuf::from)
+        .collect();
+    tauri::async_runtime::spawn_blocking(move || {
+        with_skipped(inspect_blocking(&app, &paths), skipped)
+    })
+    .await
+    .map_err(|e| e.to_string())
+}
+
+/// Sets `skipped` on the first item when paths were left out.
+fn with_skipped(mut items: Vec<ItemInfo>, skipped: usize) -> Vec<ItemInfo> {
+    if skipped > 0
+        && let Some(first) = items.first_mut()
+    {
+        first.skipped = Some(u32::try_from(skipped).unwrap_or(u32::MAX));
+    }
+    items
 }
 
 #[tauri::command]
@@ -276,25 +307,51 @@ pub async fn item_frames(app: AppHandle, item: ItemId) -> CmdResult<Vec<IconFram
     .map_err(|e| e.to_string())?
 }
 
+/// Extension of a Reskin project (a saved or exported design).
+const PROJECT_EXTENSION: &str = "reskin";
+
+/// The Import dialog's file types, first shown first: everything Import
+/// takes (pictures, icons, shortcuts, programs and Reskin projects, which
+/// the editor opens or queues), projects alone, then any file.
+const IMPORT_FILTERS: &[(&str, &[&str])] = &[
+    (
+        "Images, icons, shortcuts and projects",
+        &[
+            "png",
+            "jpg",
+            "jpeg",
+            "gif",
+            "bmp",
+            "webp",
+            "ico",
+            "tif",
+            "tiff",
+            "lnk",
+            "url",
+            "exe",
+            "dll",
+            PROJECT_EXTENSION,
+        ],
+    ),
+    ("Reskin project", &[PROJECT_EXTENSION]),
+    ("All files", &["*"]),
+];
+
 #[tauri::command]
 pub async fn pick_files(app: AppHandle, purpose: PickPurpose) -> CmdResult<Vec<ItemInfo>> {
     tauri::async_runtime::spawn_blocking(move || {
         let dialog = app.dialog().file();
         let picked = match purpose {
-            PickPurpose::Import => dialog
-                .set_title("Import an image or icon")
-                .add_filter(
-                    "Images, icons and shortcuts",
-                    &[
-                        "png", "jpg", "jpeg", "gif", "bmp", "webp", "ico", "tif", "tiff", "lnk",
-                        "url", "exe", "dll",
-                    ],
+            PickPurpose::Import => IMPORT_FILTERS
+                .iter()
+                .fold(
+                    dialog.set_title("Import an image or icon"),
+                    |d, &(name, ext)| d.add_filter(name, ext),
                 )
-                .add_filter("All files", &["*"])
                 .blocking_pick_files(),
             PickPurpose::Project => dialog
                 .set_title("Open a Reskin project")
-                .add_filter("Reskin project", &["reskin"])
+                .add_filter("Reskin project", &[PROJECT_EXTENSION])
                 .blocking_pick_file()
                 .map(|f| vec![f]),
         };
@@ -328,8 +385,103 @@ fn read_limited(path: &Path) -> Result<String, String> {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
+
+    /// A plain desktop shortcut's info.
+    pub(crate) fn info(name: &str) -> ItemInfo {
+        ItemInfo {
+            id: ItemId(name.into()),
+            kind: ItemKind::Shortcut,
+            name: name.into(),
+            path: format!(r"C:\Users\Kim\Desktop\{name}.lnk"),
+            target: None,
+            location: ItemLocation::UserDesktop,
+            access: Access::Writable,
+            modes: vec![ApplyMode::InPlace],
+            icon: None,
+            icon_source: reskin_core::model::IconSource::Shell,
+            custom_icon: false,
+            reskinned: false,
+            store_app: false,
+            system_icon: None,
+            notes: Vec::new(),
+            skipped: None,
+        }
+    }
+
+    fn inspected(kind: ItemKind, location: ItemLocation, access: Access) -> Inspected {
+        Inspected {
+            kind,
+            name: "App".into(),
+            path: PathBuf::from(r"C:\Users\Public\Desktop\App"),
+            target: None,
+            location,
+            access,
+            icon: None,
+            icon_source: reskin_core::model::IconSource::Shell,
+            custom_icon: false,
+            store_app: false,
+            link: None,
+        }
+    }
+
+    #[test]
+    fn only_what_the_helper_can_change_is_said_to_need_administrator_approval() {
+        let asks = |notes: &[String]| notes.iter().any(|n| n.contains("administrator approval"));
+        let notes = notes_for(&inspected(
+            ItemKind::Shortcut,
+            ItemLocation::PublicDesktop,
+            Access::NeedsElevation,
+        ));
+        assert!(asks(&notes), "{notes:?}");
+        // A folder, a program, or a shortcut this user may change: no
+        // elevation is offered for them.
+        for (kind, access) in [
+            (ItemKind::Folder, Access::ReadOnly),
+            (ItemKind::Executable, Access::ReadOnly),
+            (ItemKind::Shortcut, Access::Writable),
+        ] {
+            let notes = notes_for(&inspected(kind, ItemLocation::PublicDesktop, access));
+            assert!(!asks(&notes), "{kind:?} {access:?}: {notes:?}");
+            assert!(
+                notes.iter().any(|n| n.starts_with("On the Public Desktop")),
+                "{notes:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn import_offers_projects_among_everything_else_and_on_their_own() {
+        let (name, first) = IMPORT_FILTERS[0];
+        assert!(name.contains("projects"), "{name}");
+        for ext in ["png", "ico", "lnk", "url", "exe", PROJECT_EXTENSION] {
+            assert!(first.contains(&ext), "{ext}");
+        }
+        assert!(
+            IMPORT_FILTERS
+                .iter()
+                .any(|&(name, ext)| name == "Reskin project" && ext == [PROJECT_EXTENSION]),
+            "{IMPORT_FILTERS:?}"
+        );
+        let (name, ext) = IMPORT_FILTERS[IMPORT_FILTERS.len() - 1];
+        assert_eq!((name, ext), ("All files", &["*"][..]));
+        // What the dialog offers as a project opens as one.
+        assert_eq!(
+            extract::classify(Path::new(&format!("Design.{PROJECT_EXTENSION}"))),
+            ItemKind::Project
+        );
+    }
+
+    #[test]
+    fn paths_left_out_are_counted_on_the_first_item() {
+        let items = with_skipped(vec![info("a"), info("b")], 36);
+        assert_eq!(items[0].skipped, Some(36));
+        assert_eq!(items[1].skipped, None);
+        let items = with_skipped(vec![info("a")], 0);
+        assert_eq!(items[0].skipped, None);
+        assert!(with_skipped(Vec::new(), 3).is_empty());
+    }
 
     #[test]
     fn modes() {

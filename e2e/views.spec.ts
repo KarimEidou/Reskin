@@ -13,11 +13,13 @@ import {
   expect,
   makeItems,
   pushEditorCmd,
+  relaunch,
   SAMPLE_PATHS,
   settings,
   simulateClose,
   simulateOpen,
   test,
+  waitForAck,
   waitForCall,
 } from './support/fixtures';
 
@@ -66,11 +68,13 @@ async function wallpaper(page: Page, tone: 'dark' | 'light'): Promise<void> {
 
 /** Screenshot for visual review (saved with RESKIN_SCREENSHOTS=1). */
 async function shot(page: Page, name: string): Promise<void> {
-  // Toasts from the setup would cover the page.
+  // Toasts from the setup would cover the page: info / success in the
+  // Notifications region, warnings / errors in the alert region above it.
   // (Outroing toasts are inert; skip those.)
-  const dismiss = page.locator('section[aria-label="Notifications"] > :not([inert]) button[aria-label="Dismiss notification"]');
+  const toasts = page.locator('.toasts').locator('[role="alert"], [role="status"]').locator(':scope > *');
+  const dismiss = toasts.locator(':scope:not([inert]) button[aria-label="Dismiss notification"]');
   for (let i = 0; i < 12 && (await dismiss.count()) > 0; i++) await dismiss.first().click();
-  await expect(page.locator('section[aria-label="Notifications"] > *')).toHaveCount(0);
+  await expect(toasts).toHaveCount(0);
   await page.mouse.move(1, 1);
   await page.waitForTimeout(700);
   const png = await page.screenshot();
@@ -291,6 +295,25 @@ test.describe('library', () => {
     await page.getByTestId('confirm-ok').click();
     await waitForCall(page, 'library_delete', { id: stored!.id });
     await expect(view.getByText('Your Library is empty')).toBeVisible();
+  });
+
+  test('a design whose Library design is gone is saved as a new one, never over the missing one', async ({ openEditor, page }) => {
+    await openEditor();
+    await simulateOpen(page, [SAMPLE_PATHS.steam], 'edit');
+    await hasDesign(page);
+    const saved = await page.evaluate(() => (window as unknown as Win).__reskinSession.saveToLibrary('Mono'));
+    // Deleted behind the editor's back (another window, the files themselves).
+    await page.evaluate(async (id) => {
+      type Invoke = (cmd: string, args: unknown) => Promise<unknown>;
+      await (window as unknown as { __TAURI_INTERNALS__: { invoke: Invoke } }).__TAURI_INTERNALS__.invoke('library_delete', { id });
+    }, (saved as { id: string }).id);
+    await titleBar(page).getByRole('button', { name: 'Library' }).click();
+    const view = page.getByTestId('library-view');
+    await expect(view.getByText('Your Library is empty')).toBeVisible();
+    await view.getByRole('button', { name: 'Save current design' }).first().click();
+    await expect.poll(async () => (await calls(page, 'library_save')).length).toBe(2);
+    expect((await calls(page, 'library_save')).at(-1)!.args.entry).toMatchObject({ id: null, name: 'Mono' });
+    await expect(view.getByTestId('library-card')).toHaveCount(1);
   });
 
   test('the icon-only menu keeps its focused trigger while it opens and closes', async ({ openEditor, page }) => {
@@ -556,6 +579,9 @@ test.describe('settings', () => {
   }
 });
 
+/** This launch's autosaved draft (the fake backend's live slot). */
+const liveDraft = (page: Page) => page.evaluate(() => window.__e2e!.autosaveSlots.live);
+
 test.describe('autosave', () => {
   test('keeps only unsaved changes: an item opened and closed leaves nothing to recover', async ({ openEditor, page }) => {
     await openEditor();
@@ -582,10 +608,54 @@ test.describe('autosave', () => {
     await hasDesign(page);
     await paint(page);
     await page.evaluate(() => (window as unknown as Win).__reskinSession.flushAutosave());
-    expect(await page.evaluate(() => window.__e2e!.autosaveData)).toContain('"format":"reskin"');
+    expect(await liveDraft(page)).toContain('"format":"reskin"');
     await page.evaluate(() => (window as unknown as Win).__reskinSession.saveToLibrary('Portal'));
-    expect(await page.evaluate(() => window.__e2e!.autosaveData)).toBe('');
+    expect(await liveDraft(page)).toBeNull();
     expect(await page.evaluate(() => (window as unknown as Win).__reskinSession.unsaved)).toBe(false);
+  });
+
+  test('a close Rust starts keeps the last edit, even when the editor opens again at once', async ({ openEditor, page }) => {
+    await openEditor();
+    await simulateOpen(page, [SAMPLE_PATHS.steam], 'edit');
+    await hasDesign(page);
+    await paint(page);
+    // Not the close button: the hotkey or the tray closes the editor, and
+    // it opens again before the autosave was due (Prepare resets the session).
+    await simulateClose(page);
+    await simulateOpen(page, [], 'start');
+    await expect.poll(() => liveDraft(page).then((d) => (d ? JSON.parse(d).meta.source.path : null))).toBe(SAMPLE_PATHS.steam);
+    expect(await calls(page, 'editor_close')).toHaveLength(0);
+  });
+
+  test("the editor is cleared (and may be destroyed) only once that close's autosave went out", async ({ openEditor, page }) => {
+    await openEditor();
+    const { session } = await simulateOpen(page, [SAMPLE_PATHS.steam], 'edit');
+    await hasDesign(page);
+    await paint(page);
+    // The autosave is held until the test lets it go.
+    type Held = { __releaseSave?: () => void; __releasedAt?: number };
+    await page.evaluate(() => {
+      type Invoke = (cmd: string, args?: unknown, opts?: unknown) => Promise<unknown>;
+      const w = window as unknown as Held & { __TAURI_INTERNALS__: { invoke: Invoke } };
+      const inner = w.__TAURI_INTERNALS__.invoke;
+      const held = new Promise<void>((r) => (w.__releaseSave = r));
+      w.__TAURI_INTERNALS__.invoke = (cmd, args, opts) => (cmd === 'autosave' ? held.then(() => inner(cmd, args, opts)) : inner(cmd, args, opts));
+    });
+    const closing = simulateClose(page, 'hide', { morph: false });
+    expect(await waitForAck(page, session, 'collapsed')).toBe(true);
+    await page.waitForTimeout(100);
+    await page.evaluate(() => {
+      const w = window as Held;
+      w.__releasedAt = performance.now();
+      w.__releaseSave!();
+    });
+    expect((await closing).timedOut).toEqual([]);
+    const [releasedAt, cleared] = await page.evaluate(() => [
+      (window as Held).__releasedAt!,
+      window.__e2e!.acks.find((a) => a.stage === 'cleared')!.t,
+    ]);
+    expect(cleared).toBeGreaterThanOrEqual(releasedAt);
+    expect(JSON.parse((await liveDraft(page))!).meta.source.path).toBe(SAMPLE_PATHS.steam);
   });
 
   test('serializes off the main thread', async ({ openEditor, page }) => {
@@ -611,25 +681,20 @@ test.describe('autosave', () => {
       return made;
     });
     expect(compressedHere).toBe(0);
-    const draft = JSON.parse((await page.evaluate(() => window.__e2e!.autosaveData))!);
+    const draft = JSON.parse((await liveDraft(page))!);
     expect(draft).toMatchObject({ format: 'reskin', meta: { name: 'Steam' } });
     expect(draft.layers[0].pixels.length).toBeGreaterThan(100);
   });
 });
 
 test.describe('recovery', () => {
-  /** Leaves an autosaved Steam design behind, as a crash would. */
+  /** Leaves an unsaved Steam design behind, as a crash would: the next launch offers it. */
   async function leaveAutosave(page: Page): Promise<void> {
     await simulateOpen(page, [SAMPLE_PATHS.steam], 'edit');
     await hasDesign(page);
-    await page.evaluate(async () => {
-      const s = (window as unknown as Win).__reskinSession;
-      const json = await s.engine.serialize();
-      const invoke = (window as unknown as { __TAURI_INTERNALS__: { invoke: (c: string, a: unknown) => Promise<unknown> } })
-        .__TAURI_INTERNALS__.invoke;
-      await invoke('autosave', { data: json });
-    });
-    await simulateClose(page);
+    await paint(page);
+    await page.evaluate(() => (window as unknown as Win).__reskinSession.flushAutosave());
+    await relaunch(page, 'editor');
   }
 
   const dialogOf = (page: Page) => page.getByRole('dialog', { name: 'Restore your unsaved design?' });
@@ -673,6 +738,27 @@ test.describe('recovery', () => {
     // The Start page's own offer went with it.
     await expect(bannerOf(page)).toHaveCount(0);
     expect(await page.evaluate(() => window.__e2e!.callsOf('restore').length)).toBe(0);
+  });
+
+  test('a design an earlier launch left stays offered while this launch autosaves its own work', async ({ openEditor, page }) => {
+    await openEditor();
+    await leaveAutosave(page);
+    const offered = () => page.evaluate(() => window.__e2e!.autosaveSlots.recovery);
+    expect(JSON.parse((await offered())!).meta.source.path).toBe(SAMPLE_PATHS.steam);
+    // This launch edits another design first, autosaved as it is closed.
+    await simulateOpen(page, [SAMPLE_PATHS.notes], 'edit');
+    await hasDesign(page);
+    await paint(page);
+    await page.getByRole('button', { name: 'Close editor' }).click();
+    await expect.poll(async () => (await editorState(page)).phase).toBe('closed');
+    expect(JSON.parse((await liveDraft(page))!).meta.source.path).toBe(SAMPLE_PATHS.notes);
+    // The first Start page still offers the earlier launch's design.
+    await simulateOpen(page, [], 'start');
+    await expect(dialogOf(page)).toBeVisible();
+    expect(JSON.parse((await offered())!).meta.source.path).toBe(SAMPLE_PATHS.steam);
+    await dialogOf(page).getByRole('button', { name: 'Discard' }).click();
+    await expect.poll(offered).toBeNull();
+    expect(await liveDraft(page)).toBeNull();
   });
 
   test('dismissing the dialog keeps it on the Start page until discarded', async ({ openEditor, page }) => {
@@ -823,7 +909,7 @@ test.describe('pasted images', () => {
     expect(await layerNames(page)).toEqual(['Pasted image']);
   });
 
-  test('an image still decoding when another design opens is dropped', async ({ openEditor, page }) => {
+  test('an image still decoding when another design opens is asked about, never added unasked', async ({ openEditor, page }) => {
     await openEditor();
     await simulateOpen(page, [], 'start');
     // Hold the pasted image's decoding until the test lets it go.
@@ -850,20 +936,40 @@ test.describe('pasted images', () => {
     const opened = await layerNames(page);
     await page.evaluate(() => (window as Held).__releaseDecode!());
     await page.waitForFunction(() => (window as Held).__decoded === true);
+    // A design is open now: the popover asks instead of starting another one.
+    const pop = page.getByTestId('import-popover');
+    await expect(pop).toBeVisible();
     expect(await layerNames(page)).toEqual(opened);
     expect(opened).not.toContain('Pasted image');
+    await pop.getByRole('button', { name: 'Cancel' }).click();
+    await expect(pop).toBeHidden();
+    expect(await layerNames(page)).toEqual(opened);
+    expect(await queueNames(page)).toEqual(['Steam']);
   });
 
-  test('on the canvas the workspace takes the paste: one layer, not two', async ({ openEditor, page }) => {
+  test('the canvas takes its own pastes (one layer, not two); elsewhere the App asks for the open design', async ({ openEditor, page }) => {
     await openEditor();
     await simulateOpen(page, [SAMPLE_PATHS.steam], 'edit');
     await hasDesign(page);
     await expect(page.getByTestId('canvas-stage')).toBeVisible();
     const before = await layerNames(page);
     await paste(page);
+    const pop = page.getByTestId('import-popover');
+    await expect(pop).toBeVisible();
+    await pop.getByRole('button', { name: /Add as layer/ }).click();
     await expect.poll(() => layerNames(page)).toEqual([...before, 'Pasted image']);
     // The App skips a paste the canvas already handled (preventDefault).
     await page.waitForTimeout(300);
+    await expect(pop).toBeHidden();
+    expect(await layerNames(page)).toEqual([...before, 'Pasted image']);
+
+    // On the Library page (no canvas), the App asks about it for the open design.
+    await titleBar(page).getByRole('button', { name: 'Library' }).click();
+    await expect(page.getByTestId('library-view')).toBeVisible();
+    await paste(page);
+    await expect(pop).toBeVisible();
+    await pop.getByRole('button', { name: /Queue as new item/ }).click();
+    await expect.poll(() => queueNames(page)).toEqual(['Steam', 'Pasted image']);
     expect(await layerNames(page)).toEqual([...before, 'Pasted image']);
   });
 
@@ -906,6 +1012,7 @@ test.describe('overlay gallery', () => {
       await page.getByRole('menuitemcheckbox', { name: /Docs Portal/ }).click();
       await expect(titleBar(page)).toContainText('Docs Portal');
       await expect(titleBar(page)).toContainText('2/3');
+      await expect(titleBar(page).getByRole('button', { name: 'Docs Portal, 2 of 3 queued' })).toBeVisible();
 
       await emit(page, 'tauri://drag-drop', { paths: [SAMPLE_PATHS.image], position: { x: 700, y: 360 } });
       await expect(page.getByTestId('import-popover')).toBeVisible();
@@ -919,6 +1026,26 @@ test.describe('overlay gallery', () => {
       await page.keyboard.press('Enter');
       await expect(page.getByRole('dialog', { name: 'Restore all icons?' })).toBeVisible();
       await shot(page, `editor-shell-confirm${suffix}.png`);
+    });
+
+    test(`Save to Library over the design it is linked to (${tone})`, async ({ openEditor, page }) => {
+      const suffix = tone === 'light' ? '-light' : '';
+      await openEditor({ settings: { theme: tone }, accent: '#0078d4' });
+      await wallpaper(page, tone);
+      await simulateOpen(page, [SAMPLE_PATHS.steam], 'edit');
+      await hasDesign(page);
+      await page.evaluate(() => (window as unknown as Win).__reskinSession.saveToLibrary('Steam — midnight'));
+      // The save's toast goes first: dismissing it later would close the form.
+      const saved = page.getByRole('status').filter({ hasText: 'Saved "Steam — midnight" to the Library.' });
+      await saved.getByRole('button', { name: 'Dismiss notification' }).click();
+      await expect(saved).toHaveCount(0);
+
+      await page.getByTestId('save-library').click();
+      const form = page.getByRole('dialog', { name: 'Save to Library' });
+      await form.getByRole('textbox', { name: 'Name' }).fill('Steam — dawn');
+      await expect(form.getByTestId('library-link')).toHaveText('Updates "Steam — midnight" in your Library and renames it "Steam — dawn".');
+      await shot(page, `editor-shell-save-library${suffix}.png`);
+      await expect(form).toBeVisible();
     });
   }
 });

@@ -25,16 +25,34 @@
 //! * Restores are planned purely ([`Journal::plan_undo`],
 //!   [`Journal::plan_restore_target`], [`Journal::plan_restore_all`]),
 //!   executed by the caller, then recorded with [`Journal::finish_plan`].
+//!   A restore that may meet other processes is asked for as
+//!   [`RestoreStep`]s ([`Journal::undo_steps`],
+//!   [`Journal::restore_all_steps`]), each planned with
+//!   [`Journal::plan_step`] under the lock right before it runs.
+//! * The extra entries of one apply (matching Start-menu and taskbar pins)
+//!   carry the main entry's id as their `group`; undoing the main entry
+//!   undoes them too ([`Journal::undo_steps`]).
 //!
 //! Targets are compared case-insensitively after
 //! [`paths::normalize_for_compare`]; system icons use their slug as the
 //! target. The file is rewritten atomically after every mutation.
+//!
+//! Several processes share the file: the app, and `--restore-all` run from
+//! a terminal or the uninstaller while the app may still be running. Every
+//! read-modify-write therefore holds an exclusive lock on
+//! `journal.json.lock` (`LockFileEx` on Windows) and starts from the file as
+//! it is on disk: each mutation takes the lock and reloads first, and
+//! [`Journal::locked`] holds it across several steps (plan a step, execute
+//! it, record it). A journal never writes back entries another process has
+//! changed since it last read them; readers catch up with
+//! [`Journal::refresh`].
 
-use std::collections::{BTreeMap, HashSet};
-use std::fs;
+use std::collections::{BTreeMap, BTreeSet, HashSet};
+use std::fs::{self, OpenOptions, TryLockError};
 use std::io;
+use std::panic::{self, AssertUnwindSafe};
 use std::path::{Path, PathBuf};
-use std::time::{Duration, SystemTime};
+use std::time::{Duration, Instant, SystemTime};
 
 use serde::Serialize;
 use serde_json::Value;
@@ -45,6 +63,20 @@ use crate::{Error, Result, now_ms, paths, store};
 
 /// Version of `journal.json`.
 pub const JOURNAL_VERSION: u32 = 1;
+
+/// How long a journal operation waits for another process to release the
+/// journal lock. Holders keep it for one quick read-modify-write, or one
+/// shell write while restoring, never across a UAC prompt.
+pub const LOCK_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// How often a waiting operation retries the lock.
+const LOCK_POLL: Duration = Duration::from_millis(20);
+
+/// [`Journal::reconcile_settled`] leaves pending entries younger than this
+/// alone when their target does not show the icon yet: in another process
+/// the apply may still be under way (it can wait up to five minutes on a
+/// UAC prompt between journaling and committing).
+pub const IN_FLIGHT_GRACE: Duration = Duration::from_secs(10 * 60);
 
 /// At most this many finished (restored / failed / superseded) entries are
 /// kept; the oldest restored and failed ones go first.
@@ -75,6 +107,9 @@ pub struct NewEntry {
     /// 48 px PNG thumbnail (base64).
     pub thumb: Option<String>,
     pub design_name: Option<String>,
+    /// The main entry of the apply this entry belongs to (for the matching
+    /// pins an apply also changes); `None` for a main entry.
+    pub group: Option<String>,
 }
 
 /// What a target looks like now, for [`Journal::reconcile`].
@@ -95,9 +130,13 @@ pub struct ReconcileReport {
     pub applied: Vec<String>,
     /// Pending entries marked failed.
     pub failed: Vec<String>,
+    /// Pending entries left pending because another process may still be
+    /// applying them ([`Journal::reconcile_settled`]).
+    pub in_flight: Vec<String>,
 }
 
 impl ReconcileReport {
+    /// Nothing was committed or failed.
     pub fn is_empty(&self) -> bool {
         self.applied.is_empty() && self.failed.is_empty()
     }
@@ -122,6 +161,18 @@ pub enum PlanScope {
     Undo { previous: Option<String> },
     /// Full restore: every entry of the target's chain becomes `Restored`.
     Full { chain: Vec<String> },
+}
+
+/// One restore, planned with [`Journal::plan_step`] under the journal lock
+/// right before it runs, so that it matches the journal as it is on disk
+/// then — whatever other processes did since it was asked for.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RestoreStep {
+    /// Undo this entry ([`Journal::plan_undo`]).
+    Undo(String),
+    /// Put this target back as it was before Reskin changed it
+    /// ([`Journal::plan_restore_target`]).
+    Target(String),
 }
 
 /// A restore to carry out on one target.
@@ -196,6 +247,53 @@ struct JournalFileRef<'a> {
     failures: &'a BTreeMap<String, String>,
 }
 
+/// An exclusive lock on a journal's lock file, shared with every other
+/// process; released on drop.
+struct FileLock(fs::File);
+
+impl FileLock {
+    /// Waits up to `timeout` for the lock on `path` (created if missing).
+    fn acquire(path: &Path, timeout: Duration) -> Result<FileLock> {
+        if let Some(dir) = path.parent().filter(|d| !d.as_os_str().is_empty()) {
+            fs::create_dir_all(dir).map_err(|e| io_error(e, "creating", dir))?;
+        }
+        let file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(path)
+            .map_err(|e| io_error(e, "opening", path))?;
+        let started = Instant::now();
+        loop {
+            match file.try_lock() {
+                Ok(()) => return Ok(FileLock(file)),
+                Err(TryLockError::WouldBlock) if started.elapsed() < timeout => {
+                    std::thread::sleep(LOCK_POLL);
+                }
+                Err(TryLockError::WouldBlock) => {
+                    return Err(Error::Busy(format!(
+                        "Reskin's history is in use by another Reskin process (restoring \
+                         icons, or the uninstaller); waited {} s for {}. Try again when it \
+                         has finished.",
+                        timeout.as_secs(),
+                        path.display()
+                    )));
+                }
+                Err(TryLockError::Error(e)) => return Err(io_error(e, "locking", path)),
+            }
+        }
+    }
+}
+
+impl Drop for FileLock {
+    fn drop(&mut self) {
+        // Closing the handle releases the lock too, but Windows may do that
+        // lazily; unlock right away so a waiting process gets it at once.
+        let _ = self.0.unlock();
+    }
+}
+
 /// The journal, persisted at `path` as
 /// `{ "version": 1, "entries": [HistoryEntry…], "failures": {id: message} }`.
 #[derive(Debug, Clone)]
@@ -205,8 +303,14 @@ pub struct Journal {
     entries: Vec<HistoryEntry>,
     /// Why entries failed (`fail` / `reconcile`), by entry id.
     failures: BTreeMap<String, String>,
-    /// Where [`Journal::load`] saved a damaged journal.
+    /// Where a damaged journal found on disk was saved.
     recovered: Option<PathBuf>,
+    /// SHA-256 of the file as last read or written, so a reload can skip
+    /// parsing a file nobody changed. `None` forces the next reload.
+    seen: Option<String>,
+    /// Inside [`Journal::locked`]: the lock is held and the entries are
+    /// fresh from disk.
+    held: bool,
 }
 
 /// Comparison key for targets (paths case-insensitively, slugs as-is).
@@ -223,49 +327,116 @@ impl Journal {
     /// back. A file that is not a journal at all is moved to that backup
     /// name and an empty journal is returned. A journal with another
     /// version (written by a newer Reskin) is refused rather than clobbered.
+    /// The same holds whenever a later operation reloads the file.
     pub fn load(path: impl Into<PathBuf>) -> Result<Journal> {
-        let path = path.into();
         let mut journal = Journal {
-            path,
+            path: path.into(),
             entries: Vec::new(),
             failures: BTreeMap::new(),
             recovered: None,
+            seen: None,
+            held: false,
         };
-        let bytes = match fs::read(&journal.path) {
+        // No folder, no journal: don't create one just to lock it.
+        if journal
+            .path
+            .parent()
+            .is_some_and(|d| !d.as_os_str().is_empty() && !d.exists())
+        {
+            return Ok(journal);
+        }
+        journal.locked(|_| Ok(()))?;
+        Ok(journal)
+    }
+
+    /// `journal.json` → `journal.json.lock`, the file every process locks.
+    fn lock_path(&self) -> PathBuf {
+        let mut name = self
+            .path
+            .file_name()
+            .map(|n| n.to_os_string())
+            .unwrap_or_else(|| "journal.json".into());
+        name.push(".lock");
+        self.path.with_file_name(name)
+    }
+
+    /// Runs `f` holding the journal lock, on the journal as it is on disk:
+    /// no other process changes the file until `f` returns, and mutations
+    /// inside `f` do not lock again. Use it to build, execute and record a
+    /// plan as one step. Waits up to [`LOCK_TIMEOUT`] for the lock.
+    ///
+    /// Within one process, callers must serialise access to the `Journal`
+    /// themselves (the app keeps it in a mutex) and take that first.
+    pub fn locked<T>(&mut self, f: impl FnOnce(&mut Journal) -> Result<T>) -> Result<T> {
+        if self.held {
+            return f(self);
+        }
+        let lock = FileLock::acquire(&self.lock_path(), LOCK_TIMEOUT)?;
+        self.held = true;
+        let outcome = panic::catch_unwind(AssertUnwindSafe(|| {
+            self.reload().and_then(|()| f(&mut *self))
+        }));
+        self.held = false;
+        drop(lock);
+        outcome.unwrap_or_else(|payload| panic::resume_unwind(payload))
+    }
+
+    /// Picks up changes another process made to the file.
+    pub fn refresh(&mut self) -> Result<()> {
+        self.locked(|_| Ok(()))
+    }
+
+    /// Replaces the in-memory state with the file's (under the lock), unless
+    /// the file is unchanged since it was last read or written. See
+    /// [`Journal::load`] for how damage is handled.
+    fn reload(&mut self) -> Result<()> {
+        let bytes = match fs::read(&self.path) {
             Ok(b) => b,
-            Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(journal),
-            Err(e) => return Err(io_error(e, "reading", &journal.path)),
+            Err(e) if e.kind() == io::ErrorKind::NotFound => {
+                self.entries.clear();
+                self.failures.clear();
+                self.seen = None;
+                return Ok(());
+            }
+            Err(e) => return Err(io_error(e, "reading", &self.path)),
         };
+        let digest = paths::sha256_hex(&bytes);
+        if self.seen.as_deref() == Some(digest.as_str()) {
+            return Ok(());
+        }
         match parse_journal(store::strip_bom(&bytes)) {
             Parsed::Intact(entries, failures) => {
-                journal.entries = entries;
-                journal.failures = failures;
+                self.entries = entries;
+                self.failures = failures;
+                self.seen = Some(digest);
             }
             Parsed::Salvaged(entries, mut failures) => {
                 // Keep the original first; only then replace it.
-                let backup = journal.backup_path();
-                fs::copy(&journal.path, &backup)
-                    .map_err(|e| io_error(e, "backing up", &journal.path))?;
-                journal.recovered = Some(backup);
+                let backup = self.backup_path();
+                fs::copy(&self.path, &backup).map_err(|e| io_error(e, "backing up", &self.path))?;
+                self.recovered = Some(backup);
                 failures.retain(|id, _| entries.iter().any(|e| &e.id == id));
-                journal.entries = entries;
-                journal.failures = failures;
-                journal.persist()?;
+                self.entries = entries;
+                self.failures = failures;
+                self.persist()?;
             }
             Parsed::OtherVersion(v) => {
                 return Err(Error::Unsupported(format!(
                     "{} has version {v}; this Reskin understands version {JOURNAL_VERSION}",
-                    journal.path.display(),
+                    self.path.display(),
                 )));
             }
             Parsed::Damaged => {
-                let backup = journal.backup_path();
-                fs::rename(&journal.path, &backup)
-                    .map_err(|e| io_error(e, "moving aside", &journal.path))?;
-                journal.recovered = Some(backup);
+                let backup = self.backup_path();
+                fs::rename(&self.path, &backup)
+                    .map_err(|e| io_error(e, "moving aside", &self.path))?;
+                self.recovered = Some(backup);
+                self.entries.clear();
+                self.failures.clear();
+                self.seen = None;
             }
         }
-        Ok(journal)
+        Ok(())
     }
 
     /// `journal.json` → `journal.json.bak-<unix ms>`.
@@ -283,8 +454,9 @@ impl Journal {
         &self.path
     }
 
-    /// Set when [`Journal::load`] found a damaged journal: the untouched
-    /// file was saved here (entries it could still read were kept).
+    /// Set when the journal found on disk (at [`Journal::load`] or a later
+    /// reload) was damaged: the untouched file was saved here (entries it
+    /// could still read were kept).
     pub fn recovered_backup(&self) -> Option<&Path> {
         self.recovered.as_deref()
     }
@@ -367,6 +539,10 @@ impl Journal {
     /// `CreatedShortcut` when the chain started as one). Fails if another
     /// change to the same target is still pending.
     pub fn begin(&mut self, new: NewEntry) -> Result<String> {
+        self.locked(|j| j.begin_locked(new))
+    }
+
+    fn begin_locked(&mut self, new: NewEntry) -> Result<String> {
         let NewEntry {
             kind,
             mut target,
@@ -377,6 +553,7 @@ impl Journal {
             elevated,
             thumb,
             design_name,
+            group,
         } = new;
         if let Some(id) = system_icon {
             target = id.slug().to_owned();
@@ -422,6 +599,7 @@ impl Journal {
             applied_at: now_ms(),
             restored_at: None,
             supersedes,
+            group,
         });
         if let Err(e) = self.persist() {
             // Nothing was recorded, so the caller must not touch the target.
@@ -446,65 +624,71 @@ impl Journal {
     /// entry it supersedes → `Superseded`. Committing an applied entry is a
     /// no-op.
     pub fn commit(&mut self, id: &str) -> Result<()> {
-        let i = self.index_of(id)?;
-        match self.entries[i].state {
-            EntryState::Pending => {}
-            EntryState::Applied => return Ok(()),
-            other => {
-                return Err(Error::Other(format!(
-                    "cannot commit history entry {id}: it is {other:?}"
-                )));
+        self.locked(|j| {
+            let i = j.index_of(id)?;
+            match j.entries[i].state {
+                EntryState::Pending => {}
+                EntryState::Applied => return Ok(()),
+                other => {
+                    return Err(Error::Other(format!(
+                        "cannot commit history entry {id}: it is {other:?}"
+                    )));
+                }
             }
-        }
-        self.activate(i);
-        self.persist()
+            j.activate(i);
+            j.persist()
+        })
     }
 
     /// Applying failed: `Pending` → `Failed`, remembering `message`.
     /// Failing an already failed entry is a no-op.
     pub fn fail(&mut self, id: &str, message: &str) -> Result<()> {
-        let i = self.index_of(id)?;
-        match self.entries[i].state {
-            EntryState::Pending => {}
-            EntryState::Failed => return Ok(()),
-            other => {
-                return Err(Error::Other(format!(
-                    "cannot fail history entry {id}: it is {other:?}"
-                )));
+        self.locked(|j| {
+            let i = j.index_of(id)?;
+            match j.entries[i].state {
+                EntryState::Pending => {}
+                EntryState::Failed => return Ok(()),
+                other => {
+                    return Err(Error::Other(format!(
+                        "cannot fail history entry {id}: it is {other:?}"
+                    )));
+                }
             }
-        }
-        self.entries[i].state = EntryState::Failed;
-        self.failures.insert(id.to_owned(), message.to_owned());
-        self.persist()
+            j.entries[i].state = EntryState::Failed;
+            j.failures.insert(id.to_owned(), message.to_owned());
+            j.persist()
+        })
     }
 
     /// The target was restored to its original icon. Marking the applied
     /// entry also marks every superseded entry of its chain restored, since
     /// the whole chain is undone. Marking a restored entry is a no-op.
     pub fn mark_restored(&mut self, id: &str) -> Result<()> {
-        let i = self.index_of(id)?;
-        let now = now_ms();
-        match self.entries[i].state {
-            EntryState::Restored => return Ok(()),
-            EntryState::Applied => {
-                let key = target_key(&self.entries[i].target);
-                for e in &mut self.entries {
-                    if e.state == EntryState::Superseded && target_key(&e.target) == key {
-                        e.state = EntryState::Restored;
-                        e.restored_at = Some(now);
+        self.locked(|j| {
+            let i = j.index_of(id)?;
+            let now = now_ms();
+            match j.entries[i].state {
+                EntryState::Restored => return Ok(()),
+                EntryState::Applied => {
+                    let key = target_key(&j.entries[i].target);
+                    for e in &mut j.entries {
+                        if e.state == EntryState::Superseded && target_key(&e.target) == key {
+                            e.state = EntryState::Restored;
+                            e.restored_at = Some(now);
+                        }
                     }
                 }
+                EntryState::Superseded => {}
+                other => {
+                    return Err(Error::Other(format!(
+                        "cannot mark history entry {id} restored: it is {other:?}"
+                    )));
+                }
             }
-            EntryState::Superseded => {}
-            other => {
-                return Err(Error::Other(format!(
-                    "cannot mark history entry {id} restored: it is {other:?}"
-                )));
-            }
-        }
-        self.entries[i].state = EntryState::Restored;
-        self.entries[i].restored_at = Some(now);
-        self.persist()
+            j.entries[i].state = EntryState::Restored;
+            j.entries[i].restored_at = Some(now);
+            j.persist()
+        })
     }
 
     // -- restore planning ---------------------------------------------------
@@ -550,6 +734,45 @@ impl Journal {
             previous: previous.map(|p| p.id.clone()),
         };
         Ok(self.plan_for(entry, to, scope))
+    }
+
+    /// The steps undoing entry `id` together with the entries applied with
+    /// it — its group, e.g. matching pins — that are still their targets'
+    /// applied entries; `id` comes first. Fails, like
+    /// [`Journal::plan_undo`], when `id` is not its target's current icon.
+    pub fn undo_steps(&self, id: &str) -> Result<Vec<RestoreStep>> {
+        self.plan_undo(id)?;
+        let group = self
+            .entries
+            .iter()
+            .filter(|e| e.group.as_deref() == Some(id) && e.state == EntryState::Applied)
+            .map(|e| RestoreStep::Undo(e.id.clone()));
+        Ok(std::iter::once(RestoreStep::Undo(id.to_owned()))
+            .chain(group)
+            .collect())
+    }
+
+    /// One step per target Reskin has an applied change on, oldest first
+    /// (the targets of [`Journal::plan_restore_all`]).
+    pub fn restore_all_steps(&self) -> Vec<RestoreStep> {
+        self.plan_restore_all()
+            .into_iter()
+            .map(|p| RestoreStep::Target(p.target))
+            .collect()
+    }
+
+    /// Plans `step` on the journal as it is now. `None` when nothing is
+    /// left to do: the target has no applied change any more, or the entry
+    /// to undo was restored meanwhile. Undoing an entry that a newer change
+    /// replaced since fails, as [`Journal::plan_undo`] does.
+    pub fn plan_step(&self, step: &RestoreStep) -> Result<Option<RestorePlan>> {
+        match step {
+            RestoreStep::Undo(id) => match self.get(id) {
+                Some(e) if e.state == EntryState::Restored => Ok(None),
+                _ => self.plan_undo(id).map(Some),
+            },
+            RestoreStep::Target(target) => Ok(self.plan_restore_target(target)),
+        }
     }
 
     /// Full restore of the chain whose applied entry is `active`.
@@ -607,11 +830,18 @@ impl Journal {
     /// If the journal changed in between (another apply superseded the
     /// entry), the plan is stale: nothing is recorded and an error is
     /// returned, since marking it would leave two applied entries for one
-    /// target. Plan, execute and finish under the same journal lock.
+    /// target. Plan, execute and finish within one [`Journal::locked`]
+    /// call; a plan executed outside the lock (behind a UAC prompt) is
+    /// planned again there afterwards ([`Journal::plan_step`]) and finished
+    /// only if nothing changed.
     pub fn finish_plan(&mut self, plan: &RestorePlan, ok: bool) -> Result<()> {
         if !ok {
             return Ok(());
         }
+        self.locked(|j| j.finish_plan_locked(plan))
+    }
+
+    fn finish_plan_locked(&mut self, plan: &RestorePlan) -> Result<()> {
         let i = self.index_of(&plan.entry_id)?;
         match self.entries[i].state {
             EntryState::Applied => {}
@@ -655,34 +885,56 @@ impl Journal {
 
     /// Resolves entries left pending by a crash between `begin` and
     /// `commit`: each is committed when `probe` finds the target using its
-    /// icon, and failed otherwise.
+    /// icon, and failed otherwise. Only for the app at startup, when no
+    /// apply can be under way; other processes use
+    /// [`Journal::reconcile_settled`].
     pub fn reconcile(
         &mut self,
-        mut probe: impl FnMut(&HistoryEntry) -> Probe,
+        probe: impl FnMut(&HistoryEntry) -> Probe,
     ) -> Result<ReconcileReport> {
-        let mut report = ReconcileReport::default();
-        for i in 0..self.entries.len() {
-            if self.entries[i].state != EntryState::Pending {
-                continue;
-            }
-            let id = self.entries[i].id.clone();
-            let reason = match probe(&self.entries[i]) {
-                Probe::PointsToIcon => {
-                    self.activate(i);
-                    report.applied.push(id);
+        self.reconcile_settled(probe, Duration::ZERO)
+    }
+
+    /// [`Journal::reconcile`] for a process that may run alongside the app
+    /// (`--restore-all`): a pending entry younger than `grace` whose target
+    /// does not use its icon yet may be an apply the app is still making,
+    /// so it stays pending (listed in [`ReconcileReport::in_flight`]).
+    pub fn reconcile_settled(
+        &mut self,
+        mut probe: impl FnMut(&HistoryEntry) -> Probe,
+        grace: Duration,
+    ) -> Result<ReconcileReport> {
+        self.locked(|j| {
+            let now = now_ms();
+            let mut report = ReconcileReport::default();
+            for i in 0..j.entries.len() {
+                if j.entries[i].state != EntryState::Pending {
                     continue;
                 }
-                Probe::PointsElsewhere => "Reskin stopped before the icon was applied",
-                Probe::Missing => "the item no longer exists",
-            };
-            self.entries[i].state = EntryState::Failed;
-            self.failures.insert(id.clone(), reason.to_owned());
-            report.failed.push(id);
-        }
-        if !report.is_empty() {
-            self.persist()?;
-        }
-        Ok(report)
+                let id = j.entries[i].id.clone();
+                let young = now - j.entries[i].applied_at < grace.as_millis() as f64;
+                let reason = match probe(&j.entries[i]) {
+                    Probe::PointsToIcon => {
+                        j.activate(i);
+                        report.applied.push(id);
+                        continue;
+                    }
+                    Probe::PointsElsewhere if young => {
+                        report.in_flight.push(id);
+                        continue;
+                    }
+                    Probe::PointsElsewhere => "Reskin stopped before the icon was applied",
+                    Probe::Missing => "the item no longer exists",
+                };
+                j.entries[i].state = EntryState::Failed;
+                j.failures.insert(id.clone(), reason.to_owned());
+                report.failed.push(id);
+            }
+            if !report.is_empty() {
+                j.persist()?;
+            }
+            Ok(report)
+        })
     }
 
     // -- icon garbage collection -------------------------------------------
@@ -690,17 +942,66 @@ impl Journal {
     /// Icons still in use or needed for undo/restore: those of pending,
     /// applied and superseded entries.
     pub fn referenced_icons(&self) -> HashSet<PathBuf> {
+        self.referenced_except(&HashSet::new())
+            .into_iter()
+            .map(PathBuf::from)
+            .collect()
+    }
+
+    /// Icon paths of pending, applied and superseded entries not in `done`.
+    fn referenced_except(&self, done: &HashSet<&str>) -> Vec<&str> {
         self.entries
             .iter()
             .filter(|e| {
                 matches!(
                     e.state,
                     EntryState::Pending | EntryState::Applied | EntryState::Superseded
-                )
+                ) && !done.contains(e.id.as_str())
             })
             .filter(|e| !e.icon_path.is_empty())
-            .map(|e| PathBuf::from(&e.icon_path))
+            .map(|e| e.icon_path.as_str())
             .collect()
+    }
+
+    /// File names of icons directly in `dir` that entries of this journal
+    /// point at and that no entry needs any more once `plans` succeeded
+    /// (every entry they restore is then `Restored`).
+    ///
+    /// For the machine-wide Public-Desktop icons, which only the elevated
+    /// helper can delete: unlike [`Journal::gc_icons`] this never lists the
+    /// folder, whose other files may belong to other users' journals. Paths
+    /// and file names compare as in [`Journal::gc_icons_older_than`].
+    pub fn icons_released_by(&self, plans: &[RestorePlan], dir: &str) -> Vec<String> {
+        let done: HashSet<&str> = plans
+            .iter()
+            .flat_map(|p| match &p.scope {
+                PlanScope::Undo { .. } => vec![p.entry_id.as_str()],
+                PlanScope::Full { chain } => chain.iter().map(String::as_str).collect(),
+            })
+            .collect();
+        let still_needed = self.referenced_except(&done);
+        let keep_paths: HashSet<String> = still_needed
+            .iter()
+            .map(|p| paths::normalize_for_compare(p))
+            .collect();
+        let keep_names: HashSet<String> = still_needed
+            .iter()
+            .map(|p| paths::file_name_of(p).to_lowercase())
+            .collect();
+        let released: BTreeSet<&str> = self
+            .entries
+            .iter()
+            .map(|e| e.icon_path.as_str())
+            .filter(|p| paths::is_directly_under(p, dir))
+            .filter(|p| {
+                let name = paths::file_name_of(p);
+                paths::is_valid_public_icon_name(name)
+                    && !keep_names.contains(&name.to_lowercase())
+                    && !keep_paths.contains(&paths::normalize_for_compare(p))
+            })
+            .map(paths::file_name_of)
+            .collect();
+        released.into_iter().map(str::to_owned).collect()
     }
 
     /// Deletes `*.ico` files in `dir` that no entry references, skipping
@@ -812,15 +1113,50 @@ impl Journal {
         self.failures.retain(|id, _| ids.contains(id.as_str()));
     }
 
+    /// Writes the journal (under the lock: only called inside
+    /// [`Journal::locked`]). If the write fails, the next operation reloads
+    /// the file, so what is not on disk is not kept either.
     fn persist(&mut self) -> Result<()> {
+        debug_assert!(self.held, "journal written without its lock");
         self.prune();
-        store::write_json(
-            &self.path,
-            &JournalFileRef {
-                version: JOURNAL_VERSION,
-                entries: &self.entries,
-                failures: &self.failures,
-            },
-        )
+        let mut bytes = serde_json::to_vec_pretty(&JournalFileRef {
+            version: JOURNAL_VERSION,
+            entries: &self.entries,
+            failures: &self.failures,
+        })?;
+        bytes.push(b'\n');
+        self.seen = None;
+        store::write_atomic(&self.path, &bytes)?;
+        self.seen = Some(paths::sha256_hex(&bytes));
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_held_lock_times_out_with_a_clear_error_and_frees_on_drop() {
+        let dir = std::env::temp_dir().join(format!(
+            "reskin-lock-timeout-{}-{}",
+            std::process::id(),
+            now_ms() as u64
+        ));
+        let path = dir.join("journal.json.lock");
+        let held = FileLock::acquire(&path, Duration::ZERO).unwrap();
+        let started = Instant::now();
+        let err = FileLock::acquire(&path, Duration::from_millis(150))
+            .err()
+            .unwrap();
+        // Told apart from every other failure: trying again can work.
+        assert!(matches!(err, Error::Busy(_)), "{err:?}");
+        let err = err.to_string();
+        assert!(started.elapsed() >= Duration::from_millis(150));
+        assert!(err.contains("in use by another Reskin process"), "{err}");
+        assert!(err.contains("journal.json.lock"), "{err}");
+        drop(held);
+        assert!(FileLock::acquire(&path, Duration::ZERO).is_ok());
+        let _ = fs::remove_dir_all(&dir);
     }
 }

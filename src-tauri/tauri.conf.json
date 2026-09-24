@@ -101,7 +101,9 @@
         "installerHooks": "./windows/hooks.nsh"
       },
       "wix": {
-        "language": "en-US"
+        "language": "en-US",
+        "fragmentPaths": ["./windows/uninstall.wxs"],
+        "componentRefs": ["ReskinUninstallCleanup"]
       }
     }
   }

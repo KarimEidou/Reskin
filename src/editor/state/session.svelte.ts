@@ -76,6 +76,8 @@ export interface QueueEntry {
   unsaved: boolean;
   /** The Library design that design came from or was saved as (while another item is edited). */
   libraryId: string | null;
+  /** That Library design's name, as the Library has it. */
+  libraryName: string | null;
 }
 
 /**
@@ -256,6 +258,8 @@ export class EditorSession {
   recipe = $state.raw<StyleRecipe | null>(null);
   /** The Library design the open design came from or was last saved as: saving updates it. */
   libraryId = $state<string | null>(null);
+  /** That Library design's name, as the Library has it (the open design goes by it too). */
+  libraryName = $state<string | null>(null);
   /**
    * Identity of the open design. It changes when another design starts
    * loading and again once it is in: work that awaits something (a render
@@ -369,6 +373,11 @@ export class EditorSession {
     return this.modes.length > 0 && !this.queueLocked;
   }
 
+  /** The queued targets "Apply style to all" applies to: every other one not applied yet. */
+  get styleTargets(): QueueEntry[] {
+    return this.queue.filter((entry, index) => index !== this.currentIndex && entry.status !== 'applied' && isTarget(entry.info));
+  }
+
   /** The open design has changes that were not applied, saved to the Library or exported. */
   get unsaved(): boolean {
     void this.rev.history;
@@ -419,9 +428,17 @@ export class EditorSession {
   }
 
   /** Bookkeeping for a design just put in the engine. */
-  private loaded(opts: { recipe?: StyleRecipe | null; libraryId?: string | null; unsaved?: boolean; standalone?: ItemInfo | null } = {}): void {
+  private loaded(
+    opts: {
+      recipe?: StyleRecipe | null;
+      library?: { id: string; name: string } | null;
+      unsaved?: boolean;
+      standalone?: ItemInfo | null;
+    } = {},
+  ): void {
     this.recipe = opts.recipe ?? null;
-    this.libraryId = opts.libraryId ?? null;
+    this.libraryId = opts.library?.id ?? null;
+    this.libraryName = opts.library?.name ?? null;
     this.standalone = opts.standalone ?? null;
     this.cleanEntry = this.engine.currentEntryId;
     this.baseUnsaved = opts.unsaved ?? false;
@@ -507,7 +524,7 @@ export class EditorSession {
     if (!this.hasDesign) {
       if (items.length > 0) await this.openItems(items);
       for (const p of pictures) {
-        if (this.hasDesign) this.importSurface(p.surface, p.name);
+        if (this.hasDesign) this.engine.importImage(p.surface, p.name);
         else this.startFromSurface(p.surface, p.name);
       }
       if (pictures.length > 0) this.view = 'edit';
@@ -518,11 +535,14 @@ export class EditorSession {
     // A project cannot be a layer: it joins the queue whatever the choice.
     const asLayer = (s: ImportSource) => how === 'layer' && (s.kind === 'image' || s.info.kind !== 'project');
     if (!sources.every(asLayer)) this.ensureQueued();
+    // An adjustment still being tuned is kept (as when leaving its panel),
+    // not thrown away by the new layer; pending tool work is committed by it.
+    if (sources.some(asLayer)) this.keepPreview();
     let added = 0;
     for (const s of sources) {
       if (s.kind === 'item' && s.info === target) continue;
       if (asLayer(s)) {
-        if (s.kind === 'image') this.importSurface(s.surface, s.name);
+        if (s.kind === 'image') this.engine.importImage(s.surface, s.name);
         else await this.addAsLayer(s.info);
       } else if (s.kind === 'image') {
         await this.queuePicture(s.name, s.surface);
@@ -547,6 +567,7 @@ export class EditorSession {
       problem: null,
       unsaved: false,
       libraryId: null,
+      libraryName: null,
       ...patch,
     });
     return this.queue[this.queue.length - 1]!;
@@ -603,6 +624,7 @@ export class EditorSession {
       thumb: null,
       recipe: this.recipe,
       libraryId: this.libraryId,
+      libraryName: this.libraryName,
     });
     this.currentIndex = this.queue.indexOf(entry);
     this.standalone = null;
@@ -713,7 +735,10 @@ export class EditorSession {
       designFromIcon(this.engine, info, this.original);
       this.engine.clearHistory();
     }
-    this.loaded({ recipe: entry.recipe, libraryId: entry.libraryId, unsaved: entry.unsaved });
+    const library = entry.libraryId !== null && entry.libraryName !== null ? { id: entry.libraryId, name: entry.libraryName } : null;
+    // Its Library design may have been renamed while it waited.
+    if (library) this.engine.setDocumentName(library.name);
+    this.loaded({ recipe: entry.recipe, library, unsaved: entry.unsaved });
   }
 
   /** Removes a queued item; refused — false — while a job runs or an item is loading. */
@@ -732,6 +757,7 @@ export class EditorSession {
         this.original = null;
         this.recipe = null;
         this.libraryId = null;
+        this.libraryName = null;
       }
     }
     return true;
@@ -788,6 +814,7 @@ export class EditorSession {
     this.keepPreview();
     entry.recipe = this.recipe;
     entry.libraryId = this.libraryId;
+    entry.libraryName = this.libraryName;
     entry.unsaved = this.unsaved;
     const autosave = entry.unsaved && this.autosaver.pending;
     // Both take the design as it is now, before anything is awaited.
@@ -845,11 +872,6 @@ export class EditorSession {
     return this.engine.importImage(surface, info.name) !== null;
   }
 
-  /** Imports an already-decoded image (paste / drop onto the canvas). */
-  importSurface(surface: Surface, name = 'Pasted image'): string | null {
-    return this.engine.importImage(surface, name);
-  }
-
   // --- apply -------------------------------------------------------------------
 
   /** Renders every configured ICO size through the export pipeline. */
@@ -893,9 +915,13 @@ export class EditorSession {
     }
   }
 
-  /** Every queued item but `entry` is applied: its apply may end the session with the flourish. */
+  /**
+   * Every queued target but `entry` is applied: its apply may end the
+   * session with the flourish. Design sources (entries without a target)
+   * wait for nothing: they do not keep the editor open.
+   */
   private lastToApply(entry: QueueEntry): boolean {
-    return this.queue.every((q) => q === entry || q.status === 'applied');
+    return this.queue.every((q) => q === entry || q.status === 'applied' || !isTarget(q.info));
   }
 
   private send(entry: QueueEntry, job: ApplyJob): Promise<ApplyOutcome> {
@@ -1036,13 +1062,14 @@ export class EditorSession {
     });
   }
 
-  /** After a Save & Apply with items still waiting: on to the next one not applied yet. */
+  /** After a Save & Apply with targets still waiting: on to the next one not applied yet. */
   private async advance(from: QueueEntry): Promise<void> {
     const at = this.queue.indexOf(from);
     if (at < 0 || at !== this.currentIndex) return;
     for (let k = 1; k < this.queue.length; k++) {
       const next = (at + k) % this.queue.length;
-      if (this.queue[next]!.status !== 'applied') {
+      const entry = this.queue[next]!;
+      if (entry.status !== 'applied' && isTarget(entry.info)) {
         await this.select(next);
         return;
       }
@@ -1134,9 +1161,7 @@ export class EditorSession {
   async applyStyleToAll(): Promise<{ applied: number; failed: number; needsElevation: number }> {
     const result = { applied: 0, failed: 0, needsElevation: 0 };
     if (this.queueLocked) return result;
-    const others = this.queue.filter(
-      (entry, index) => index !== this.currentIndex && entry.status !== 'applied' && isTarget(entry.info),
-    );
+    const others = this.styleTargets;
     if (others.length === 0) return result;
     // An adjustment still being tuned is part of the design, so of its recipe.
     this.keepPreview();
@@ -1165,6 +1190,7 @@ export class EditorSession {
           entry.project = project;
           entry.recipe = recipe;
           entry.libraryId = null;
+          entry.libraryName = null;
           entry.thumb = thumb;
           if (outcome.type === 'applied') {
             changes.push(this.markApplied(entry, outcome, job));
@@ -1205,28 +1231,30 @@ export class EditorSession {
 
   /**
    * Saves the open design to the Library — over the Library design it came
-   * from or was saved as before, or as a new one with `asNew`.
+   * from or was saved as before (keeping its name unless `name` renames
+   * it), or as a new one with `asNew`. The toast says which.
    */
   async saveToLibrary(name?: string, opts: { asNew?: boolean } = {}): Promise<LibraryEntry | null> {
     const saved = this.savePoint();
-    const id = opts.asNew ? null : this.libraryId;
+    const over = opts.asNew || this.libraryId === null ? null : { id: this.libraryId, name: this.libraryName };
     try {
       // Both take the design as it is now, before anything is awaited.
       const [thumb, data] = await Promise.all([this.deps.encode(this.engine.thumbnail(128)), this.encodeProject()]);
       const entry = await this.deps.commands.librarySave({
-        id,
-        name: name ?? (this.engine.doc.meta.name || 'Untitled'),
+        id: over?.id ?? null,
+        name: name ?? (over?.name || this.engine.doc.meta.name || 'Untitled'),
         thumb: stripDataUrl(thumb),
         data,
       });
       if (saved.token === this.designToken) {
-        // The design goes by its Library name from now on.
-        this.engine.setDocumentName(entry.name);
         this.libraryId = entry.id;
         this.markSaved(saved);
-        await this.settleAutosave();
       }
-      toast({ message: `Saved "${entry.name}" to the Library.`, kind: 'success' });
+      // The design goes by its Library name from now on, and so does every
+      // other design linked to it.
+      this.libraryDesignRenamed(entry.id, entry.name);
+      if (saved.token === this.designToken) await this.settleAutosave();
+      toast({ message: savedText(entry.name, over?.name ?? null), kind: 'success' });
       return entry;
     } catch (e) {
       toast({ message: `Could not save: ${errorText(e)}`, kind: 'error' });
@@ -1246,15 +1274,31 @@ export class EditorSession {
       if (name) this.engine.setDocumentName(name);
       if (!this.hasTarget) this.original = null;
       this.claimSource();
-      this.loaded({ libraryId: id });
+      this.loaded({ library: { id, name: this.engine.doc.meta.name } });
     });
     this.view = 'edit';
   }
 
   /** A Library design was deleted: saving no longer updates it. */
   forgetLibraryDesign(id: string): void {
-    if (this.libraryId === id) this.libraryId = null;
-    for (const q of this.queue) if (q.libraryId === id) q.libraryId = null;
+    if (this.libraryId === id) {
+      this.libraryId = null;
+      this.libraryName = null;
+    }
+    for (const q of this.queue) {
+      if (q.libraryId !== id) continue;
+      q.libraryId = null;
+      q.libraryName = null;
+    }
+  }
+
+  /** A Library design was renamed: the designs linked to it go by the new name. */
+  libraryDesignRenamed(id: string, name: string): void {
+    if (this.libraryId === id) {
+      this.libraryName = name;
+      if (this.hasDesign) this.engine.setDocumentName(name);
+    }
+    for (const q of this.queue) if (q.libraryId === id) q.libraryName = name;
   }
 
   async exportAs(kind: ExportKind): Promise<string | null> {
@@ -1306,9 +1350,15 @@ export class EditorSession {
   // safe (applied, saved to the Library, exported as a project), the slot
   // takes another queued design with unsaved changes, or empties.
 
-  /** Writes the open design's unsaved changes now (nothing when there are none). */
+  /**
+   * Writes the open design's unsaved changes now (nothing when there are
+   * none), as they are at this moment: whatever comes next — another design
+   * opening, `reset` at the next open — cannot take them back. Resolves once
+   * every save so far is done; never rejects (a failure is logged).
+   */
   flushAutosave(): Promise<void> {
-    return this.autosaver.flush();
+    if (!this.autosaver.pending || !this.unsaved) return this.autosaver.flush();
+    return this.autosaver.write(this.encodeProject()).catch((e: unknown) => console.warn('autosave failed', e));
   }
 
   /** The live autosave follows what is unsaved now (see above). */
@@ -1413,6 +1463,7 @@ export class EditorSession {
     this.recipe = null;
     this.previewRecipe = null;
     this.libraryId = null;
+    this.libraryName = null;
     this.standalone = null;
     this.baseUnsaved = false;
     this.cleanEntry = null;
@@ -1437,6 +1488,12 @@ export function errorText(e: unknown): string {
   if (typeof e === 'string') return e;
   if (e instanceof Error) return e.message;
   return String(e);
+}
+
+/** What a Library save did: a new design, or an update (renaming it or not) of `over`. */
+function savedText(name: string, over: string | null): string {
+  if (over === null) return `Saved "${name}" to the Library.`;
+  return over === name ? `Updated "${name}" in the Library.` : `Updated "${over}" in the Library, now named "${name}".`;
 }
 
 function stripDataUrl(s: string): string {

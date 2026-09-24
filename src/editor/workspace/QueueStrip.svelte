@@ -16,7 +16,7 @@
   import Spinner from '$lib/ui/Spinner.svelte';
   import { toast } from '$lib/ui/toasts.svelte';
   import Tooltip from '$lib/ui/Tooltip.svelte';
-  import { errorText, isTarget, type QueueEntry, type QueueStatus } from '../state/session.svelte';
+  import { errorText, type QueueEntry, type QueueStatus } from '../state/session.svelte';
   import { getSession } from '../state/context';
 
   const session = getSession();
@@ -31,9 +31,7 @@
 
   const many = $derived(session.queue.length > 1);
   /** Other queued icons "Apply style to all" would apply to. */
-  const others = $derived(
-    session.queue.filter((q, i) => i !== session.currentIndex && q.status !== 'applied' && isTarget(q.info)).length,
-  );
+  const others = $derived(session.styleTargets.length);
   const canApplyAll = $derived(!!session.recipe && others > 0 && !session.queueLocked);
   const applyAllHint = $derived(
     session.queueLocked

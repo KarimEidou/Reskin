@@ -574,6 +574,45 @@ test.describe('new tools', () => {
     expect(await alpha({ x: 150, y: 150 })).toBe(255);
   });
 
+  test('Delete during an unfinished lasso polygon takes back its last corner, not the selected pixels', async ({ page }) => {
+    await openWorkspace(page);
+    const alpha = (p: Point) =>
+      page.evaluate(({ x, y }) => {
+        const c = (globalThis as unknown as Handle).__reskinSession.engine.composite();
+        return c.data[(y * c.width + x) * 4 + 3];
+      }, p);
+    const labels = () => withSession(page, (s) => s.engine.historyEntries.map((e) => e.label));
+    await page.keyboard.press('m');
+    await stroke(page, { x: 200, y: 200 }, { x: 300, y: 300 });
+
+    await page.keyboard.press('l');
+    await withSession(page, (s) => s.engine.setToolOptions('lasso', { kind: 'polygon' }));
+    for (const p of [
+      { x: 60, y: 380 },
+      { x: 160, y: 380 },
+      { x: 110, y: 470 },
+    ]) {
+      const c = await toClient(page, p);
+      await page.mouse.click(c.x, c.y);
+    }
+    const corners = () => withSession(page, (s) => s.engine.tools.lasso.polygon?.length ?? 0);
+    expect(await corners()).toBe(6);
+    const before = await labels();
+    await page.keyboard.press('Delete');
+    expect(await corners()).toBe(4);
+    expect(await alpha({ x: 250, y: 250 })).toBe(255);
+    expect(await labels()).toEqual(before);
+
+    // Once the polygon is gone, Delete clears the selection again.
+    await page.keyboard.press('Delete');
+    await page.keyboard.press('Delete');
+    expect(await corners()).toBe(0);
+    expect(await alpha({ x: 250, y: 250 })).toBe(255);
+    await page.keyboard.press('Delete');
+    expect(await alpha({ x: 250, y: 250 })).toBe(0);
+    expect((await labels()).at(-1)).toBe('Clear');
+  });
+
   test('magic wand selects similar colour; its options come from the bar', async ({ page }) => {
     await openWorkspace(page);
     await page.keyboard.press('w');
@@ -935,19 +974,42 @@ test.describe('view', () => {
     await expect(divider).toHaveCount(0);
   });
 
-  test('pasting an image adds it as a layer', async ({ page }) => {
+  /** Pastes a `w`×`h` PNG with a coral block, as a screenshot tool puts it on the clipboard. */
+  async function paste(page: Page, w = 64, h = 48): Promise<void> {
+    await page.evaluate(
+      async ([width, height]) => {
+        const canvas = new OffscreenCanvas(width, height);
+        const ctx = canvas.getContext('2d')!;
+        ctx.fillStyle = '#ff3366';
+        ctx.fillRect(width / 8, height / 6, (width * 3) / 4, (height * 2) / 3);
+        const blob = await canvas.convertToBlob({ type: 'image/png' });
+        const data = new DataTransfer();
+        data.items.add(new File([blob], 'image.png', { type: 'image/png' }));
+        document.body.dispatchEvent(new ClipboardEvent('paste', { clipboardData: data, bubbles: true, cancelable: true }));
+      },
+      [w, h] as const,
+    );
+  }
+
+  test('a pasted image asks what it becomes, where the pointer is: added as a layer', async ({ page }) => {
     await openWorkspace(page);
     const layersBefore = await withSession(page, (s) => s.engine.doc.layers.length);
-    await page.evaluate(async () => {
-      const canvas = new OffscreenCanvas(64, 48);
-      const ctx = canvas.getContext('2d')!;
-      ctx.fillStyle = '#ff3366';
-      ctx.fillRect(8, 8, 48, 32);
-      const blob = await canvas.convertToBlob({ type: 'image/png' });
-      const data = new DataTransfer();
-      data.items.add(new File([blob], 'image.png', { type: 'image/png' }));
-      document.body.dispatchEvent(new ClipboardEvent('paste', { clipboardData: data, bubbles: true, cancelable: true }));
-    });
+    const at = await toClient(page, { x: 120, y: 100 });
+    await page.mouse.move(at.x, at.y);
+    await paste(page);
+    const pop = page.getByTestId('import-popover');
+    await expect(pop).toBeVisible();
+    await expect(pop).toContainText('Use “Pasted image” how?');
+    // Nothing went in without asking.
+    expect(await withSession(page, (s) => s.engine.doc.layers.length)).toBe(layersBefore);
+    // It opens where the paste happened (the canvas's pointer), not in the middle.
+    const box = (await pop.boundingBox())!;
+    expect(Math.abs(box.x - at.x)).toBeLessThan(24);
+    expect(box.y - at.y).toBeGreaterThanOrEqual(-4);
+    expect(box.y - at.y).toBeLessThan(40);
+    await expect(pop.getByRole('button', { name: /Add as layer/ })).toBeFocused();
+    await pop.getByRole('button', { name: /Add as layer/ }).click();
+    await expect(pop).toBeHidden();
     await expect.poll(() => withSession(page, (s) => s.engine.doc.layers.length)).toBe(layersBefore + 1);
     expect(await withSession(page, (s) => s.engine.activeLayer?.name)).toBe('Pasted image');
     const [r, g, b, a] = await withSession(page, (s) => {
@@ -958,25 +1020,38 @@ test.describe('view', () => {
     expect([r, g, b, a]).toEqual([255, 51, 102, 255]);
   });
 
-  test('a pasted image says so, and Undo takes it back', async ({ page }) => {
+  test('Undo takes back just the pasted layer, never work that was pending when it came', async ({ page }) => {
     await openWorkspace(page);
-    const layersBefore = await withSession(page, (s) => s.engine.doc.layers.length);
-    await page.evaluate(async () => {
-      const canvas = new OffscreenCanvas(32, 32);
-      const ctx = canvas.getContext('2d')!;
-      ctx.fillStyle = '#33aaff';
-      ctx.fillRect(0, 0, 32, 32);
-      const blob = await canvas.convertToBlob({ type: 'image/png' });
-      const data = new DataTransfer();
-      data.items.add(new File([blob], 'image.png', { type: 'image/png' }));
-      document.body.dispatchEvent(new ClipboardEvent('paste', { clipboardData: data, bubbles: true, cancelable: true }));
-    });
-    await expect.poll(() => withSession(page, (s) => s.engine.doc.layers.length)).toBe(layersBefore + 1);
-    const toast = page.locator('section[aria-label="Notifications"] > *').filter({ hasText: 'Pasted the image as a new layer.' });
-    await expect(toast).toBeVisible();
-    await toast.getByRole('button', { name: 'Undo' }).click();
-    await expect.poll(() => withSession(page, (s) => s.engine.doc.layers.length)).toBe(layersBefore);
-    await expect(toast).toHaveCount(0);
+    const names = () => withSession(page, (s) => s.engine.doc.layers.map((l) => l.name));
+    const labels = () => withSession(page, (s) => s.engine.historyEntries.map((h) => h.label));
+    const before = await names();
+    // A move not committed yet.
+    await page.getByTestId('tool-move').click();
+    await stroke(page, { x: 256, y: 256 }, { x: 300, y: 256 });
+    expect(await withSession(page, (s) => s.engine.hasPending)).toBe(true);
+    await paste(page, 32, 32);
+    const pop = page.getByTestId('import-popover');
+    await pop.getByRole('button', { name: /Add as layer/ }).click();
+    await expect.poll(names).toEqual([...before, 'Pasted image']);
+    // The move went in as its own step first.
+    expect(await labels()).toEqual(['Move', 'Import Pasted image']);
+    expect(await withSession(page, (s) => s.engine.hasPending)).toBe(false);
+    await page.keyboard.press('Control+z');
+    await expect.poll(names).toEqual(before);
+    expect(await withSession(page, (s) => s.engine.historyIndex)).toBe(1);
+  });
+
+  test('a pasted image can join the queue as a design of its own instead', async ({ page }) => {
+    await openWorkspace(page);
+    const before = await withSession(page, (s) => s.engine.doc.layers.map((l) => l.name));
+    await paste(page);
+    const pop = page.getByTestId('import-popover');
+    await pop.getByRole('button', { name: /Queue as new item/ }).click();
+    await expect(pop).toBeHidden();
+    await expect.poll(() => withSession(page, (s) => s.queue.map((q) => q.info.name))).toEqual(['Steam', 'Pasted image']);
+    expect(await withSession(page, (s) => s.engine.doc.layers.map((l) => l.name))).toEqual(before);
+    expect(await withSession(page, (s) => s.currentIndex)).toBe(0);
+    await expect(page.getByRole('status').filter({ hasText: 'Added 1 item to the queue.' })).toBeVisible();
   });
 
   test('every toast is announced once, from the live region of its urgency', async ({ page }) => {

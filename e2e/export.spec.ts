@@ -125,7 +125,7 @@ test.describe('Save & Apply', () => {
     const button = applyButton(page);
     await expect(button).toHaveAttribute('aria-disabled', 'true');
     await button.hover();
-    await expect(page.getByRole('tooltip')).toHaveText('Drop a shortcut on the box to apply');
+    await expect(page.getByRole('tooltip')).toHaveText('Drop a shortcut here to apply');
     // aria-disabled keeps it focusable (for the reason); a click does nothing.
     await button.click({ force: true });
     await page.waitForTimeout(200);
@@ -216,5 +216,46 @@ test.describe('Export menu', () => {
     expect((call.args.entry as { name: string }).name).toBe('Steam — midnight');
     await expect(form).toBeHidden();
     await expect.poll(() => page.evaluate(() => window.__e2e!.library.map((l) => l.name))).toEqual(['Steam — midnight']);
+  });
+
+  test('a design saved before says which Library design it updates; "Save as new" adds another', async ({ page }) => {
+    await openWorkspace(page);
+    const library = () => page.evaluate(() => window.__e2e!.library.map((l) => [l.id, l.name]).sort());
+    const lastSave = async () => (await calls(page, 'library_save')).at(-1)!.args.entry as { id: string | null; name: string };
+    const form = page.getByRole('dialog', { name: 'Save to Library' });
+    await page.getByTestId('save-library').click();
+    await form.getByRole('textbox').fill('Mono');
+    await form.getByRole('button', { name: 'Save', exact: true }).click();
+    await expect(form).toBeHidden();
+    await expect(page.getByRole('status').filter({ hasText: 'Saved "Mono" to the Library.' })).toBeVisible();
+    const [[mono]] = await library();
+
+    // Linked now: the form names the design it updates, and says so when a new name renames it.
+    await page.getByTestId('save-library').click();
+    const notice = form.getByTestId('library-link');
+    const name = form.getByRole('textbox', { name: 'Name' });
+    await expect(notice).toHaveText('Updates "Mono" in your Library.');
+    await expect(name).toHaveValue('Mono');
+    await expect(name).toHaveAccessibleDescription('Updates "Mono" in your Library.');
+    await name.fill('Mono v2');
+    await expect(notice).toHaveText('Updates "Mono" in your Library and renames it "Mono v2".');
+    await form.getByRole('button', { name: 'Save as new' }).click();
+    await expect(form).toBeHidden();
+    expect(await lastSave()).toMatchObject({ id: null, name: 'Mono v2' });
+    await expect.poll(library).toHaveLength(2);
+    expect((await library()).find(([id]) => id === mono)).toEqual([mono, 'Mono']);
+    const v2 = (await library()).find(([id]) => id !== mono)![0];
+
+    // Save changes updates the design it is linked to now, keeping its name.
+    await page.getByTestId('save-library').click();
+    await expect(notice).toHaveText('Updates "Mono v2" in your Library.');
+    await name.press('Enter');
+    await expect(form).toBeHidden();
+    expect(await lastSave()).toMatchObject({ id: v2, name: 'Mono v2' });
+    await expect(page.getByRole('status').filter({ hasText: 'Updated "Mono v2" in the Library.' })).toBeVisible();
+    expect(await library()).toEqual([
+      [mono, 'Mono'],
+      [v2, 'Mono v2'],
+    ].sort());
   });
 });

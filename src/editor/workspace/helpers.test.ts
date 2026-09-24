@@ -128,7 +128,7 @@ describe('apply modes', () => {
 
   it('explains why applying is blocked', () => {
     expect(applyBlockedReason(item({}), null)).toBeNull();
-    expect(applyBlockedReason(null, null)).toBe('Drop a shortcut on the box to apply');
+    expect(applyBlockedReason(null, null)).toBe('Drop a shortcut here to apply');
     expect(applyBlockedReason(item({}), { label: 'Applying' })).toBe('Applying…');
     expect(applyBlockedReason(item({ kind: 'image', modes: [], name: 'logo.png' }), null)).toBe(
       'logo.png is a design source — drop a shortcut here to apply',

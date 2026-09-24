@@ -51,7 +51,7 @@ export function applyBlockedReason(
   busy: { label: string } | null,
 ): string | null {
   if (busy) return `${busy.label}…`;
-  if (!item) return 'Drop a shortcut on the box to apply';
+  if (!item) return 'Drop a shortcut here to apply';
   if (item.modes.length === 0) {
     return item.kind === 'image' || item.kind === 'project'
       ? `${item.name} is a design source — drop a shortcut here to apply`

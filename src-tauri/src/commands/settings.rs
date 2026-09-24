@@ -15,7 +15,7 @@ use tauri::{AppHandle, LogicalSize, Manager, Runtime, State};
 use super::CmdResult;
 use crate::state::AppState;
 use crate::windows::morph::Phase;
-use crate::windows::{box_window, editor_window, raw};
+use crate::windows::{box_window, editor_window, morph, raw};
 use crate::{hotkey, log};
 
 #[tauri::command]
@@ -154,16 +154,18 @@ fn apply_window_changes<R: Runtime>(app: &AppHandle<R>, old: &Settings, new: &Se
     }
 }
 
-/// Destroys the (hidden) editor; the next open builds a new one.
+/// Destroys the (hidden) editor; the next open builds a new one. Returns
+/// once tauri has released the window's label and the mailbox has moved
+/// on (`morph::destroy_editor`), so that open never finds the dying window
+/// or its page's last polls.
 fn drop_editor<R: Runtime>(app: &AppHandle<R>) {
     if let Some(editor) = app.get_webview_window(editor_window::LABEL) {
-        let _ = editor.destroy();
-        app.state::<AppState>().mailbox.reset();
+        morph::destroy_editor(app, &editor);
     }
 }
 
-/// Recreates the box (shown again unless hidden by the user) and drops the
-/// editor so the next open builds it with the new mode.
+/// Recreates the box (shown again when it may be, `morph::box_allowed`)
+/// and drops the editor so the next open builds it with the new mode.
 pub fn rebuild_windows<R: Runtime>(app: &AppHandle<R>, s: &Settings) {
     let state = app.state::<AppState>();
     drop_editor(app);
@@ -171,7 +173,7 @@ pub fn rebuild_windows<R: Runtime>(app: &AppHandle<R>, s: &Settings) {
         Ok(w) => {
             let h = raw::hwnd_of(&w);
             state.animator.set_hwnd(h);
-            if !state.box_hidden_by_user() && !state.hidden_for_fullscreen() {
+            if morph::box_allowed(&state) {
                 raw::show_no_activate(h);
                 raw::set_topmost(h, true);
             }

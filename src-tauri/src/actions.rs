@@ -5,14 +5,15 @@
 use std::path::PathBuf;
 
 use reskin_core::model::{
-    BoxFlight, CollapseThen, EditorView, FlightPhase, ItemInfo, SystemIconId,
+    BoxFlight, CollapseThen, EditorView, FlightPhase, ItemInfo, RestoreReport, SystemIconId,
 };
 use tauri::{AppHandle, Emitter, Manager, Runtime};
 use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind};
 
 use crate::state::AppState;
+use crate::windows::morph::Phase;
 use crate::windows::rules::{self, Toggle};
-use crate::windows::{box_window, morph, raw};
+use crate::windows::{box_window, editor_window, morph, raw};
 use crate::{items, log, restore};
 
 fn spawn<R: Runtime>(
@@ -110,10 +111,64 @@ pub fn toggle_box<R: Runtime>(app: &AppHandle<R>) {
 
 /// Shows or hides the box on the user's behalf (remembered until changed).
 /// While the editor is open this only records the wish: the close honours
-/// it. A fullscreen app keeps the box hidden either way.
+/// it. A fullscreen app keeps the box hidden either way (hiding it ends
+/// "Show box" over one).
 pub fn set_box_hidden<R: Runtime>(app: &AppHandle<R>, hidden: bool) {
     app.state::<AppState>().set_box_hidden_by_user(hidden);
     morph::settle_box(app);
+}
+
+/// "Show box" (tray or box menu): shows the box, and keeps it on screen
+/// over a fullscreen app until that app goes away or the user hides the
+/// box again. An open editor closes into it.
+pub fn show_box<R: Runtime>(app: &AppHandle<R>) {
+    spawn(app, "show-box", move |app| show_box_blocking(&app));
+}
+
+fn show_box_blocking<R: Runtime>(app: &AppHandle<R>) {
+    let state = app.state::<AppState>();
+    state.show_box_anyway();
+    if state.morph.phase() == Phase::Open {
+        close_blocking(app, CollapseThen::Hide);
+    } else {
+        // Closed: it shows now; during a handoff, when that ends.
+        morph::settle_box(app);
+    }
+}
+
+/// What Reskin started again without paths does: the user is looking for
+/// it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Relaunch {
+    /// The editor is open: bring it to the front.
+    FocusEditor,
+    /// Otherwise: show the box, as "Show box" does.
+    ShowBox,
+}
+
+fn relaunch(phase: Phase) -> Relaunch {
+    if phase == Phase::Open {
+        Relaunch::FocusEditor
+    } else {
+        Relaunch::ShowBox
+    }
+}
+
+/// Reskin was started again without paths (single-instance forwarding):
+/// brings the open editor to the front, else shows the box.
+pub fn bring_forward<R: Runtime>(app: &AppHandle<R>) {
+    spawn(app, "forward", move |app| {
+        match relaunch(app.state::<AppState>().morph.phase()) {
+            Relaunch::FocusEditor => {
+                // The box comes back with the editor's next close.
+                app.state::<AppState>().set_box_hidden_by_user(false);
+                if let Some(editor) = app.get_webview_window(editor_window::LABEL) {
+                    let _ = editor.set_focus();
+                }
+            }
+            Relaunch::ShowBox => show_box_blocking(&app),
+        }
+    });
 }
 
 pub fn restore_all_interactive<R: Runtime>(app: &AppHandle<R>) {
@@ -135,20 +190,11 @@ pub fn restore_all_interactive<R: Runtime>(app: &AppHandle<R>) {
         }
         let report = restore::restore_all_blocking(&app);
         log::line(&format!("restore all: {report:?}"));
-        let msg = if report.failed.is_empty() {
-            format!("Restored {} icon(s).", report.restored)
-        } else {
-            format!(
-                "Restored {} icon(s). {} could not be restored:\n{}",
-                report.restored,
-                report.failed.len(),
-                report.failed.join("\n")
-            )
-        };
+        let (msg, complete) = restore_all_summary(&report);
         app.dialog()
             .message(msg)
             .title("Restore all icons")
-            .kind(if report.failed.is_empty() {
+            .kind(if complete {
                 MessageDialogKind::Info
             } else {
                 MessageDialogKind::Warning
@@ -157,7 +203,85 @@ pub fn restore_all_interactive<R: Runtime>(app: &AppHandle<R>) {
     });
 }
 
+/// What Restore all tells the user once it ran, and whether every icon is
+/// back: how many were restored, which could not be, and how many
+/// Public-Desktop icons still wait for the administrator approval that
+/// was declined.
+fn restore_all_summary(report: &RestoreReport) -> (String, bool) {
+    let mut msg = format!("Restored {} icon(s).", report.restored);
+    if !report.failed.is_empty() {
+        msg.push_str(&format!(
+            "\n\n{} could not be restored:\n{}",
+            report.failed.len(),
+            report.failed.join("\n")
+        ));
+    }
+    if report.needs_elevation > 0 {
+        msg.push_str(&format!(
+            "\n\n{} icon(s) on the Public Desktop are not back yet: they need administrator \
+             approval, and Windows didn't get it. To put them back, choose Restore all icons… \
+             again and select Yes when Windows asks.",
+            report.needs_elevation
+        ));
+    }
+    let complete = report.failed.is_empty() && report.needs_elevation == 0;
+    (msg, complete)
+}
+
 pub fn quit<R: Runtime>(app: &AppHandle<R>) {
     log::line("quit requested");
     app.exit(0);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_second_launch_brings_the_open_editor_forward_else_shows_the_box() {
+        assert_eq!(relaunch(Phase::Open), Relaunch::FocusEditor);
+        assert_eq!(relaunch(Phase::Closed), Relaunch::ShowBox);
+        // During a handoff the wish is recorded; the handoff shows (or
+        // focuses) what the user asked for.
+        assert_eq!(relaunch(Phase::Opening), Relaunch::ShowBox);
+        assert_eq!(relaunch(Phase::Closing), Relaunch::ShowBox);
+    }
+
+    #[test]
+    fn restore_all_says_what_is_not_back_and_how_to_get_it_back() {
+        let report = |restored, failed: &[&str], needs_elevation| RestoreReport {
+            restored,
+            failed: failed.iter().map(|f| f.to_string()).collect(),
+            needs_elevation,
+        };
+        let (msg, complete) = restore_all_summary(&report(3, &[], 0));
+        assert_eq!(msg, "Restored 3 icon(s).");
+        assert!(complete);
+
+        let (msg, complete) = restore_all_summary(&report(1, &["App.lnk — read-only"], 0));
+        assert!(!complete);
+        assert!(msg.starts_with("Restored 1 icon(s)."), "{msg}");
+        assert!(
+            msg.contains("1 could not be restored:\nApp.lnk — read-only"),
+            "{msg}"
+        );
+        assert!(!msg.contains("administrator"), "{msg}");
+
+        // The administrator prompt was declined: those items are not
+        // restored, and the dialog says how to finish.
+        let (msg, complete) = restore_all_summary(&report(2, &[], 4));
+        assert!(!complete);
+        assert!(msg.starts_with("Restored 2 icon(s)."), "{msg}");
+        assert!(
+            msg.contains("4 icon(s) on the Public Desktop are not back yet"),
+            "{msg}"
+        );
+        assert!(msg.contains("administrator approval"), "{msg}");
+        assert!(msg.contains("Restore all icons… again"), "{msg}");
+
+        let (msg, complete) = restore_all_summary(&report(0, &["Old.url — gone"], 1));
+        assert!(!complete);
+        assert!(msg.contains("1 could not be restored"), "{msg}");
+        assert!(msg.contains("1 icon(s) on the Public Desktop"), "{msg}");
+    }
 }

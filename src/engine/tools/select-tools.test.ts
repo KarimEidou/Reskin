@@ -213,6 +213,22 @@ describe('lasso (polygon)', () => {
     expect(q.x).toBeCloseTo(q.y, 9);
   });
 
+  it('Delete removes the last corner too, and leaves the pixels alone', () => {
+    const e = polygonEngine();
+    click(e, 10, 10);
+    click(e, 50, 10);
+    click(e, 60, 60);
+    expect(e.keyDown('Delete', NO_MODIFIERS)).toBe(true);
+    expect(e.tools.lasso.polygon).toEqual([10, 10, 50, 10]);
+    expect(e.hasPending).toBe(true);
+    // The last corner gone, the polygon itself goes; Delete is then the UI's again.
+    expect(e.keyDown('Delete', NO_MODIFIERS)).toBe(true);
+    expect(e.keyDown('Delete', NO_MODIFIERS)).toBe(true);
+    expect(e.hasPending).toBe(false);
+    expect(e.keyDown('Delete', NO_MODIFIERS)).toBe(false);
+    expect(e.history.length).toBe(0);
+  });
+
   it('Backspace during a press drops that corner; the rest of the press is ignored', () => {
     const e = polygonEngine();
     click(e, 10, 10);

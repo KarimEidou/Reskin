@@ -34,6 +34,18 @@ pub const ICON_HASH_LEN: usize = 12;
 /// Longest stem accepted by [`is_valid_public_icon_name`].
 pub const MAX_PUBLIC_ICON_STEM: usize = 64;
 
+/// Appended to a file's name for the temporary file it is rewritten
+/// through ([`rewrite_temp_name`]).
+pub const REWRITE_TEMP_SUFFIX: &str = ".reskin-tmp";
+
+/// The name of the temporary file, beside the file named `name`, that a
+/// rewrite of it is written to before it replaces the file:
+/// `<name>.reskin-tmp`. The same for every rewrite of that file, so one a
+/// crash left behind is found (and removed) by the next.
+pub fn rewrite_temp_name(name: &str) -> String {
+    format!("{name}{REWRITE_TEMP_SUFFIX}")
+}
+
 /// The three roots Reskin writes to. See the module docs for the layout.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AppDirs {

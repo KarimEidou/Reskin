@@ -82,8 +82,16 @@ export const commands = {
   librarySave: (entry: LibrarySave) => invoke<LibraryEntry>('library_save', { entry }),
   libraryLoad: (id: string) => invoke<string>('library_load', { id }),
   libraryDelete: (id: string) => invoke<void>('library_delete', { id }),
-  /** Writes (or with null clears) the crash-recovery autosave. */
+  /**
+   * The crash-recovery autosave, two slots in Rust (`AutosaveSlots`).
+   * `data` is the open design's unsaved changes (.reskin JSON) for the live
+   * slot, and `''` empties it (nothing unsaved any more); `null` discards
+   * the live slot and the recovery offer alike (Discard, a restored draft).
+   * Each launch first turns what the previous one left live into the
+   * recovery offer, so this launch's autosaves never replace it.
+   */
   autosave: (data: string | null) => invoke<void>('autosave', { data }),
+  /** The recovery offer: what an earlier launch left unsaved (null: nothing). */
   autosaveLoad: () => invoke<string | null>('autosave_load'),
 
   // --- system -----------------------------------------------------------

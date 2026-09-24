@@ -5,9 +5,10 @@
   recipe "Apply style to all" replays. Accent, intensity and shape re-style
   the grid, and the applied look while it is still the latest change (the
   engine merges the new stack into that same step). A look (or the design
-  read back for styling) that comes back after another design was opened
-  is dropped. The command palette applies a preset through
-  `panelRequests.style`.
+  read back for styling) lands only on the design it was asked for
+  (`session.isOpenDesign`): one that comes back after another design
+  opened, or while one is on its way in, is dropped. The command palette
+  applies a preset through `panelRequests.style`.
 -->
 <script module lang="ts">
   import type { Pixels } from '$engine/filters/types';
@@ -61,7 +62,6 @@
   import { toast } from '$lib/ui/toasts.svelte';
   import { getSession } from '../../state/context';
   import { watchDpr } from '../common/canvas';
-  import { designRef, isCurrentDesign } from '../common/design';
   import PixelThumb from '../common/PixelThumb.svelte';
   import Section from '../common/Section.svelte';
   import { debounce } from '../common/schedule';
@@ -110,12 +110,12 @@
     } else if (!session.original) {
       // No original icon (a blank design or an image): style the current
       // design, composited in the worker through the export path.
-      const asked = designRef(session);
+      const token = session.designToken;
       const snap = snapshotDoc(engine.doc);
       session.panels
         .request({ op: 'renderSizes', doc: snap, sizes: [256] }, { transfer: snapshotTransfer(snap) })
         .then(([r]) => {
-          if (!isCurrentDesign(session, asked)) return;
+          if (!session.isOpenDesign(token)) return;
           const px = r?.pixels;
           const empty = !px || !px.data.some((v, i) => i % 4 === 3 && v > 0);
           designSource = empty ? null : px;
@@ -218,7 +218,7 @@
     applying = id;
     const opts = $state.snapshot(options) as Partial<PresetOptions>;
     const label = getPreset(id).label;
-    const asked = designRef(session);
+    const token = session.designToken;
     const doc = engine.doc;
     try {
       const copy = { width: src.width, height: src.height, data: src.data.slice() };
@@ -226,9 +226,9 @@
         { op: 'presetBuild', iconKey, icon: copy, id, size: doc.width, options: opts },
         { channel: 'preset-apply', transfer: [copy.data.buffer] },
       );
-      // Another design was opened meanwhile (or is being opened): this look
-      // was not meant for it.
-      if (!isCurrentDesign(session, asked)) return;
+      // Another design was opened meanwhile (or is being opened, or this one
+      // changed size — pixel-art mode): this look was not meant for it.
+      if (!session.isOpenDesign(token) || engine.doc.width !== result.size) return;
       // Re-styling only while the look is still the latest change (the user
       // may have edited meanwhile); the same merge key then replaces it in
       // place instead of stacking another step.

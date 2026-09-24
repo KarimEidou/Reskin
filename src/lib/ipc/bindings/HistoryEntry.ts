@@ -28,4 +28,10 @@ restoredAt: number | null,
 /**
  * Entry that this one was applied on top of (same target), if any.
  */
-supersedes: string | null, };
+supersedes: string | null, 
+/**
+ * Set on the extra entries of one apply (matching Start-menu and
+ * taskbar-pin shortcuts): the id of the apply's main entry. Undoing
+ * the main entry undoes them too.
+ */
+group?: string, };
