@@ -349,13 +349,6 @@ export function migrateProject(input: unknown): ProjectJson {
 // Serialize / deserialize
 // ---------------------------------------------------------------------------
 
-async function encodePixels(s: Surface): Promise<string> {
-  // Snapshot synchronously: the compressor may read its input later, and an
-  // edit landing meanwhile (autosave runs while the user paints) must not
-  // tear the saved image.
-  return encodeBase64(await deflate(new Uint8Array(s.data)));
-}
-
 async function decodePixels(b64: string, width: number, height: number, path: string): Promise<Surface> {
   const expected = width * height * 4;
   // zlib never expands data by more than a few bytes per 16 KB block, so
@@ -390,28 +383,65 @@ export interface SerializeOptions {
   savedAt?: number;
 }
 
-export async function projectToJson(doc: Doc, opts: SerializeOptions = {}): Promise<ProjectJson> {
-  const layers = await Promise.all(
-    doc.layers.map(async (l): Promise<LayerJson> => {
-      if (l.kind === 'raster') return { ...commonJson(l), kind: 'raster', pixels: await encodePixels(l.surface) };
-      return { ...commonJson(l), ...pickTextProps(l), kind: 'text' };
-    }),
-  );
+/** A raster layer of a snapshot: its pixels (straight RGBA) not encoded yet. */
+export interface RasterLayerSnapshot extends CommonLayerJson {
+  kind: 'raster';
+  pixels: Uint8Array<ArrayBuffer>;
+}
+
+/**
+ * A document's content at one moment, ready to be encoded anywhere (see
+ * `encodeSnapshot`). The raster pixels are private copies: edits made
+ * while it is encoded cannot tear it, and their buffers can be handed to
+ * a worker without another copy (`snapshotBuffers`).
+ */
+export interface ProjectSnapshot {
+  project: Omit<ProjectJson, 'layers'>;
+  layers: (RasterLayerSnapshot | TextLayerJson)[];
+}
+
+/** Takes a snapshot of `doc`; synchronous, and cheap next to encoding it. */
+export function snapshotProject(doc: Doc, opts: SerializeOptions = {}): ProjectSnapshot {
   return {
-    format: PROJECT_FORMAT,
-    version: PROJECT_VERSION,
-    width: doc.width,
-    height: doc.height,
-    pixelArt: doc.pixelArt ? { grid: doc.pixelArt.grid } : null,
-    meta: {
-      name: doc.meta.name,
-      source: doc.meta.source ? { ...doc.meta.source } : null,
-      createdAt: doc.meta.createdAt,
-      savedAt: opts.savedAt ?? Date.now(),
+    project: {
+      format: PROJECT_FORMAT,
+      version: PROJECT_VERSION,
+      width: doc.width,
+      height: doc.height,
+      pixelArt: doc.pixelArt ? { grid: doc.pixelArt.grid } : null,
+      meta: {
+        name: doc.meta.name,
+        source: doc.meta.source ? { ...doc.meta.source } : null,
+        createdAt: doc.meta.createdAt,
+        savedAt: opts.savedAt ?? Date.now(),
+      },
+      activeLayerId: doc.activeLayerId,
     },
-    activeLayerId: doc.activeLayerId,
-    layers,
+    layers: doc.layers.map((l) =>
+      l.kind === 'raster'
+        ? { ...commonJson(l), kind: 'raster', pixels: new Uint8Array(l.surface.data) }
+        : { ...commonJson(l), ...pickTextProps(l), kind: 'text' },
+    ),
   };
+}
+
+/** The pixel buffers of a snapshot, to transfer it to a worker. */
+export function snapshotBuffers(snapshot: ProjectSnapshot): ArrayBuffer[] {
+  return snapshot.layers.flatMap((l) => (l.kind === 'raster' ? [l.pixels.buffer] : []));
+}
+
+/** Encodes a snapshot's pixels (zlib, base64): the project as JSON data. */
+export async function encodeSnapshot(snapshot: ProjectSnapshot): Promise<ProjectJson> {
+  const layers = await Promise.all(
+    snapshot.layers.map(async (l): Promise<LayerJson> =>
+      l.kind === 'raster' ? { ...l, pixels: encodeBase64(await deflate(l.pixels)) } : l,
+    ),
+  );
+  return { ...snapshot.project, layers };
+}
+
+export function projectToJson(doc: Doc, opts: SerializeOptions = {}): Promise<ProjectJson> {
+  return encodeSnapshot(snapshotProject(doc, opts));
 }
 
 /** Serializes a document to .reskin JSON text. */

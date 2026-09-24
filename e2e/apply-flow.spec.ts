@@ -1,15 +1,18 @@
-// Save & Apply from the shell: elevation (Allow / personal copy / cancel)
-// and failures surfaced with their hint.
+// Save & Apply from the shell: a queue applied item by item (Undo while the
+// editor stays open), "Apply style to all" with administrator approval,
+// Store app shortcuts, elevation (Allow / personal copy / cancel) and
+// failures surfaced with their hint.
 
 import { mkdirSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type { Page } from '@playwright/test';
-import type { ApplyRequest } from '../src/lib/ipc/types';
+import type { ApplyMode, ApplyRequest, ItemInfo } from '../src/lib/ipc/types';
 import {
   calls,
   editorState,
   expect,
+  makeItems,
   SAMPLE_PATHS,
   setApplyOutcome,
   simulateOpen,
@@ -19,14 +22,33 @@ import {
 
 const SHOTS_DIR = join(dirname(fileURLToPath(import.meta.url)), '__screenshots__');
 
-type SessionView = { hasDesign: boolean; busy: unknown; elevation: unknown; current: { status: string } | null };
+type SessionView = {
+  hasDesign: boolean;
+  busy: unknown;
+  elevation: unknown;
+  currentIndex: number;
+  switching: number;
+  current: { status: string } | null;
+  queue: Array<{ status: string; problem: string | null; info: { name: string } }>;
+  recipe: unknown;
+};
 type Win = { __reskinSession: SessionView };
 
-async function openOn(page: Page, path: string): Promise<void> {
-  await simulateOpen(page, [path], 'edit');
+const statuses = (page: Page) =>
+  page.evaluate(() => (window as unknown as Win).__reskinSession.queue.map((q) => q.status));
+
+/** Waits until no job runs and no item is loading. */
+const idle = (page: Page) =>
+  page.waitForFunction(() => {
+    const s = (window as unknown as Win).__reskinSession;
+    return s.busy === null && s.switching === 0;
+  });
+
+async function openOn(page: Page, what: string | string[] | ItemInfo[]): Promise<void> {
+  await simulateOpen(page, typeof what === 'string' ? [what] : what, 'edit');
   await page.waitForFunction(() => {
     const s = (window as unknown as { __reskinSession?: SessionView }).__reskinSession;
-    return !!s?.hasDesign && s.current?.status === 'editing';
+    return !!s?.hasDesign && s.current?.status === 'editing' && s.switching === 0;
   });
 }
 
@@ -170,5 +192,149 @@ test.describe('failures', () => {
     expect(req).toMatchObject({ mode: 'inPlace', flourish: true, updatePins: false });
     expect(req!.images.map((i) => i.size)).toEqual([16, 20, 24, 32, 40, 48, 60, 64, 72, 96, 128, 256]);
     await expect.poll(async () => (await editorState(page)).phase).toBe('closed');
+  });
+});
+
+type Invoke = (cmd: string, args?: Record<string, unknown>, opts?: unknown) => Promise<unknown>;
+type Internals = { __TAURI_INTERNALS__: { invoke: Invoke } };
+
+test.describe('a queue', () => {
+  test('survives Save & Apply: item by item with Undo, and only the last one closes the editor', async ({ openEditor, page }) => {
+    await openEditor();
+    await openOn(page, [SAMPLE_PATHS.steam, SAMPLE_PATHS.notes, SAMPLE_PATHS.site]);
+    await applyNow(page);
+    await expect.poll(() => statuses(page)).toEqual(['applied', 'editing', 'pending']);
+    // Still open, on the next item, with the queue as it was.
+    expect((await editorState(page)).phase).toBe('open');
+    await expect(page.getByTestId('queue-item').nth(1)).toHaveAttribute('aria-current', 'true');
+    await expect(page.getByTestId('queue-item').nth(0)).toHaveAccessibleName('Steam, applied');
+    const applied = page.getByRole('status').filter({ hasText: 'Applied to Steam.' });
+    await expect(applied).toBeVisible();
+
+    // Its Undo puts the icon back; the item can be applied again.
+    const [entry] = await page.evaluate(() => window.__e2e!.history);
+    await applied.getByRole('button', { name: 'Undo' }).click();
+    await waitForCall(page, 'restore', { target: { type: 'entry', id: entry!.id } });
+    await expect.poll(() => statuses(page)).toEqual(['editing', 'editing', 'pending']);
+    expect((await page.evaluate(() => window.__e2e!.history))[0]!.state).toBe('restored');
+
+    // Notes, then Docs Portal, then round to Steam again: the last one flourishes.
+    for (const next of [2, 0]) {
+      await idle(page);
+      await applyNow(page);
+      await expect.poll(() => page.evaluate(() => (window as unknown as Win).__reskinSession.currentIndex)).toBe(next);
+      expect((await editorState(page)).phase).toBe('open');
+    }
+    await idle(page);
+    await applyNow(page);
+    await expect.poll(async () => (await editorState(page)).phase).toBe('closed');
+    expect((await applyRequests(page)).map((r) => r.flourish)).toEqual([false, false, false, true]);
+  });
+
+  test('while a batch runs, neither the queue strip nor the title bar menu switches items', async ({ openEditor, page }) => {
+    await openEditor({ applyCollapses: false });
+    await openOn(page, [SAMPLE_PATHS.steam, SAMPLE_PATHS.notes, SAMPLE_PATHS.site]);
+    // Every apply waits until the test lets it go.
+    await page.evaluate(() => {
+      const w = window as unknown as Internals & Win & { __release: () => void };
+      const inner = w.__TAURI_INTERNALS__.invoke;
+      const gate = new Promise<void>((r) => (w.__release = r));
+      w.__TAURI_INTERNALS__.invoke = (cmd, args, opts) =>
+        cmd === 'apply_icon' ? gate.then(() => inner(cmd, args, opts)) : inner(cmd, args, opts);
+      w.__reskinSession.recipe = { label: 'Mono', apply: () => {} };
+    });
+    await page.getByTestId('apply-style-all').click();
+    await expect.poll(() => statuses(page)).toEqual(['editing', 'applying', 'pending']);
+
+    const title = page.locator('header.titlebar');
+    await title.getByRole('button', { name: /Steam, 1 of 3 queued/ }).click();
+    const portal = page.getByRole('menuitemcheckbox', { name: /Docs Portal/ });
+    await expect(portal).toBeDisabled();
+    await portal.click({ force: true });
+    await page.keyboard.press('Escape');
+    // The strip's thumbnail is aria-disabled but still takes the click: refused too.
+    await page.getByTestId('queue-item').nth(2).click({ force: true });
+    await page.waitForTimeout(150);
+    expect(await page.evaluate(() => (window as unknown as Win).__reskinSession.currentIndex)).toBe(0);
+
+    await page.evaluate(() => (window as unknown as { __release: () => void }).__release());
+    await expect.poll(() => statuses(page)).toEqual(['editing', 'applied', 'applied']);
+    expect(await page.evaluate(() => (window as unknown as Win).__reskinSession.currentIndex)).toBe(0);
+    // Idle again: the menu switches.
+    await title.getByRole('button', { name: /Steam, 1 of 3 queued/ }).click();
+    await page.getByRole('menuitemcheckbox', { name: /Docs Portal/ }).click();
+    await expect.poll(() => page.evaluate(() => (window as unknown as Win).__reskinSession.currentIndex)).toBe(2);
+  });
+});
+
+test.describe('"Apply style to all" and administrator approval', () => {
+  test('asks once about every icon on the Public Desktop, then applies them in turn', async ({ openEditor, page }) => {
+    const zoom = 'C:\\Users\\Public\\Desktop\\Zoom.lnk';
+    await openEditor({ applyCollapses: false });
+    const [steam, firefox, zoomItem] = await makeItems(page, [SAMPLE_PATHS.steam, SAMPLE_PATHS.publicShortcut, zoom]);
+    // Rust answers each of them with a ticket of its own (the fake has one
+    // outcome for everything, so they are answered here).
+    await page.evaluate(
+      (publicIds) => {
+        const w = window as unknown as Internals & { __elevated: string[] };
+        const inner = w.__TAURI_INTERNALS__.invoke;
+        const tickets = new Map<string, unknown>();
+        w.__elevated = [];
+        w.__TAURI_INTERNALS__.invoke = (cmd, args, opts) => {
+          const req = args?.req as { item: string; mode: string } | undefined;
+          if (cmd === 'apply_icon' && req && publicIds.includes(req.item) && req.mode === 'inPlace') {
+            tickets.set(`t-${req.item}`, req);
+            return Promise.resolve({ type: 'needsElevation', ticket: `t-${req.item}`, reason: 'Access is denied. (0x80070005)' });
+          }
+          if (cmd === 'apply_icon_elevated') {
+            w.__elevated.push(String(args?.ticket));
+            return inner('apply_icon', { req: tickets.get(String(args?.ticket)) }, opts);
+          }
+          return inner(cmd, args, opts);
+        };
+      },
+      [firefox!.id, zoomItem!.id],
+    );
+    await openOn(page, [steam!, firefox!, zoomItem!]);
+    await page.evaluate(() => {
+      (window as unknown as Win).__reskinSession.recipe = { label: 'Mono', apply: () => {} };
+    });
+    await page.getByTestId('apply-style-all').click();
+
+    const dialog = page.getByRole('dialog', { name: 'Administrator permission needed' });
+    await expect(dialog).toBeVisible();
+    await expect(dialog).toContainText('2 shortcuts are on the Public Desktop');
+    await expect(dialog.getByRole('list', { name: 'Waiting for approval' }).getByRole('listitem')).toHaveText(['Firefox', 'Zoom']);
+    await expect(dialog.getByRole('button', { name: 'Make personal copies' })).toBeVisible();
+    // Until then each one says why it waits.
+    await expect(page.getByTestId('queue-item').nth(2)).toHaveAccessibleName('Zoom, failed: Needs administrator approval');
+
+    await dialog.getByRole('button', { name: 'Allow (administrator)' }).click();
+    await expect(dialog).toBeHidden();
+    await expect.poll(() => statuses(page)).toEqual(['editing', 'applied', 'applied']);
+    expect(await page.evaluate(() => (window as unknown as { __elevated: string[] }).__elevated)).toEqual([
+      `t-${firefox!.id}`,
+      `t-${zoomItem!.id}`,
+    ]);
+    await expect(page.getByRole('status').filter({ hasText: 'Applied to 2 more icons.' })).toBeVisible();
+    expect((await editorState(page)).phase).toBe('open');
+  });
+});
+
+test.describe('Store app shortcuts', () => {
+  test('apply as a classic desktop shortcut, and the apply menu says why', async ({ openEditor, page }) => {
+    await openEditor({ applyCollapses: false });
+    const [base] = await makeItems(page, [SAMPLE_PATHS.steam]);
+    // As Rust reports one: changing it in place works, but Explorer ignores the icon.
+    const modes: ApplyMode[] = ['inPlace', 'newShortcut'];
+    const notes = ['A Store app shortcut — Windows may ignore a custom icon; Reskin can create a classic shortcut instead.'];
+    await openOn(page, [{ ...base!, storeApp: true, modes, notes }]);
+    await page.getByTestId('apply-options').click();
+    const menu = page.getByRole('dialog', { name: 'Apply options' });
+    await expect(menu.locator('.mode.preferred')).toHaveAttribute('data-mode', 'newShortcut');
+    await expect(menu.getByTestId('apply-notes')).toContainText('A Store app shortcut');
+    await page.keyboard.press('Escape');
+    await applyNow(page);
+    await expect.poll(async () => (await applyRequests(page)).map((r) => r.mode)).toEqual(['newShortcut']);
   });
 });

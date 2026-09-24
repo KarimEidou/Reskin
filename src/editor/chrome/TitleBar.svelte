@@ -68,6 +68,8 @@
       id: `q:${i}`,
       label: STATUS[q.status] ? `${q.info.name} — ${STATUS[q.status]}` : q.info.name,
       checked: i === session.currentIndex,
+      // Like the queue strip: no switching while a job runs or an item loads.
+      disabled: session.queueLocked && i !== session.currentIndex,
     })),
     { separator: true },
     { id: 'add', label: 'Add images or shortcuts…', icon: Plus, shortcut: 'Ctrl+O' },
@@ -84,7 +86,7 @@
     if (id.startsWith('q:')) {
       const i = Number(id.slice(2));
       session.navigate('edit');
-      session.select(i).catch((e: unknown) => {
+      session.switchTo(i).catch((e: unknown) => {
         toast({ message: `Could not switch icons: ${errorText(e)}`, kind: 'error' });
       });
     } else if (id === 'add') {

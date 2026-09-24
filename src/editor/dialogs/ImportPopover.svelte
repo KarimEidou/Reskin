@@ -1,13 +1,17 @@
 <!--
-  Files dropped onto the editor window. Shortcuts/folders join the queue;
-  images and projects open as a design — or, while a design is open, a
-  popover at the drop point asks: add as a layer, or open instead?
+  The import popover. Files dropped on the editor window go through
+  shell.askImport (as do picked files and anything else brought in): with
+  nothing open they open right away; with a design open this popover asks
+  what they become — layers of the design, new queue items (the design
+  keeps its own entry), or, for a shortcut dropped on a design that has no
+  target yet, that shortcut's design. Nothing open is ever replaced.
   Also drives `shell.dragging` (the drop highlight).
 -->
 <script lang="ts">
   import { onMount } from 'svelte';
-  import FolderOpen from '@lucide/svelte/icons/folder-open';
   import Layers from '@lucide/svelte/icons/layers';
+  import ListPlus from '@lucide/svelte/icons/list-plus';
+  import Wand from '@lucide/svelte/icons/wand-sparkles';
   import { getCurrentWebview } from '@tauri-apps/api/webview';
   import { commands } from '$lib/ipc/commands';
   import type { ItemInfo } from '$lib/ipc/types';
@@ -15,91 +19,98 @@
   import { physicalToCss } from '$lib/ui/box-geometry';
   import Popover from '$lib/ui/Popover.svelte';
   import { toast } from '$lib/ui/toasts.svelte';
+  import type { IconComponent } from '$lib/ui/types';
   import { getShell } from '../chrome/shell.svelte';
   import { getSession } from '../state/context';
-  import { errorText, isTarget } from '../state/session.svelte';
+  import { errorText, isTarget, type ImportChoice } from '../state/session.svelte';
 
   const session = getSession();
   const shell = getShell();
 
-  let ask = $state.raw<{ sources: ItemInfo[]; x: number; y: number } | null>(null);
-  let open = $state(false);
+  interface Choice {
+    how: ImportChoice;
+    icon: IconComponent;
+    title: string;
+    detail: string;
+  }
+
   let anchor: HTMLSpanElement | undefined = $state();
 
-  const images = $derived(ask ? ask.sources.filter((s) => s.kind !== 'project') : []);
-  const projects = $derived(ask ? ask.sources.filter((s) => s.kind === 'project') : []);
-  const what = $derived(
-    images.length === 1 ? `“${images[0]!.name}”` : images.length > 1 ? `${images.length} images` : projects.length === 1 ? `“${projects[0]!.name}”` : 'these files',
-  );
+  const question = $derived(shell.importQuestion);
+  const sources = $derived(question?.sources ?? []);
+  const items = $derived(sources.flatMap((s) => (s.kind === 'item' ? [s.info] : [])));
+  const targets = $derived(items.filter(isTarget));
+  /** What can become a layer: pictures, images and other items' icons (not projects). */
+  const layerable = $derived(sources.filter((s) => s.kind === 'image' || s.info.kind !== 'project').length);
+  const what = $derived(sources.length === 1 ? `“${nameOf(sources[0]!)}”` : `${sources.length} items`);
+  const at = $derived(question?.at ?? { x: window.innerWidth / 2 - 150, y: window.innerHeight / 3 });
 
-  $effect(() => {
-    if (!open) ask = null;
+  function nameOf(source: (typeof sources)[number]): string {
+    return source.kind === 'item' ? source.info.name : source.name;
+  }
+
+  const choices = $derived.by((): Choice[] => {
+    // The first shortcut that can take over the open design (when it has no target yet).
+    const first: ItemInfo | undefined = targets.find((t) => session.canAdopt(t));
+    const others = sources.length - 1;
+    const one = sources.length === 1;
+    const onlyTargets = targets.length === sources.length;
+    const layer: Choice = {
+      how: 'layer',
+      icon: Layers,
+      title: onlyTargets ? (one ? 'Use its icon as a layer' : 'Use their icons as layers') : layerable === 1 ? 'Add as layer' : 'Add as layers',
+      detail: layerable === 1 ? 'Place it on top of the current design.' : 'Place them on top of the current design.',
+    };
+    const queue: Choice = {
+      how: 'queue',
+      icon: ListPlus,
+      title: onlyTargets ? (one ? 'Queue it' : `Queue ${sources.length} items`) : one ? 'Queue as new item' : 'Queue as new items',
+      detail: onlyTargets
+        ? one
+          ? 'Edit it next, starting from its own icon.'
+          : 'Edit them next, each starting from its own icon.'
+        : 'Nothing you are editing is replaced.',
+    };
+    const list: Choice[] = [];
+    if (first) {
+      list.push({
+        how: 'adopt',
+        icon: Wand,
+        title: `Apply this design to “${first.name}”`,
+        detail: others > 0 ? `It gets your design; the other ${others} join the queue.` : 'Your design becomes its new icon.',
+      });
+    }
+    if (targets.length > 0) list.push(queue);
+    if (layerable > 0) list.push(layer);
+    if (targets.length === 0) list.push(queue);
+    return list;
   });
 
-  async function handleDrop(paths: string[], at: { x: number; y: number }): Promise<void> {
+  function choose(how: ImportChoice): void {
+    const q = question;
+    if (q) void shell.importAs(q.sources, how);
+  }
+
+  async function handleDrop(paths: string[], position: { x: number; y: number }): Promise<void> {
     if (paths.length === 0) return;
-    let items: ItemInfo[];
+    let dropped: ItemInfo[];
     try {
-      items = await commands.inspectPaths(paths);
+      dropped = await commands.inspectPaths(paths);
     } catch (e) {
       toast({ message: `Could not read what you dropped: ${errorText(e)}`, kind: 'error' });
       play('error');
       return;
     }
-    if (items.length === 0) {
+    if (dropped.length === 0) {
       toast({ message: 'None of these items can be reskinned.', kind: 'error' });
       play('error');
       return;
     }
     play('drop');
-    const targets = items.filter(isTarget);
-    const sources = items.filter((i) => !isTarget(i));
-    const editing = session.hasDesign;
-    if (targets.length > 0) {
-      const hadQueue = session.queue.length > 0;
-      await shell.openItems(targets);
-      if (hadQueue) {
-        toast({ message: `Added ${targets.length} item${targets.length === 1 ? '' : 's'} to the queue.`, kind: 'info' });
-      }
-    }
-    if (sources.length === 0) return;
-    if (!editing) {
-      await shell.openItems(sources);
-      return;
-    }
-    const css = physicalToCss(at, window.devicePixelRatio);
-    ask = { sources, x: css.x, y: css.y };
-    open = true;
-  }
-
-  async function addAsLayers(): Promise<void> {
-    const list = images;
-    open = false;
-    try {
-      for (const s of list) await session.addSource(s);
-      session.navigate('edit');
-    } catch (e) {
-      toast({ message: `Could not add the image: ${errorText(e)}`, kind: 'error' });
-    }
-  }
-
-  async function openInstead(): Promise<void> {
-    const list = ask?.sources ?? [];
-    open = false;
-    if (list.length === 0) return;
-    // A project replaces the design; images start a new standalone design.
-    if (list.some((s) => s.kind === 'project')) {
-      const project = list.find((s) => s.kind === 'project')!;
-      try {
-        await session.addSource(project);
-        session.navigate('edit');
-      } catch (e) {
-        toast({ message: `Could not open the project: ${errorText(e)}`, kind: 'error' });
-      }
-      return;
-    }
-    session.reset();
-    await shell.openItems(list);
+    await shell.askImport(
+      dropped.map((info) => ({ kind: 'item', info })),
+      physicalToCss(position, window.devicePixelRatio),
+    );
   }
 
   onMount(() => {
@@ -134,34 +145,32 @@
   });
 </script>
 
-{#if ask}
-  <span class="anchor" bind:this={anchor} style:left="{ask.x}px" style:top="{ask.y}px"></span>
+{#if question}
+  <span class="anchor" bind:this={anchor} style:left="{at.x}px" style:top="{at.y}px"></span>
 {/if}
 
-<Popover bind:open {anchor} label="Import dropped files" placement="bottom-start" initialFocus="first" width="300px">
+<Popover
+  bind:open={() => question !== null, (open) => {
+    if (!open) shell.importQuestion = null;
+  }}
+  {anchor}
+  label="Import"
+  placement="bottom-start"
+  initialFocus="first"
+  width="320px"
+>
   <div class="pop" data-testid="import-popover">
     <p class="title">Use {what} how?</p>
-    {#if images.length > 0}
-      <button type="button" class="choice" onclick={addAsLayers}>
-        <Layers size={18} aria-hidden="true" />
+    {#each choices as c (c.how)}
+      <button type="button" class="choice" data-choice={c.how} onclick={() => choose(c.how)}>
+        <c.icon size={18} aria-hidden="true" />
         <span>
-          <strong>Add as layer{images.length > 1 ? 's' : ''}</strong>
-          <small>Place it on top of the current design.</small>
+          <strong>{c.title}</strong>
+          <small>{c.detail}</small>
         </span>
       </button>
-    {/if}
-    <button type="button" class="choice" onclick={openInstead}>
-      <FolderOpen size={18} aria-hidden="true" />
-      <span>
-        <strong>{projects.length > 0 ? 'Open the project' : 'Open as a new design'}</strong>
-        <small>
-          {projects.length === 0 && session.queue.length > 1
-            ? `Replaces what you're editing and clears the queue (${session.queue.length} icons).`
-            : "Replaces what you're editing now."}
-        </small>
-      </span>
-    </button>
-    <button type="button" class="cancel" onclick={() => (open = false)}>Cancel</button>
+    {/each}
+    <button type="button" class="cancel" onclick={() => (shell.importQuestion = null)}>Cancel</button>
   </div>
 </Popover>
 

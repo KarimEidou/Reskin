@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { TOOL_ORDER, createTools } from '$engine/index';
 import type { ItemInfo } from '$lib/ipc/types';
-import { applyBlockedReason, MODE_INFO, MODE_ORDER } from './apply-modes';
+import { applyBlockedReason, MODE_INFO, MODE_ORDER, orderedModes, preferredMode } from './apply-modes';
 import { fromHsv, hexOf, hueCss, parseColorInput, pushRecent, svFromPoint, toHsv } from './color-picker';
 import { filterFonts } from './fonts';
 import { gradientCss } from './gradient-css';
@@ -130,7 +130,23 @@ describe('apply modes', () => {
     expect(applyBlockedReason(item({}), null)).toBeNull();
     expect(applyBlockedReason(null, null)).toBe('Drop a shortcut on the box to apply');
     expect(applyBlockedReason(item({}), { label: 'Applying' })).toBe('Applying…');
-    expect(applyBlockedReason(item({ kind: 'image', modes: [], name: 'logo.png' }), null)).toContain('design source');
+    expect(applyBlockedReason(item({ kind: 'image', modes: [], name: 'logo.png' }), null)).toBe(
+      'logo.png is a design source — drop a shortcut here to apply',
+    );
     expect(applyBlockedReason(item({ kind: 'file', modes: [] }), null)).toContain("can't");
+  });
+
+  it('prefers a classic shortcut for Store apps, whose own icon Explorer ignores', () => {
+    const info = (patch: Partial<ItemInfo>): Pick<ItemInfo, 'modes' | 'storeApp'> => ({ modes: ['inPlace'], storeApp: false, ...patch });
+    expect(preferredMode(info({}))).toBe('inPlace');
+    expect(preferredMode(info({ modes: ['inPlace', 'personalCopy'] }))).toBe('inPlace');
+    expect(preferredMode(info({ modes: [] }))).toBeNull();
+    const store = info({ storeApp: true, modes: ['inPlace', 'newShortcut'] });
+    expect(preferredMode(store)).toBe('newShortcut');
+    expect(orderedModes(store)).toEqual(['newShortcut', 'inPlace']);
+    // Without a classic shortcut to offer, a Store app keeps what it has.
+    expect(preferredMode(info({ storeApp: true, modes: ['personalCopy'] }))).toBe('personalCopy');
+    expect(orderedModes(info({ modes: ['inPlace', 'personalCopy'] }))).toEqual(['inPlace', 'personalCopy']);
+    expect(orderedModes(info({ modes: [] }))).toEqual([]);
   });
 });

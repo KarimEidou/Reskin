@@ -143,6 +143,61 @@ window listener added while the event is on its way
 workspace's window listeners are added long after the App's. Files dropped
 from Explorer (Tauri drag-drop events) stay the App's (import popover).
 
+### Editor session (`src/editor/state/session.svelte.ts`)
+
+* **Designs and the queue.** The open design belongs to the current queue
+  entry or, with an empty queue, stands alone. Every entry keeps its own
+  design (`project`), recipe, Library link and unsaved state while another
+  is edited. Nothing is dropped: a standalone design gets an entry of its
+  own (its source file's `ItemInfo`, or a stand-in of kind `project` with
+  an id `design-<n>` that never reaches Rust) before anything else is
+  queued, and a target that arrives while the open design has none takes
+  that design over, history included (`meta.source` follows it). Imports
+  (drops and picks; `ImportSource` also takes decoded pictures, for
+  pastes) go through `shell.askImport(sources, at)`: with nothing open
+  they open; otherwise the import popover asks — `layer` (projects still
+  join the queue), `queue` (images/projects become design entries,
+  `modes: []`), or `adopt` (offered for a target that `canAdopt`: not
+  queued, or queued and not opened yet).
+* **`designToken`** changes when a design starts to load and again once it
+  is in. Code that awaits (worker renders, icon loads) reads it first and
+  lands its result only when `isOpenDesign(token)` — the same design is
+  open and no other is on its way in (work started half-way through a
+  switch is dropped too).
+* **Queue lock.** `queueLocked` (a job in `busy`, or a switch loading):
+  `switchTo(i)` and `remove(i)` — the queue strip and the title bar's
+  queue menu — are refused, and `apply` / `applyStyleToAll` do not start.
+* **Save & Apply** uses `preferredMode(item)` (`workspace/apply-modes.ts`:
+  a classic shortcut for Store apps). It sends `flourish` only when every
+  other queued item is applied; otherwise the editor stays open, the item
+  is marked applied, the next one not applied opens, and — while the
+  editor is interactive — a toast offers Undo for 6 s
+  (`restore({type:'entry'})` per journal entry). "Apply style to all"
+  replays the current item's recipe on a scratch engine per other queued
+  target (the current design and its history are untouched), keeps each
+  failure's reason on its entry (`problem`), and asks about every
+  `needsElevation` at once (`elevation.requests`, approved ticket by
+  ticket, or personal copies with the icons already rendered).
+* **Library.** `libraryId` is the Library design the open design came from
+  or was saved as; `saveToLibrary` updates it (`asNew` makes another), and
+  the design takes its Library name. Opening a Library design over unsaved
+  changes asks first (`shell.openLibraryDesign`).
+* **Autosave.** A design is *unsaved* when it came with unsaved changes (a
+  recovered draft) or its history moved since it was loaded, applied,
+  saved to the Library or exported as a project (`engine.currentEntryId`,
+  sealed at each save). Only unsaved designs are written:
+  `autosave(json)` 2 s after the last change, at least every 10 s while
+  editing goes on, before another design opens and when the editor
+  closes. The JSON is encoded off the main thread (`ProjectEncoder`: the
+  page only copies the layer pixels). Once the open design is safe the
+  live slot takes another queued unsaved design, or empties
+  (`autosave('')`). Rust keeps two slots (`AutosaveSlots`): each launch
+  first turns what the previous one left live into the recovery offer
+  (`autosave_load`), so a crashed design survives the next session's
+  autosaves; `autosave(null)` (Discard, or a restored draft) clears both.
+  Restoring re-inspects `meta.source` (`inspect_paths`, or the system
+  icons) and queues the draft for that item when it still exists.
+
 ## Rust: reskin-core module contracts
 
 Error type: `reskin_core::Error { AccessDenied, NotFound, Unsupported, Cancelled, Other }`
@@ -177,10 +232,15 @@ Pure (all hosts, unit tested on Linux):
   ico)` (content-hashed, reuses identical files, never overwrites), `new_id()`,
   `Library::new(dir)` with `list/save/load/delete` (files
   `{format:"reskin-library", version, id, name, thumb, updatedAt, data}`),
-  `autosave_write/autosave_read`.
+  `autosave_write/autosave_read`, `AutosaveSlots::new(autosave_file)` with
+  `rotate()` (a non-blank live `autosave.reskin` becomes
+  `recovery.reskin`, `RECOVERY_FILE`), `rotate_once(&Mutex<bool>)` (once
+  per launch; a failed rotation is retried on the next call and the app
+  leaves the slots alone until it succeeds), `write(data)` (empty data
+  removes the live slot), `discard()` (both slots), `read_recovery()`.
 * `settings` — `load(path) -> Settings` (damaged files backed up; first run
   = `!onboarded`: a missing file, or one written before the welcome was
-  finished; recovered defaults count as onboarded), `save(path, &Settings)
+  shown; recovered defaults count as onboarded), `save(path, &Settings)
   -> Result<Settings>`, `normalize`, `parse_hotkey(&str) ->
   Result<Option<Hotkey>>` (`""` = disabled); `Hotkey` `Display` gives
   "Ctrl+Alt+Shift+R", `to_accelerator()` gives the global-shortcut plugin

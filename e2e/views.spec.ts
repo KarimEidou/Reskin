@@ -26,9 +26,17 @@ const SHOTS_DIR = join(dirname(fileURLToPath(import.meta.url)), '__screenshots__
 type SessionView = {
   hasDesign: boolean;
   view: string;
+  unsaved: boolean;
   queue: Array<{ info: { name: string; kind: string } }>;
-  engine: { doc: { layers: unknown[]; meta: { name: string } }; serialize(): Promise<string> };
-  saveToLibrary(name?: string): Promise<unknown>;
+  engine: {
+    doc: { layers: unknown[]; meta: { name: string } };
+    activeLayer: { id: string };
+    historyEntries: { label: string }[];
+    editLayerPixels(id: string, label: string, edit: (surface: { data: Uint8ClampedArray }) => void): boolean;
+    serialize(): Promise<string>;
+  };
+  saveToLibrary(name?: string, opts?: { asNew?: boolean }): Promise<unknown>;
+  flushAutosave(): Promise<void>;
 };
 type Win = { __reskinSession: SessionView };
 
@@ -37,6 +45,16 @@ const hasDesign = (page: Page) =>
 const layerCount = (page: Page) =>
   page.evaluate(() => (window as unknown as Win).__reskinSession.engine.doc.layers.length);
 const titleBar = (page: Page) => page.locator('header.titlebar');
+const queueNames = (page: Page) =>
+  page.evaluate(() => (window as unknown as Win).__reskinSession.queue.map((q) => q.info.name));
+
+/** Paints the open design's active layer: an unsaved change (one history step). */
+function paint(page: Page): Promise<void> {
+  return page.evaluate(() => {
+    const { engine } = (window as unknown as Win).__reskinSession;
+    engine.editLayerPixels(engine.activeLayer.id, 'Paint', (surface) => surface.data.fill(200));
+  });
+}
 
 async function wallpaper(page: Page, tone: 'dark' | 'light'): Promise<void> {
   const bg =
@@ -61,21 +79,6 @@ async function shot(page: Page, name: string): Promise<void> {
     mkdirSync(SHOTS_DIR, { recursive: true });
     writeFileSync(join(SHOTS_DIR, name), png);
   }
-}
-
-/**
- * Drops crash-recovery autosaves (the session autosaves shortly after edits),
- * so the first Start view doesn't open the recovery dialog in tests that are
- * about something else.
- */
-async function noAutosave(page: Page): Promise<void> {
-  await page.evaluate(() => {
-    type Invoke = (cmd: string, args?: Record<string, unknown>, opts?: unknown) => Promise<unknown>;
-    const internals = (window as unknown as { __TAURI_INTERNALS__: { invoke: Invoke } }).__TAURI_INTERNALS__;
-    const inner = internals.invoke;
-    internals.invoke = (cmd, args, opts) =>
-      cmd === 'autosave' && args?.data != null ? Promise.resolve(null) : inner(cmd, args, opts);
-  });
 }
 
 /** Applies a design to `path` through the editor (the fake journals it). */
@@ -121,7 +124,6 @@ test.describe('start', () => {
 
   test('recent changes offer Undo; Restore all asks first', async ({ openEditor, page }) => {
     await openEditor();
-    await noAutosave(page);
     await applyTo(page, SAMPLE_PATHS.steam);
     await simulateOpen(page, [], 'start');
     const view = page.getByTestId('start-view');
@@ -150,13 +152,12 @@ test.describe('start', () => {
   test('screenshots', async ({ openEditor, page }) => {
     test.slow();
     await openEditor({ accent: '#0078d4' });
-    await noAutosave(page);
     await applyTo(page, SAMPLE_PATHS.steam);
     await applyTo(page, SAMPLE_PATHS.site);
     await page.evaluate(async () => {
       const s = (window as unknown as Win).__reskinSession;
-      await s.saveToLibrary('Steam Glass');
-      await s.saveToLibrary('Docs Neon');
+      await s.saveToLibrary('Steam Glass', { asNew: true });
+      await s.saveToLibrary('Docs Neon', { asNew: true });
     });
     for (const tone of ['dark', 'light'] as const) {
       await page.evaluate((t) => window.__e2e!.setSettings({ theme: t }), tone);
@@ -369,13 +370,55 @@ test.describe('library', () => {
     expect(apply.args.req).toMatchObject({ designName: 'Mono', mode: 'inPlace' });
   });
 
+  test('Open asks before replacing unsaved changes; the design saves over its Library design, or as a new one', async ({ openEditor, page }) => {
+    await openEditor();
+    await simulateOpen(page, [SAMPLE_PATHS.steam], 'edit');
+    await hasDesign(page);
+    await page.evaluate(() => (window as unknown as Win).__reskinSession.saveToLibrary('Mono'));
+    const [mono] = await page.evaluate(() => window.__e2e!.library);
+    await paint(page);
+    await titleBar(page).getByRole('button', { name: 'Library' }).click();
+    const view = page.getByTestId('library-view');
+    await expect(view.getByTestId('library-card')).toContainText('Editing');
+
+    // Opening a design over unsaved changes asks first.
+    await view.getByRole('button', { name: 'Open Mono', exact: true }).click();
+    const ask = page.getByRole('dialog', { name: 'Open "Mono"?' });
+    await expect(ask).toContainText("Your changes to Steam's design will be lost.");
+    await ask.getByRole('button', { name: 'Cancel' }).click();
+    await expect(ask).toBeHidden();
+    expect(await calls(page, 'library_load')).toHaveLength(0);
+
+    // Saving updates it in place…
+    await view.getByRole('button', { name: 'Save changes to Mono' }).click();
+    await expect.poll(async () => (await calls(page, 'library_save')).length).toBe(2);
+    expect(await page.evaluate(() => window.__e2e!.library.map((l) => l.id))).toEqual([mono!.id]);
+    // …"Save as new" adds a copy, which is the one it saves over from then on.
+    await view.getByRole('button', { name: 'Save as new' }).click();
+    await expect(view.getByTestId('library-card')).toHaveCount(2);
+    await expect(view.getByRole('button', { name: 'Save changes to Mono copy' })).toBeVisible();
+    const saves = (await calls(page, 'library_save')).map((c) => (c.args.entry as LibrarySave).id);
+    expect(saves).toEqual([null, mono!.id, null]);
+
+    // Nothing unsaved any more: Open replaces the design without asking.
+    await view.getByRole('button', { name: 'Open Mono', exact: true }).click();
+    await waitForCall(page, 'library_load', { id: mono!.id });
+    await expect(page.locator('[data-view-host]')).toHaveAttribute('data-view', 'edit');
+    await expect(page.getByRole('dialog')).toHaveCount(0);
+    // Still Steam's design, now from "Mono".
+    await expect(titleBar(page)).toContainText('Steam');
+    expect(await page.evaluate(() => (window as unknown as Win).__reskinSession.engine.doc.meta.name)).toBe('Mono');
+  });
+
   test('screenshots', async ({ openEditor, page }) => {
     await openEditor({ accent: '#0078d4' });
     await simulateOpen(page, [SAMPLE_PATHS.steam, SAMPLE_PATHS.site, SAMPLE_PATHS.folder, SAMPLE_PATHS.exe], 'edit');
     await hasDesign(page);
     await page.evaluate(async () => {
       const s = (window as unknown as Win).__reskinSession;
-      for (const name of ['Steam Glass', 'Portal Neon', 'Projects Clay', 'Paint Retro', 'Mono Dark']) await s.saveToLibrary(name);
+      for (const name of ['Steam Glass', 'Portal Neon', 'Projects Clay', 'Paint Retro', 'Mono Dark']) {
+        await s.saveToLibrary(name, { asNew: true });
+      }
     });
     await titleBar(page).getByRole('button', { name: 'Library' }).click();
     await expect(page.getByTestId('library-card')).toHaveCount(5);
@@ -513,6 +556,67 @@ test.describe('settings', () => {
   }
 });
 
+test.describe('autosave', () => {
+  test('keeps only unsaved changes: an item opened and closed leaves nothing to recover', async ({ openEditor, page }) => {
+    await openEditor();
+    await simulateOpen(page, [SAMPLE_PATHS.steam], 'edit');
+    await hasDesign(page);
+    await page.waitForTimeout(2500);
+    await page.getByRole('button', { name: 'Close editor' }).click();
+    await waitForCall(page, 'editor_close');
+    expect(await calls(page, 'autosave')).toEqual([]);
+    await expect.poll(async () => (await editorState(page)).phase).toBe('closed');
+
+    // An edit is kept when the editor closes…
+    await simulateOpen(page, [SAMPLE_PATHS.notes], 'edit');
+    await hasDesign(page);
+    await paint(page);
+    await page.getByRole('button', { name: 'Close editor' }).click();
+    await expect.poll(async () => (await calls(page, 'editor_close')).length).toBe(2);
+    const [kept] = await calls(page, 'autosave');
+    expect(JSON.parse(kept!.args.data as string).meta.source.path).toBe(SAMPLE_PATHS.notes);
+    await expect.poll(async () => (await editorState(page)).phase).toBe('closed');
+
+    // …until the design is safe: saved to the Library, there is nothing to recover.
+    await simulateOpen(page, [SAMPLE_PATHS.site], 'edit');
+    await hasDesign(page);
+    await paint(page);
+    await page.evaluate(() => (window as unknown as Win).__reskinSession.flushAutosave());
+    expect(await page.evaluate(() => window.__e2e!.autosaveData)).toContain('"format":"reskin"');
+    await page.evaluate(() => (window as unknown as Win).__reskinSession.saveToLibrary('Portal'));
+    expect(await page.evaluate(() => window.__e2e!.autosaveData)).toBe('');
+    expect(await page.evaluate(() => (window as unknown as Win).__reskinSession.unsaved)).toBe(false);
+  });
+
+  test('serializes off the main thread', async ({ openEditor, page }) => {
+    await openEditor();
+    await simulateOpen(page, [SAMPLE_PATHS.steam], 'edit');
+    await hasDesign(page);
+    await paint(page);
+    // Compression is the costly part: none of it may run on the page's thread.
+    const compressedHere = await page.evaluate(async () => {
+      let made = 0;
+      const Native = window.CompressionStream;
+      window.CompressionStream = class extends Native {
+        constructor(format: CompressionFormat) {
+          super(format);
+          made++;
+        }
+      };
+      try {
+        await (window as unknown as Win).__reskinSession.flushAutosave();
+      } finally {
+        window.CompressionStream = Native;
+      }
+      return made;
+    });
+    expect(compressedHere).toBe(0);
+    const draft = JSON.parse((await page.evaluate(() => window.__e2e!.autosaveData))!);
+    expect(draft).toMatchObject({ format: 'reskin', meta: { name: 'Steam' } });
+    expect(draft.layers[0].pixels.length).toBeGreaterThan(100);
+  });
+});
+
 test.describe('recovery', () => {
   /** Leaves an autosaved Steam design behind, as a crash would. */
   async function leaveAutosave(page: Page): Promise<void> {
@@ -544,6 +648,13 @@ test.describe('recovery', () => {
     await hasDesign(page);
     await expect(page.locator('[data-view-host]')).toHaveAttribute('data-view', 'edit');
     await expect(titleBar(page)).toContainText('Steam');
+    // Its shortcut is back in the queue: it can be applied again right away.
+    await waitForCall(page, 'inspect_paths', { paths: [SAMPLE_PATHS.steam] });
+    await expect.poll(() => page.evaluate(() => (window as unknown as Win).__reskinSession.queue.map((q) => q.info.name))).toEqual(['Steam']);
+    await expect(page.getByRole('button', { name: 'Save & Apply' })).toHaveAttribute('aria-disabled', 'false');
+    // It is this session's own work now: the offer is answered, the draft kept as live autosave.
+    const writes = (await calls(page, 'autosave')).map((c) => c.args.data);
+    expect(writes.slice(-2).map((d) => (typeof d === 'string' ? 'draft' : d))).toEqual([null, 'draft']);
     // While that design is open the Start page doesn't offer it again.
     await page.getByRole('button', { name: 'Start page' }).click();
     await expect(page.getByTestId('start-view')).toBeVisible();
@@ -613,27 +724,65 @@ test.describe('files dropped on the editor', () => {
     await expect(page.getByTestId('drop-zone').locator('.bv')).toHaveAttribute('data-state', 'armed');
   });
 
-  test('an image can replace the design instead', async ({ openEditor, page }) => {
+  test('an image can join the queue as a new item instead: nothing is replaced', async ({ openEditor, page }) => {
     await openEditor();
     await simulateOpen(page, [SAMPLE_PATHS.steam], 'edit');
     await hasDesign(page);
+    const layers = await layerCount(page);
     await emit(page, 'tauri://drag-drop', { paths: [SAMPLE_PATHS.image], position: { x: 500, y: 300 } });
-    await page.getByTestId('import-popover').getByRole('button', { name: /Open as a new design/ }).click();
+    await page.getByTestId('import-popover').getByRole('button', { name: /Queue as new item/ }).click();
+    await expect.poll(() => queueNames(page)).toEqual(['Steam', 'logo.png']);
+    await expect(titleBar(page)).toContainText('1/2');
+    expect(await layerCount(page)).toBe(layers);
+    await expect(page.getByRole('status').filter({ hasText: 'Added 1 item to the queue' })).toBeVisible();
+    // Opening it starts a design from the image.
+    await page.getByTestId('queue-item').nth(1).click();
     await expect(titleBar(page)).toContainText('logo.png');
-    expect(await page.evaluate(() => (window as unknown as Win).__reskinSession.queue.length)).toBe(0);
+    await expect(page.getByRole('button', { name: 'Save & Apply' })).toHaveAttribute('aria-disabled', 'true');
   });
 
-  test('shortcuts join the queue without asking', async ({ openEditor, page }) => {
+  test('dropped shortcuts ask: queue them, or use their icons as layers', async ({ openEditor, page }) => {
     await openEditor();
     await simulateOpen(page, [SAMPLE_PATHS.steam], 'edit');
     await hasDesign(page);
     await emit(page, 'tauri://drag-drop', { paths: [SAMPLE_PATHS.notes, SAMPLE_PATHS.folder], position: { x: 500, y: 300 } });
-    await expect
-      .poll(() => page.evaluate(() => (window as unknown as Win).__reskinSession.queue.map((q) => q.info.name)))
-      .toEqual(['Steam', 'Notes', 'Projects']);
-    await expect(page.getByTestId('import-popover')).toHaveCount(0);
+    const pop = page.getByTestId('import-popover');
+    await expect(pop).toContainText('Use 2 items how?');
+    await expect(pop.locator('.choice')).toHaveText([/Queue 2 items/, /Use their icons as layers/]);
+    await pop.getByRole('button', { name: /Queue 2 items/ }).click();
+    await expect.poll(() => queueNames(page)).toEqual(['Steam', 'Notes', 'Projects']);
     await expect(titleBar(page)).toContainText('1/3');
     await expect(page.getByRole('status').filter({ hasText: 'Added 2 items to the queue' })).toBeVisible();
+
+    // Another shortcut's icon as a layer of this design.
+    const before = await layerCount(page);
+    await emit(page, 'tauri://drag-drop', { paths: [SAMPLE_PATHS.site], position: { x: 500, y: 300 } });
+    await pop.getByRole('button', { name: /Use its icon as a layer/ }).click();
+    await expect.poll(() => layerCount(page)).toBe(before + 1);
+    expect(await queueNames(page)).toEqual(['Steam', 'Notes', 'Projects']);
+  });
+
+  test('a shortcut dropped on a design without a target takes that design over', async ({ openEditor, page }) => {
+    await openEditor();
+    await simulateOpen(page, [SAMPLE_PATHS.image], 'edit');
+    await hasDesign(page);
+    await paint(page);
+    const button = page.getByRole('button', { name: 'Save & Apply' });
+    await expect(button).toHaveAttribute('aria-disabled', 'true');
+    await emit(page, 'tauri://drag-drop', { paths: [SAMPLE_PATHS.steam], position: { x: 500, y: 300 } });
+    const pop = page.getByTestId('import-popover');
+    await expect(pop.locator('.choice').first()).toHaveText(/Apply this design to “Steam”/);
+    await pop.locator('.choice').first().click();
+    await expect.poll(() => queueNames(page)).toEqual(['Steam']);
+    await expect(titleBar(page)).toContainText('Steam');
+    await expect(button).toHaveAttribute('aria-disabled', 'false');
+    // The same design, its history included.
+    expect(await page.evaluate(() => (window as unknown as Win).__reskinSession.engine.historyEntries.map((h) => h.label))).toEqual([
+      'Paint',
+    ]);
+    await page.keyboard.press('Control+Enter');
+    const apply = await waitForCall(page, 'apply_icon');
+    expect(apply.args.req).toMatchObject({ designName: 'logo.png', mode: 'inPlace' });
   });
 
   test('nothing usable shows an error', async ({ openEditor, page }) => {

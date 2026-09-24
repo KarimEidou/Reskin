@@ -248,6 +248,102 @@ describe('Autosave', () => {
     expect(saved).toEqual([1, 2]);
   });
 
+  it('skips the save when produce has nothing to save', async () => {
+    const saved: string[] = [];
+    let data: string | null = null;
+    const a = new Autosave({ produce: () => data, save: async (d) => void saved.push(d), delayMs: 10 });
+    a.schedule();
+    await vi.advanceTimersByTimeAsync(50);
+    expect(saved).toEqual([]);
+    expect(a.pending).toBe(false);
+    data = 'edited';
+    a.schedule();
+    await a.flush();
+    expect(saved).toEqual(['edited']);
+  });
+
+  it('write replaces the pending change and keeps the order of saves', async () => {
+    const saved: string[] = [];
+    const a = new Autosave({
+      produce: () => 'produced',
+      save: async (d) => {
+        await new Promise((r) => setTimeout(r, 100));
+        saved.push(d);
+      },
+      delayMs: 10,
+    });
+    a.schedule();
+    await vi.advanceTimersByTimeAsync(20); // "produced" is being saved
+    a.schedule(); // a change nobody has saved yet…
+    const written = a.write('given'); // …replaced by this data
+    expect(a.pending).toBe(false);
+    await vi.advanceTimersByTimeAsync(500);
+    await written;
+    expect(saved).toEqual(['produced', 'given']);
+  });
+
+  it('a change handed to a save that waits for the ones before it is still pending', async () => {
+    const saved: string[] = [];
+    let current = 'A';
+    const a = new Autosave({
+      produce: () => current,
+      save: async (d) => {
+        await new Promise((r) => setTimeout(r, 100));
+        saved.push(d);
+      },
+      delayMs: 10,
+    });
+    a.schedule();
+    await vi.advanceTimersByTimeAsync(20); // "A" is being saved
+    a.schedule();
+    await vi.advanceTimersByTimeAsync(20); // handed to a save behind it: not produced yet
+    expect(a.pending).toBe(true);
+    await vi.advanceTimersByTimeAsync(70); // its turn: produced now
+    expect(a.pending).toBe(false);
+    current = 'B';
+    await vi.advanceTimersByTimeAsync(200);
+    expect(saved).toEqual(['A', 'A']);
+    // A produce that throws is not left pending either.
+    const failing = new Autosave({
+      produce: () => {
+        throw new Error('no');
+      },
+      save: async () => {},
+      delayMs: 10,
+      onError: () => {},
+    });
+    failing.schedule();
+    await failing.flush();
+    expect(failing.pending).toBe(false);
+  });
+
+  it('enqueue runs after the saves before it and rejects with its own failure', async () => {
+    const order: string[] = [];
+    const a = new Autosave({
+      produce: () => 'x',
+      save: async () => {
+        await new Promise((r) => setTimeout(r, 100));
+        order.push('save');
+      },
+      delayMs: 10,
+    });
+    a.schedule();
+    await vi.advanceTimersByTimeAsync(20);
+    const failing = a.enqueue(async () => {
+      order.push('task');
+      throw new Error('locked');
+    });
+    const next = a.enqueue(async () => {
+      order.push('after');
+      return 42;
+    });
+    const rejected = expect(failing).rejects.toThrow('locked');
+    await vi.advanceTimersByTimeAsync(200);
+    await rejected;
+    expect(await next).toBe(42);
+    expect(order).toEqual(['save', 'task', 'after']);
+  });
+
   it('reports errors and keeps working', async () => {
     const errors: unknown[] = [];
     let fail = true;

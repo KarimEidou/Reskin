@@ -25,15 +25,21 @@ function deferred<T = void>() {
   return { promise, resolve };
 }
 
-const item = (id: string) => ({ id, name: id, modes: [] }) as unknown as ItemInfo;
+const item = (id: string, modes: string[] = []) => ({ id, name: id, modes }) as unknown as ItemInfo;
+const asSource = (info: ItemInfo) => ({ kind: 'item' as const, info });
 
 interface FakeSession {
   view: string;
   queue: unknown[];
   hasDesign: boolean;
-  engine: { canUndo: boolean };
+  unsaved: boolean;
+  interactive: boolean;
+  item: ItemInfo | null;
   newBlank: ReturnType<typeof vi.fn>;
   openItems: ReturnType<typeof vi.fn>;
+  importSources: ReturnType<typeof vi.fn>;
+  openLibraryDesign: ReturnType<typeof vi.fn>;
+  saveToLibrary: ReturnType<typeof vi.fn>;
   navigate: ReturnType<typeof vi.fn>;
   recoverable: ReturnType<typeof vi.fn>;
   restoreAutosave: ReturnType<typeof vi.fn>;
@@ -49,11 +55,16 @@ beforeEach(() => {
     view: 'start',
     queue: [],
     hasDesign: false,
-    engine: { canUndo: false },
+    unsaved: false,
+    interactive: false,
+    item: null,
     newBlank: vi.fn(() => {
       session.hasDesign = true;
     }),
     openItems: vi.fn(async () => {}),
+    importSources: vi.fn(async () => 0),
+    openLibraryDesign: vi.fn(async () => {}),
+    saveToLibrary: vi.fn(async () => ({ id: 'lib1', name: 'Neon', thumb: '', updatedAt: 0, bytes: 1 })),
     navigate: vi.fn((v: string) => {
       session.view = v;
     }),
@@ -119,11 +130,105 @@ describe('openImage', () => {
     expect(commands.pickFiles).toHaveBeenCalledTimes(1);
     picked.resolve([item('logo')]);
     await first;
-    expect(session.openItems).toHaveBeenCalledTimes(1);
+    expect(session.importSources).toHaveBeenCalledWith([asSource(item('logo'))], 'queue');
     // Once the picker closed, the next one may open.
     vi.mocked(commands.pickFiles).mockResolvedValue([]);
     await shell.openImage();
     expect(commands.pickFiles).toHaveBeenCalledTimes(2);
+  });
+
+  it('with a design open, asks what the picked files become', async () => {
+    session.hasDesign = true;
+    vi.mocked(commands.pickFiles).mockResolvedValue([item('logo')]);
+    await shell.openImage();
+    expect(shell.importQuestion).toEqual({ sources: [asSource(item('logo'))], at: null });
+    expect(session.importSources).not.toHaveBeenCalled();
+  });
+});
+
+describe('askImport', () => {
+  it('opens right away when nothing is open', async () => {
+    await shell.askImport([asSource(item('a', ['inPlace']))], { x: 10, y: 20 });
+    expect(session.importSources).toHaveBeenCalledWith([asSource(item('a', ['inPlace']))], 'queue');
+    expect(shell.importQuestion).toBeNull();
+    expect(toast).not.toHaveBeenCalled();
+  });
+
+  it('with a design open asks the import popover; its answer imports, and says what joined the queue', async () => {
+    session.hasDesign = true;
+    const sources = [asSource(item('a', ['inPlace'])), asSource(item('b', ['inPlace']))];
+    await shell.askImport(sources, { x: 10, y: 20 });
+    expect(shell.importQuestion).toEqual({ sources, at: { x: 10, y: 20 } });
+    expect(session.importSources).not.toHaveBeenCalled();
+    session.importSources.mockResolvedValueOnce(2);
+    await shell.importAs(sources, 'queue');
+    expect(session.importSources).toHaveBeenCalledWith(sources, 'queue');
+    expect(shell.importQuestion).toBeNull();
+    expect(toast).toHaveBeenCalledWith({ message: 'Added 2 items to the queue.', kind: 'info' });
+    vi.mocked(toast).mockClear();
+    await shell.importAs(sources.slice(0, 1), 'layer');
+    expect(toast).not.toHaveBeenCalled();
+  });
+
+  it('turns a failed import into a toast', async () => {
+    session.hasDesign = true;
+    session.importSources.mockRejectedValueOnce(new Error('unreadable'));
+    await shell.importAs([asSource(item('logo'))], 'layer');
+    expect(toast).toHaveBeenCalledWith({ message: 'Could not open logo: unreadable', kind: 'error' });
+  });
+
+  it('ignores nothing to import', async () => {
+    session.hasDesign = true;
+    await shell.askImport([]);
+    expect(shell.importQuestion).toBeNull();
+  });
+});
+
+describe('Library designs', () => {
+  const neon = { id: 'lib1', name: 'Neon', thumb: '', updatedAt: 0, bytes: 1 };
+
+  it('opens one right away when nothing unsaved would be replaced', async () => {
+    expect(await shell.openLibraryDesign(neon)).toBe(true);
+    expect(session.openLibraryDesign).toHaveBeenCalledWith('lib1', 'Neon');
+    expect(pendingConfirm()).toBeNull();
+  });
+
+  it('asks before it replaces unsaved changes', async () => {
+    session.hasDesign = true;
+    session.unsaved = true;
+    session.item = item('Steam', ['inPlace']);
+    const declined = shell.openLibraryDesign(neon);
+    await vi.waitFor(() => expect(pendingConfirm()).not.toBeNull());
+    expect(pendingConfirm()!.options).toMatchObject({ title: 'Open "Neon"?', danger: true });
+    expect(pendingConfirm()!.options.message).toContain("Steam's design");
+    answerConfirm(false);
+    expect(await declined).toBe(false);
+    expect(session.openLibraryDesign).not.toHaveBeenCalled();
+
+    const accepted = shell.openLibraryDesign(neon);
+    await vi.waitFor(() => expect(pendingConfirm()).not.toBeNull());
+    answerConfirm(true);
+    expect(await accepted).toBe(true);
+    expect(session.openLibraryDesign).toHaveBeenCalledTimes(1);
+  });
+
+  it('saves over the open design’s Library design, or as a new one', async () => {
+    await shell.saveToLibrary();
+    await shell.saveToLibrary('Neon copy', { asNew: true });
+    expect(session.saveToLibrary.mock.calls).toEqual([
+      [undefined, {}],
+      ['Neon copy', { asNew: true }],
+    ]);
+    expect(shell.libraryEpoch).toBe(2);
+  });
+});
+
+describe('interactive', () => {
+  it('is the session’s, so it knows whether the editor is open', () => {
+    shell.interactive = true;
+    expect(session.interactive).toBe(true);
+    session.interactive = false;
+    expect(shell.interactive).toBe(false);
   });
 });
 
@@ -162,16 +267,15 @@ describe('newBlank', () => {
     await shell.newBlank();
     expect(session.newBlank).toHaveBeenCalledTimes(1);
     expect(session.view).toBe('edit');
-    // An open design without edits is replaced without asking too.
-    session.engine.canUndo = false;
+    // An open design without unsaved changes is replaced without asking too.
     await shell.newBlank();
     expect(session.newBlank).toHaveBeenCalledTimes(2);
     expect(pendingConfirm()).toBeNull();
   });
 
-  it('asks before dropping unsaved edits', async () => {
+  it('asks before dropping unsaved changes', async () => {
     session.hasDesign = true;
-    session.engine.canUndo = true;
+    session.unsaved = true;
     const declined = shell.newBlank();
     await vi.waitFor(() => expect(pendingConfirm()).not.toBeNull());
     expect(pendingConfirm()!.options).toMatchObject({ danger: true });
