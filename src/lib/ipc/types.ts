@@ -11,6 +11,7 @@ export type { BoxHandoff } from './bindings/BoxHandoff';
 export type { BoxMetrics } from './bindings/BoxMetrics';
 export type { BoxProgress } from './bindings/BoxProgress';
 export type { BoxSkin } from './bindings/BoxSkin';
+export type { BoxSwap } from './bindings/BoxSwap';
 export type { CloseReason } from './bindings/CloseReason';
 export type { CollapseThen } from './bindings/CollapseThen';
 export type { DesktopSpot } from './bindings/DesktopSpot';

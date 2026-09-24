@@ -4,7 +4,9 @@
   panel (inset 12 px for its own shadow) that the proxy morphs into.
 
   App drives it through the exported functions (MorphController's surface):
-    showProxy(rect, props)  draw the proxy, wait for its icon to decode
+    showProxy(rect, props)  lay out the proxy, held (painted by `reveal`),
+                            wait for its icon to decode
+    reveal()                paint the held proxy
     expand(morph, landing)  proxy → panel (FLIP morph or crossfade); the
                             icon flies onto `landing` (the document on the
                             canvas, window CSS px) when there is one
@@ -13,6 +15,9 @@
   Between animations the frame rests in one of the modes: hidden, proxy,
   open. `data-mode` / `data-transition` on `[data-testid="morph-frame"]`
   expose them to tests (`data-transition` is set while the animations play).
+  Over the box the window must paint nothing until it swaps pictures with
+  it (docs/ARCHITECTURE.md, "Morph / handoff protocol"), so the proxy of an
+  open is held — laid out, its icon decoded, not painted — until `reveal`.
 
   Staying cheap (docs/ARCHITECTURE.md, "Performance"): the panel never goes
   `inert` (that restyles every element in it as a morph starts); while it
@@ -66,6 +71,8 @@
   let mode = $state<FrameMode>('hidden');
   let transition = $state<'morph' | 'crossfade' | null>(null);
   let proxy = $state.raw<{ rect: Rect; props: BoxVisualProps } | null>(null);
+  /** The proxy is laid out but not painted (until `reveal`). */
+  let held = $state(false);
   let flyer = $state.raw<{ src: string; rect: Rect } | null>(null);
   /**
    * After a collapse the content rests unrendered (`content-visibility:
@@ -163,17 +170,27 @@
     return true;
   }
 
-  /** Draws the box proxy (panel hidden) and waits until its icon is decoded. */
+  /**
+   * Lays out the box proxy, held (not painted; the panel is hidden), and
+   * waits until its icon is decoded.
+   */
   export async function showProxy(rect: Rect, props: BoxVisualProps): Promise<void> {
     run++;
     stopAll();
     flyer = null;
     transition = null;
     resting = false;
+    held = true;
     proxy = { rect, props };
     setMode('proxy');
     await tick();
     await decoded();
+  }
+
+  /** Paints the held proxy (from the frame this is called in). */
+  export async function reveal(): Promise<void> {
+    held = false;
+    await tick();
   }
 
   /** Proxy → panel; the box's icon settles onto `landing` (see iconTarget). */
@@ -182,6 +199,8 @@
     stopAll();
     transition = null;
     resting = false;
+    // Its first frame is the proxy on screen, revealed or not.
+    held = false;
     // Every layout read comes first, while the page is laid out already:
     // once the mode changes, a read would force the restyle that change
     // causes into this task instead of leaving it to the next frame.
@@ -237,6 +256,7 @@
     stopAll();
     transition = null;
     flyer = null;
+    held = false;
     proxy = props ? { rect, props } : null;
     const wasOpen = mode === 'open' || mode === 'animating';
     // Layout reads before the mode changes (see expand).
@@ -308,6 +328,7 @@
     {@const o = origin(proxy)}
     <div
       class="proxy"
+      class:held
       class:handed-over={flyer !== null}
       bind:this={proxyEl}
       data-testid="box-proxy"
@@ -434,6 +455,9 @@
     display: grid;
     place-items: center;
     transform-origin: 50% 50%;
+  }
+  .proxy.held {
+    opacity: 0;
   }
 
   /* The flying clone carries the icon from here on. */

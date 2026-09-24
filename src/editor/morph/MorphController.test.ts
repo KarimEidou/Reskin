@@ -42,9 +42,11 @@ type Log = string[];
 function fakeSurface(log: Log, over: Partial<MorphSurface> = {}): MorphSurface {
   return {
     prepare: vi.fn(async (cmd: PrepareCmd) => void log.push(`surface:prepare:${cmd.session}`)),
+    reveal: vi.fn(() => void log.push('surface:reveal')),
     expand: vi.fn(async (morph: boolean) => void log.push(`surface:expand:${morph}`)),
     collapse: vi.fn(async (cmd: CollapseCmd) => void log.push(`surface:collapse:${cmd.then}`)),
     clear: vi.fn(() => void log.push('surface:clear')),
+    nextFrame: vi.fn(async () => void log.push('nextFrame')),
     frames: vi.fn(async () => void log.push('frames')),
     ...over,
   };
@@ -62,7 +64,7 @@ function setup(over: Partial<MorphSurface> = {}, timeouts = {}) {
       acks.push([session, stage]);
       log.push(`ack:${session}:${stage}`);
     },
-    timeouts: { prepare: 40, prepareFrames: 20, reveal: 20, expand: 60, collapse: 60, settle: 20, ...timeouts },
+    timeouts: { prepare: 40, prepareFrames: 20, swapFrame: 20, reveal: 20, expand: 60, collapse: 60, settle: 20, ...timeouts },
     onPhase: (p) => phases.push(p),
     onIssue: (i) => issues.push(i),
   });
@@ -96,6 +98,9 @@ describe('MorphController', () => {
       'surface:prepare:1',
       'frames',
       'ack:1:prepared',
+      // The swaps with the box, each on the next frame.
+      'nextFrame',
+      'surface:reveal',
       'frames',
       'ack:1:revealed',
       'surface:expand:true',
@@ -103,6 +108,7 @@ describe('MorphController', () => {
       'surface:collapse:fly',
       'frames',
       'ack:1:collapsed',
+      'nextFrame',
       'surface:clear',
       'frames',
       'ack:1:cleared',
@@ -118,6 +124,47 @@ describe('MorphController', () => {
       'clearing',
       'cleared',
     ]);
+  });
+
+  it('swaps pictures with the box on a frame: the proxy shows, and goes, only then', async () => {
+    const frameCalls: Array<() => void> = [];
+    const { controller, surface, acks } = setup(
+      { nextFrame: () => new Promise<void>((resolve) => frameCalls.push(resolve)) },
+      { swapFrame: 5000 },
+    );
+    await controller.handle(prepare(1));
+    // Prepared: the proxy is laid out and held, nothing painted yet.
+    expect(surface.reveal).not.toHaveBeenCalled();
+    const revealed = controller.handle(reveal(1));
+    await vi.waitFor(() => expect(frameCalls).toHaveLength(1));
+    expect(surface.reveal).not.toHaveBeenCalled();
+    // The frame comes: the proxy shows in it (the box stops painting in its
+    // own next frame), then the ack once that frame is on screen.
+    frameCalls[0]!();
+    expect(await revealed).toBe('done');
+    expect(surface.reveal).toHaveBeenCalledTimes(1);
+    await controller.handle(expand(1));
+    await controller.handle(collapse(1));
+    const cleared = controller.handle(clear(1));
+    await vi.waitFor(() => expect(frameCalls).toHaveLength(2));
+    expect(surface.clear).not.toHaveBeenCalled();
+    frameCalls[1]!();
+    expect(await cleared).toBe('done');
+    expect(surface.clear).toHaveBeenCalledTimes(1);
+    expect(acks.map(([, stage]) => stage)).toEqual(['prepared', 'revealed', 'expanded', 'collapsed', 'cleared']);
+  });
+
+  it('swaps anyway when the frame never comes', async () => {
+    const { controller, surface, acks, issues } = setup({ nextFrame: never });
+    await controller.handle(prepare(1));
+    expect(await controller.handle(reveal(1))).toBe('done');
+    expect(surface.reveal).toHaveBeenCalledTimes(1);
+    await controller.handle(expand(1));
+    await controller.handle(collapse(1));
+    expect(await controller.handle(clear(1))).toBe('done');
+    expect(surface.clear).toHaveBeenCalledTimes(1);
+    expect(acks.map(([, stage]) => stage)).toEqual(['prepared', 'revealed', 'expanded', 'collapsed', 'cleared']);
+    expect(issues.map((i) => `${i.step}:${i.kind}`)).toEqual(['frames:timeout', 'frames:timeout']);
   });
 
   it('passes the morph flag through (crossfade fallback)', async () => {

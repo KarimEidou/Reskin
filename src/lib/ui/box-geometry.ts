@@ -34,8 +34,9 @@ export const BOX_STATES: readonly BoxVisualState[] = [
 export const ICON_FRACTION = 0.62;
 
 /**
- * The hint the box shows after the first-run welcome collapses into it
- * (pass it to `handoffProps` for that collapse so the pictures match).
+ * The hint the box shows on the first run, also after the welcome
+ * collapses into it — a moment after it took the picture over from the
+ * editor's proxy, which never draws a hint.
  */
 export const FIRST_RUN_HINT = 'Drag a shortcut onto me';
 
@@ -212,15 +213,14 @@ export interface BoxVisualProps {
  * The picture the box shows while it hands over to the editor (after a
  * click or an absorbed drop, until `box:shown`). The editor's morph proxy
  * renders BoxVisual with exactly these props so the two windows show an
- * identical picture at the swap. `hint`: `FIRST_RUN_HINT` when collapsing
- * the first-run welcome (the box shows it once it is back), else null.
+ * identical picture at the swap. It has no hint: what only the box shows
+ * comes a moment after the swap.
  */
 export function handoffProps(
   settings: Pick<Settings, 'boxSize' | 'boxSkin' | 'idleOpacity' | 'compatibilityMode'>,
   items: ReadonlyArray<Pick<ItemInfo, 'icon'>>,
   reducedMotion: boolean,
   metrics: BoxMetrics = metricsFor(settings.boxSize),
-  hint: string | null = null,
 ): BoxVisualProps {
   return {
     metrics,
@@ -232,7 +232,7 @@ export function handoffProps(
     opacity: settings.idleOpacity,
     compat: settings.compatibilityMode,
     reducedMotion,
-    hint: items.length === 0 ? hint : null,
+    hint: null,
     message: null,
   };
 }

@@ -167,7 +167,9 @@
       recoveryChecked = true;
       recoveryPending = session.recoverable();
     }
-    // A hidden box leaves nothing to morph from: no proxy, the panel fades in.
+    // The proxy is held until Reveal: the window may show over the box
+    // meanwhile. A hidden box leaves nothing to morph from: no proxy, the
+    // panel fades in.
     if (cmd.boxRect) await frame?.showProxy(cmd.boxRect, handoffProps(cmd.settings, cmd.items, motion.reduced));
     else frame?.clear();
   }
@@ -248,6 +250,7 @@
   const morph = new MorphController({
     surface: {
       prepare,
+      reveal: () => frame?.reveal(),
       expand: async (m) => {
         const landing = await viewReady();
         const morph = m && !motion.reduced;
@@ -255,6 +258,7 @@
       },
       collapse,
       clear,
+      nextFrame: (ms) => nextFrame({ timeoutMs: ms }),
       frames: (ms) => doubleRaf({ timeoutMs: ms }),
     },
     ack: (sid, stage) => commands.editorAck(sid, stage),

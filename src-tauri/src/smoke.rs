@@ -10,8 +10,11 @@
 //!    CI runner reports reduced motion, which alone only ever runs the
 //!    crossfade), then the crossfade. Each round trip must take the path
 //!    it forced, and the box region must never look like the bare desktop
-//!    during it (a window hid before an identical picture covered it).
-//!    All-black captures are inconclusive: only the paths are checked then.
+//!    during it (a window hid before an identical picture covered it), and
+//!    look like the box wherever the box's picture shows — painted once:
+//!    the box and the editor's proxy both painted, one over the other,
+//!    look darker (`HANDOFF_FRAMES`). All-black captures are inconclusive:
+//!    only the paths are checked then.
 //! 4. A real open → export → apply → restore cycle on a temp `.lnk`
 //!    fixture, driven through the editor page (`EditorCmd::SmokeCycle`),
 //!    verified independently here.
@@ -52,10 +55,30 @@ const HIDDEN_SETTLE: Duration = Duration::from_millis(2000);
 const SAME: f64 = 14.0;
 /// Min mean colour difference between the box and the bare desktop.
 const DISTINCT: f64 = 4.0;
-/// Every probe of one open → close round trip (`probe` calls in
-/// windows/morph.rs, then after the close); a missing one fails the run
-/// rather than passing on fewer frames.
-const HANDOFF_FRAMES: [&str; 4] = ["2-revealed", "3-expanded", "5-collapsed", "9-after-close"];
+/// Every probe of one open → close round trip, in order (`probe` calls in
+/// windows/morph.rs, then after the close), and whether it must show the
+/// box's picture — the box or the editor's identical proxy, painted once:
+/// both painted over each other (doubled translucency) differ from it —
+/// rather than the panel. A missing probe fails the run rather than
+/// passing on fewer frames.
+///
+/// * `1-swapped`: the open's swap confirmed by both pages (the proxy
+///   painted, the box painting nothing), the box not hidden yet.
+/// * `2-revealed`: the box hidden.
+/// * `3-expanded`: the panel.
+/// * `5-collapsed`: the box shown under the proxy it holds the picture of
+///   (after a fade out: the box alone), before the swap.
+/// * `6-cleared`: the close's swap confirmed by both pages (the box
+///   painted, the editor painting nothing), the editor not hidden yet.
+/// * `9-after-close`: the editor hidden.
+const HANDOFF_FRAMES: [(&str, bool); 6] = [
+    ("1-swapped", true),
+    ("2-revealed", true),
+    ("3-expanded", false),
+    ("5-collapsed", true),
+    ("6-cleared", true),
+    ("9-after-close", true),
+];
 
 /// A handoff path the smoke test forces for one captured round trip.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -394,27 +417,25 @@ fn check_paths(path: HandoffPath, taken: &[(Handoff, bool)]) -> Result<String, S
 }
 
 /// The handoff invariant on the captured frames: never the bare desktop,
-/// and the box (or its identical proxy) wherever it should show.
+/// and the box's picture, painted once, wherever it should show.
 fn judge_frames(frames: &[(String, Rgba)], with_box: &Rgba, bare: &Rgba) -> Result<String, String> {
     let captured: Vec<&str> = frames.iter().map(|(name, _)| name.as_str()).collect();
-    if captured != HANDOFF_FRAMES {
+    let expected: Vec<&str> = HANDOFF_FRAMES.iter().map(|(name, _)| *name).collect();
+    if captured != expected {
         return Err(format!(
-            "captured frames {captured:?}, expected {HANDOFF_FRAMES:?}"
+            "captured frames {captured:?}, expected {expected:?}"
         ));
     }
     let distinct = capture::diff(with_box, bare);
     let mut report = Vec::new();
-    for (name, img) in frames {
+    for ((name, img), (_, box_picture)) in frames.iter().zip(HANDOFF_FRAMES) {
         let to_bare = capture::diff(img, bare);
         let to_box = capture::diff(img, with_box);
         report.push(format!("{name}: Δbare={to_bare:.1} Δbox={to_box:.1}"));
         if to_bare < DISTINCT.min(distinct / 2.0) {
             return Err(format!("empty frame at {name} ({})", report.join("; ")));
         }
-        // Frames where the box (or its identical proxy) should be showing.
-        if (name.contains("revealed") || name.contains("collapsed") || name.contains("after-close"))
-            && to_box > SAME
-        {
+        if box_picture && to_box > SAME {
             return Err(format!(
                 "frame {name} differs from the box ({})",
                 report.join("; ")
@@ -596,29 +617,46 @@ mod tests {
         let boxed = solid([90, 70, 200]);
         let bare = solid([20, 40, 60]);
         let panel = solid([200, 200, 210]);
-        let frames = |pictures: [&Rgba; 4]| -> Vec<(String, Rgba)> {
+        // The box's translucent picture painted twice, one over the other:
+        // darker than the box, still far from the desktop.
+        let doubled = solid([70, 60, 160]);
+        let frames = |pictures: [&Rgba; 6]| -> Vec<(String, Rgba)> {
             HANDOFF_FRAMES
                 .iter()
                 .zip(pictures)
-                .map(|(name, img)| (name.to_string(), img.clone()))
+                .map(|((name, _), img)| (name.to_string(), img.clone()))
                 .collect()
         };
-        assert!(judge_frames(&frames([&boxed, &panel, &boxed, &boxed]), &boxed, &bare).is_ok());
+        let fine = [&boxed, &boxed, &panel, &boxed, &boxed, &boxed];
+        assert!(judge_frames(&frames(fine), &boxed, &bare).is_ok());
         // The desktop showed through: a window hid too early.
-        let err =
-            judge_frames(&frames([&boxed, &bare, &boxed, &boxed]), &boxed, &bare).unwrap_err();
+        let mut empty = fine;
+        empty[2] = &bare;
+        let err = judge_frames(&frames(empty), &boxed, &bare).unwrap_err();
         assert!(err.starts_with("empty frame at 3-expanded"), "{err}");
         // Another picture where the box should be.
-        let err =
-            judge_frames(&frames([&panel, &panel, &boxed, &boxed]), &boxed, &bare).unwrap_err();
+        let mut other = fine;
+        other[1] = &panel;
+        let err = judge_frames(&frames(other), &boxed, &bare).unwrap_err();
         assert!(
             err.starts_with("frame 2-revealed differs from the box"),
             "{err}"
         );
+        // Both windows painted the box's picture: on open once the proxy is
+        // on screen over the box, on close once the box is under the proxy.
+        for (at, name) in [(0, "1-swapped"), (3, "5-collapsed"), (4, "6-cleared")] {
+            let mut twice = fine;
+            twice[at] = &doubled;
+            let err = judge_frames(&frames(twice), &boxed, &bare).unwrap_err();
+            assert!(
+                err.starts_with(&format!("frame {name} differs from the box")),
+                "{err}"
+            );
+        }
         // A missing probe fails rather than passing on fewer frames.
-        let mut three = frames([&boxed, &panel, &boxed, &boxed]);
-        three.remove(1);
-        let err = judge_frames(&three, &boxed, &bare).unwrap_err();
+        let mut fewer = frames(fine);
+        fewer.remove(1);
+        let err = judge_frames(&fewer, &boxed, &bare).unwrap_err();
         assert!(err.starts_with("captured frames"), "{err}");
     }
 }

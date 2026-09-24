@@ -79,18 +79,23 @@ shortcut onto me".
 **Open (handoff protocol).** Neither window ever resizes while visible.
 1. Rust computes `geom::place_editor(box_rect, work_area, size)` (editor contains the box, grows toward screen centre, clamped to
    the work area) and moves the hidden editor there.
-2. Rust sends `Prepare{box_rect_css, items, settings}` via the mailbox. The editor draws a box proxy with the same
-   `BoxVisual.svelte` the box uses, waits for `img.decode()` and a double rAF, then acks `Prepared`.
-3. Rust shows the editor topmost and sends `Reveal`. Editor acks `Revealed` after a double rAF; Rust hides the box, sends `Expand`.
+2. Rust shows the (transparent) editor topmost and sends `Prepare{box_rect_css, items, settings}` via the mailbox. The editor
+   lays out a box proxy with the same `BoxVisual.svelte` the box uses — held, painting nothing yet — waits for `img.decode()`
+   and a double rAF, then acks `Prepared`.
+3. The swap: Rust sends `Reveal` to the editor and `box:conceal` to the box at once; on their next frame the editor paints the
+   proxy and the box stops painting. Editor acks `Revealed`, the box `box_painted`, after a double rAF; Rust hides the box,
+   sends `Expand`.
 4. The proxy FLIP-morphs into the panel (transform/opacity/clip-path, ~480 ms spring); panels stagger in; the icon settles onto
    the canvas. Rust then focuses the editor and makes it non-topmost.
 5. If `Prepared` doesn't arrive within 400 ms → simple crossfade fallback (also a user setting).
 
 **Collapse** (reverse): Rust makes the editor topmost; the panel collapses into a proxy at the box's home (or nearest in-window
-point if the editor moved); editor acks `Collapsed`; Rust shows the box; editor clears to transparent and acks `Cleared`;
+point if the editor moved); editor acks `Collapsed`; Rust shows the box under it, holding the proxy's picture (painting
+nothing); the swap: the editor clears to transparent (`Clear`, acks `Cleared`) as the box paints the picture (`box:reveal`);
 Rust hides the editor; if the box isn't home the animator glides it home.
 
-**Invariant:** a window hides only when its content is transparent, and shows only on top of an identical picture.
+**Invariant:** a window hides only when its content is transparent, and shows only on top of an identical picture. Both windows
+are translucent, so exactly one of them paints the box's picture at every moment.
 
 **Save & Apply:** Apply button morphs into a ring; Rust builds the `.ico`, journals, checks access → editor collapses → if the
 desktop icon is visible the box flies an arc to it carrying the new icon → at landing Rust **commits** and calls `SHChangeNotify`

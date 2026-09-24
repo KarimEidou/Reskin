@@ -5,7 +5,9 @@ import type { CollapseThen } from "./CollapseThen";
  * `box:collapse`: sent to the still hidden box once the editor has
  * collapsed onto its proxy. The box takes on the proxy's final picture
  * (the empty box after `Hide`, `icon` after `Fly` / `Celebrate`) so that it
- * is shown under an identical picture, then confirms with `box_painted`.
+ * is shown under an identical picture, then confirms with `box_painted`
+ * once it is shown and that picture is on screen — `held`, without
+ * painting it.
  */
 export type BoxCollapse = { 
 /**
@@ -15,4 +17,11 @@ session: number, then: CollapseThen,
 /**
  * Data URL of the icon the box carries (as in `EditorCmd::Collapse`).
  */
-icon: string | null, };
+icon: string | null, 
+/**
+ * The editor's proxy shows this picture over the box: the box takes
+ * it without painting it (laid out, its icon decoded) until
+ * `box:reveal` swaps the two. False when nothing covers the box (the
+ * editor faded out): it paints the picture as soon as it is shown.
+ */
+held: boolean, };

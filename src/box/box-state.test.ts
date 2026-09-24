@@ -141,7 +141,9 @@ describe('boxReducer', () => {
   describe('the close handoff (box:collapse, then box:shown)', () => {
     /** The box handed over a dropped icon to the editor (frozen on it). */
     const handedOver = run([{ type: 'drop', count: 2 }, { type: 'inspectDone', icon: 'data:dropped', count: 2 }, { type: 'openRequested' }]);
-    const collapse = (then: CollapseThen, icon: string | null) => boxReducer(handedOver, { type: 'collapse', then, icon });
+    /** Nothing covers the box (the editor faded out): it paints at once. */
+    const collapse = (then: CollapseThen, icon: string | null) =>
+      boxReducer(handedOver, { type: 'collapse', then, icon, held: false });
 
     it("takes over the picture the editor's proxy collapsed onto", () => {
       for (const [then, icon] of [
@@ -153,7 +155,7 @@ describe('boxReducer', () => {
         const s = collapse(then, icon);
         // Exactly what App renders the proxy from (handoffProps of collapseItems).
         const proxy = handoffProps(defaultSettings(), collapseItems(then, icon), false);
-        expect(s).toMatchObject({ name: proxy.state, icon: proxy.icon, count: proxy.count, handoff: true });
+        expect(s).toMatchObject({ name: proxy.state, icon: proxy.icon, count: proxy.count, handoff: true, veiled: false });
         expect(s.epoch).toBe(handedOver.epoch);
       }
       // A plain close never shows the dropped icon (nor the new one).
@@ -189,6 +191,59 @@ describe('boxReducer', () => {
 
     it('a flight without an icon does not bring back an icon that was not handed over', () => {
       expect(boxReducer(handedOver, { type: 'flight', phase: 'depart', icon: null }).icon).toBeNull();
+    });
+  });
+
+  describe("the swaps with the editor's proxy (box:conceal, box:collapse held, box:reveal)", () => {
+    const handedOver = run([{ type: 'drop', count: 1 }, { type: 'inspectDone', icon: 'data:dropped', count: 1 }, { type: 'openRequested' }]);
+    /** Under the editor's proxy: the box holds the picture. */
+    const held = (then: CollapseThen, icon: string | null) => boxReducer(handedOver, { type: 'collapse', then, icon, held: true });
+
+    it('box:conceal stops painting the handoff picture, which the proxy now paints', () => {
+      const concealed = boxReducer(handedOver, { type: 'conceal' });
+      expect(concealed).toEqual({ ...handedOver, veiled: true });
+      // Hidden next, it stays blank until it is told what to show: shown
+      // again under the proxy (or not), it never flashes a picture first.
+      const hidden = boxReducer(concealed, { type: 'hidden' });
+      expect(hidden).toEqual({ ...initialBoxState, veiled: true, epoch: concealed.epoch });
+      expect(boxReducer(hidden, { type: 'collapse', then: 'hide', icon: null, held: true }).veiled).toBe(true);
+      expect(boxReducer(hidden, { type: 'collapse', then: 'hide', icon: null, held: false }).veiled).toBe(false);
+      // Shown at rest (the editor closed while the box had to stay hidden).
+      expect(boxReducer(hidden, { type: 'shown' })).toEqual({ ...initialBoxState, epoch: concealed.epoch });
+    });
+
+    it('a held picture is taken over without painting it until box:reveal', () => {
+      const s = held('hide', null);
+      expect(s).toMatchObject({ name: 'idle', icon: null, count: 0, handoff: true, veiled: true });
+      // Shown under the proxy: it keeps holding it, frozen.
+      const shown = boxReducer(s, { type: 'shown' });
+      expect(shown).toBe(s);
+      expect(run([{ type: 'pointerEnter' }, { type: 'dragEnter', count: 1 }], shown)).toMatchObject({ name: 'idle', veiled: true });
+      // The swap: it paints the very picture the proxy showed, and rests on it.
+      const revealed = boxReducer(shown, { type: 'reveal' });
+      expect(revealed).toMatchObject({ name: 'idle', icon: null, count: 0, handoff: false, collapsed: null, veiled: false });
+      expect(boxReducer(revealed, { type: 'pointerEnter' }).name).toBe('hover');
+      // A second reveal changes nothing.
+      expect(boxReducer(revealed, { type: 'reveal' })).toBe(revealed);
+    });
+
+    it('after an apply the revealed icon stays frozen until the flight carries it on', () => {
+      const revealed = run([{ type: 'shown' }, { type: 'reveal' }], held('fly', 'data:new'));
+      expect(revealed).toMatchObject({ name: 'idle', icon: 'data:new', handoff: true, collapsed: 'fly', veiled: false });
+      expect(boxReducer(revealed, { type: 'flight', phase: 'depart', icon: null })).toMatchObject({
+        name: 'flying',
+        icon: 'data:new',
+        handoff: false,
+      });
+    });
+
+    it('whatever shows the box on its own again paints it', () => {
+      const s = held('celebrate', 'data:new');
+      expect(boxReducer(s, { type: 'flight', phase: 'celebrate', icon: null })).toMatchObject({ name: 'celebrate', veiled: false });
+      expect(boxReducer(s, { type: 'error', message: 'no' }).veiled).toBe(false);
+      expect(boxReducer(s, { type: 'openRequested', icon: null, count: 0 }).veiled).toBe(false);
+      // A reveal Rust never sent: the unfreeze gives the box back its picture.
+      expect(boxReducer(s, { type: 'unfreeze' })).toEqual({ ...initialBoxState, epoch: s.epoch });
     });
   });
 

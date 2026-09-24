@@ -6,6 +6,14 @@
   after the page booted) and in the box's tooltip and description for as
   long as it doesn't work. The root exposes `data-state` (logical state)
   and `data-ready` (booted and listening) for tests.
+
+  In a handoff the editor's proxy draws the box's picture over it, and the
+  two windows swap it (docs/ARCHITECTURE.md, "Morph / handoff protocol"):
+  the box stops painting on `box:conceal`, takes the picture it comes back
+  to held on `box:collapse`, and paints it on `box:reveal` — each change on
+  its next frame, confirmed with `box_painted`. What only the box shows
+  (the hint, the Undo chip) is never part of the swap: it comes back a
+  moment later.
 -->
 <script lang="ts">
   import { onMount, tick, untrack } from 'svelte';
@@ -14,7 +22,7 @@
   import { commands } from '$lib/ipc/commands';
   import { on } from '$lib/ipc/events';
   import type { BootInfo, ItemInfo } from '$lib/ipc/types';
-  import { doubleRaf, frames } from '$lib/motion/raf';
+  import { doubleRaf, frames, nextFrame } from '$lib/motion/raf';
   import { dur, motion } from '$lib/motion/speed.svelte';
   import { settings } from '$lib/settings/store.svelte';
   import { system } from '$lib/settings/system.svelte';
@@ -48,11 +56,20 @@
   /** Unfreeze a handoff that Rust never followed up on. */
   const HANDOFF_TIMEOUT_MS = 8000;
   /**
-   * A picture taken on for a handoff is confirmed once its icon is decoded
-   * and two frames passed with the box on screen (a hidden window paints
-   * nothing); should that take longer, it is confirmed anyway.
+   * A picture taken on for a handoff, or a swap with the editor's proxy, is
+   * confirmed once its icon is decoded and two frames passed with the box
+   * on screen (a hidden window paints nothing); should that take longer, it
+   * is confirmed anyway.
    */
   const PAINT_TIMEOUT_MS = 250;
+  /**
+   * What only the box shows — the hint, the Undo chip — is not in the
+   * editor's proxy, so it never shows in a handoff: it goes as one starts
+   * and comes back, fading in, this long after the box shows its picture on
+   * its own again. The frame in which the box takes the picture over from
+   * the proxy is exactly the proxy's.
+   */
+  const DECORATION_DELAY_MS = 250;
 
   let info = $state.raw<BootInfo | null>(null);
   let box = $state.raw(initialBoxState);
@@ -87,9 +104,14 @@
   const visualState: BoxVisualState = $derived(
     box.name === 'absorbing' && gulpEpoch !== box.epoch ? 'armed' : box.name,
   );
+  /** The box shows its picture on its own: no handoff, painting it. */
+  const onItsOwn = $derived(!box.handoff && !box.veiled);
+  /** `onItsOwn` has held for DECORATION_DELAY_MS. */
+  let settledOnItsOwn = $state(true);
+  const decorated = $derived(onItsOwn && settledOnItsOwn);
   // The hotkey note waits for the first-run hint, and goes once the hotkey works.
   const note = $derived(showHint ? FIRST_RUN_HINT : system.hotkeyError ? hotkeyNote : null);
-  const hint = $derived((box.name === 'idle' || box.name === 'hover') && !box.handoff ? note : null);
+  const hint = $derived((box.name === 'idle' || box.name === 'hover') && decorated ? note : null);
   /** The tooltip and accessible description while the saved hotkey doesn't work (Windows is asked again on focus). */
   const problem = $derived(system.hotkeyError ? hotkeyProblem(system.hotkeyError) : null);
   const label = $derived(
@@ -278,21 +300,47 @@
   }
 
   /**
-   * Tells Rust the picture taken on for a handoff is on screen: the editor
-   * may show its proxy over it (open) or let its proxy go (close).
+   * Tells Rust the picture taken on for a handoff (or a swap with the
+   * editor's proxy) is on screen: the two may swap now (open: the editor
+   * paints its proxy over the box; close: the box takes it over from the
+   * proxy) — or, once swapped, the window that paints nothing may hide.
    */
-  async function confirmPainted({ session, decoded }: { session: number; decoded: Promise<void> }): Promise<void> {
-    const deadline = performance.now() + PAINT_TIMEOUT_MS;
+  async function confirmPainted(
+    { session, decoded }: { session: number; decoded: Promise<void> },
+    deadline = performance.now() + PAINT_TIMEOUT_MS,
+  ): Promise<void> {
     let timer: ReturnType<typeof setTimeout> | undefined;
     const ready = await Promise.race([
       decoded.then(() => true),
-      new Promise<false>((r) => (timer = setTimeout(() => r(false), PAINT_TIMEOUT_MS))),
+      new Promise<false>((r) => (timer = setTimeout(() => r(false), Math.max(0, deadline - performance.now())))),
     ]);
     clearTimeout(timer);
     const { timedOut } = await frames(2, { timeoutMs: Math.max(0, deadline - performance.now()) });
     if (!ready || timedOut) console.warn(`[box] the picture was not on screen within ${PAINT_TIMEOUT_MS} ms; confirming it anyway`);
     await commands.boxPainted(session).catch((e: unknown) => console.error('[box] box_painted failed', e));
   }
+
+  /**
+   * The box's half of a swap with the editor's proxy (`box:conceal`,
+   * `box:reveal`): the change is made on the box's next frame — the editor
+   * makes its own on its next frame, so both land in one composed frame —
+   * and confirmed once it is on screen.
+   */
+  async function swap(session: number, event: Extract<BoxEvent, { type: 'conceal' | 'reveal' }>): Promise<void> {
+    const deadline = performance.now() + PAINT_TIMEOUT_MS;
+    await nextFrame({ timeoutMs: PAINT_TIMEOUT_MS });
+    send(event);
+    await confirmPainted({ session, decoded: Promise.resolve() }, deadline);
+  }
+
+  $effect(() => {
+    if (!onItsOwn) {
+      settledOnItsOwn = false;
+      return;
+    }
+    const t = setTimeout(() => (settledOnItsOwn = true), DECORATION_DELAY_MS);
+    return () => clearTimeout(t);
+  });
 
   $effect(() => {
     if (hint === null || hintClock === 0) return;
@@ -365,10 +413,12 @@
           send({ type: 'openRequested', icon: h.icon, count: h.count });
           void confirmPainted({ session: h.session, decoded: iconDecoded() });
         }),
+        on('box:conceal', (c) => void swap(c.session, { type: 'conceal' })),
         on('box:collapse', (c) => {
-          send({ type: 'collapse', then: c.then, icon: c.icon });
+          send({ type: 'collapse', then: c.then, icon: c.icon, held: c.held });
           collapsePicture = { session: c.session, decoded: iconDecoded() };
         }),
+        on('box:reveal', (r) => void swap(r.session, { type: 'reveal' })),
         on('box:shown', () => {
           send({ type: 'shown' });
           if (showHint) hintClock += 1;
@@ -424,6 +474,7 @@
 <main
   class="box-page"
   class:handoff={box.handoff}
+  class:veiled={box.veiled}
   data-state={box.name}
   data-ready={ready ? 'true' : 'false'}
   data-skin={s.boxSkin}
@@ -466,7 +517,7 @@
     {/if}
   </div>
   <div class="flyers" bind:this={flyLayer}></div>
-  {#if undoId}
+  {#if undoId && decorated}
     <button class="undo" type="button" onclick={undo}>Undo</button>
   {/if}
   {#if problem}
@@ -495,11 +546,27 @@
   }
 
   /* The handoff picture must be on screen at once: the editor's proxy
-     (handoffProps) renders its final state and is revealed over the box
+     (handoffProps) renders its final state and takes the picture over
      within a few frames, so a still-running hover → idle transition would
-     show two different boxes. */
+     make the two differ at the swap. */
   .handoff :global(*) {
     transition: none !important;
+  }
+
+  /* The editor's proxy paints the picture (see box-state.ts). */
+  .veiled {
+    opacity: 0;
+  }
+
+  /* What only the box shows comes back fading in (DECORATION_DELAY_MS);
+     the Undo chip has an entrance of its own. */
+  .box-page :global(.hint:not(.message)) {
+    animation: hint-in var(--fade-3) var(--ease-decelerate) both;
+  }
+  @keyframes hint-in {
+    from {
+      opacity: 0;
+    }
   }
 
   .hit {

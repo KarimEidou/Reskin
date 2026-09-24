@@ -6,6 +6,13 @@ All notable changes to Reskin are documented here. The format follows
 
 ## [Unreleased]
 
+### Fixed
+
+- Opening and closing the editor no longer shows the box twice for a
+  moment — darker glass, the box's first-run hint under the editor's
+  picture of the box: the two windows now hand the box's picture over in a
+  single frame. The hint (and the Undo chip) fades back in just after.
+
 ## [1.0.0] - 2026-09-24
 
 The first release: a small glass box that floats on your Windows desktop.

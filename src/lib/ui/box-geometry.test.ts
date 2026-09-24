@@ -2,7 +2,6 @@ import { describe, expect, it } from 'vitest';
 import { defaultSettings } from '$lib/settings/defaults';
 import {
   collapseItems,
-  FIRST_RUN_HINT,
   handoffProps,
   errorLifetime,
   ERROR_HOLD_MS,
@@ -120,11 +119,9 @@ describe('box geometry', () => {
       hint: null,
       message: null,
     });
-    // A click handoff (start view) shows the empty box; the first-run
-    // welcome collapses onto the hint the box then shows.
+    // A click handoff (start view) shows the empty box — without a hint,
+    // which only the box shows, a moment after the swap.
     expect(handoffProps(settings, [], false)).toMatchObject({ icon: null, count: 0, hint: null });
-    expect(handoffProps(settings, [], false, undefined, FIRST_RUN_HINT).hint).toBe(FIRST_RUN_HINT);
-    expect(handoffProps(settings, items, false, undefined, FIRST_RUN_HINT).hint).toBeNull();
   });
 
   it('keeps the error look for as long as its message takes to read', () => {

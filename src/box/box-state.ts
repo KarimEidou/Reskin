@@ -15,9 +15,14 @@
 //   * → idle (handoff)           box:handoff: the editor opens over the box
 //                                (an open from the tray, the menu, Explorer…
 //                                too): the picture its proxy draws
+//   handoff → veiled             box:conceal: the editor's proxy took over
+//                                the picture; the window is hidden next
 //   * → idle (handoff)           box:collapse: the editor collapsed onto its
 //                                proxy; the hidden box takes that picture
 //                                over (see collapseItems) before it is shown
+//                                — held (veiled) under the proxy
+//   veiled → idle                box:reveal: the box takes the picture over
+//                                from the proxy
 //   * → idle                     box:shown (the editor closed) keeps the
 //                                picture taken over from the editor, else
 //                                resets; the window was hidden, or a handoff
@@ -29,6 +34,13 @@
 // (see handoffProps); after box:collapse, the one the proxy ended on. It
 // ignores pointer/drag input until it is shown again (a plain close) or,
 // after an apply, until its flight takes over (depart / celebrate).
+//
+// "veiled": the box paints nothing, because the editor's proxy paints its
+// picture over it (both windows are translucent: never both at once). Set
+// by box:conceal (the box stays blank while hidden, until it is told what
+// to show) and by a held box:collapse; box:reveal ends it, as do a new
+// handoff picture, box:shown without a collapse picture, and a flight or an
+// error (the box shows on its own again).
 
 import type { CollapseThen, FlightPhase, RestoreReport } from '$lib/ipc/types';
 import { collapseItems, type BoxVisualState } from '$lib/ui/box-geometry';
@@ -51,6 +63,8 @@ export interface BoxState {
   handoff: boolean;
   /** The picture was taken over from the editor's collapse (`box:collapse`). */
   collapsed: CollapseThen | null;
+  /** Paints nothing: the editor's proxy paints the picture (see above). */
+  veiled: boolean;
   /** Bumped on every entry into a one-shot state (restarts its timer). */
   epoch: number;
 }
@@ -67,7 +81,9 @@ export type BoxEvent =
   | { type: 'openFailed'; message?: string }
   | { type: 'flight'; phase: FlightPhase; icon?: string | null; message?: string | null }
   | { type: 'progress'; done: number; total: number }
-  | { type: 'collapse'; then: CollapseThen; icon: string | null }
+  | { type: 'conceal' }
+  | { type: 'collapse'; then: CollapseThen; icon: string | null; held: boolean }
+  | { type: 'reveal' }
   | { type: 'shown' }
   | { type: 'hidden' }
   | { type: 'unfreeze' }
@@ -84,10 +100,18 @@ export const initialBoxState: BoxState = Object.freeze({
   message: null,
   handoff: false,
   collapsed: null,
+  veiled: false,
   epoch: 0,
 }) as BoxState;
 
 const rest = (s: BoxState): BoxStateName => (s.hovering ? 'hover' : 'idle');
+
+/**
+ * The box shows the picture it took over from the editor's collapse: after
+ * a plain close it rests on it; after an apply it holds the new icon
+ * (frozen) until its flight carries it on.
+ */
+const showCollapsed = (s: BoxState): BoxState => (s.collapsed === 'hide' ? { ...s, handoff: false, collapsed: null } : s);
 
 /** The icon taken over from the editor's collapse, which a flight carries on. */
 const carried = (s: BoxState): string | null => (s.collapsed ? s.icon : null);
@@ -107,6 +131,7 @@ function toError(s: BoxState, message: string | null | undefined): BoxState {
     count: 0,
     handoff: false,
     collapsed: null,
+    veiled: false,
     progress: null,
     epoch: s.epoch + 1,
   };
@@ -148,6 +173,7 @@ export function boxReducer(s: BoxState, e: BoxEvent): BoxState {
         name: 'idle',
         handoff: true,
         collapsed: null,
+        veiled: false,
         icon: e.icon !== undefined ? e.icon : s.icon,
         count: e.count ?? s.count,
         progress: null,
@@ -168,12 +194,21 @@ export function boxReducer(s: BoxState, e: BoxEvent): BoxState {
             count: 0,
             handoff: false,
             collapsed: null,
+            veiled: false,
             progress: null,
           };
         case 'return':
-          return { ...s, name: 'flying', icon: null, count: 0, handoff: false, collapsed: null };
+          return { ...s, name: 'flying', icon: null, count: 0, handoff: false, collapsed: null, veiled: false };
         case 'land':
-          return { ...s, name: 'celebrate', icon: null, handoff: false, collapsed: null, epoch: s.epoch + 1 };
+          return {
+            ...s,
+            name: 'celebrate',
+            icon: null,
+            handoff: false,
+            collapsed: null,
+            veiled: false,
+            epoch: s.epoch + 1,
+          };
         case 'celebrate':
           return {
             ...s,
@@ -182,11 +217,21 @@ export function boxReducer(s: BoxState, e: BoxEvent): BoxState {
             count: 0,
             handoff: false,
             collapsed: null,
+            veiled: false,
             progress: null,
             epoch: s.epoch + 1,
           };
         case 'home':
-          return { ...s, name: rest(s), icon: null, count: 0, handoff: false, collapsed: null, progress: null };
+          return {
+            ...s,
+            name: rest(s),
+            icon: null,
+            count: 0,
+            handoff: false,
+            collapsed: null,
+            veiled: false,
+            progress: null,
+          };
         case 'error':
           return toError(s, e.message);
       }
@@ -204,26 +249,36 @@ export function boxReducer(s: BoxState, e: BoxEvent): BoxState {
       }
       return s.name === 'busy' ? { ...s, name: rest(s), progress: null } : { ...s, progress: null };
 
+    case 'conceal':
+      return { ...s, handoff: true, veiled: true };
+
     case 'collapse': {
       const items = collapseItems(e.then, e.icon);
       return {
         ...initialBoxState,
         handoff: true,
         collapsed: e.then,
+        veiled: e.held,
         icon: items[0]?.icon ?? null,
         count: items.length,
         epoch: s.epoch,
       };
     }
 
+    case 'reveal':
+      if (!s.veiled) return s;
+      return showCollapsed({ ...s, veiled: false });
+
     case 'shown':
-      // After a plain close the box rests on the picture it took over; after
-      // an apply it holds the new icon (frozen) until its flight carries it on.
-      if (s.collapsed === 'hide') return { ...s, handoff: false, collapsed: null };
-      if (s.collapsed) return s;
+      // Held under the editor's proxy, it waits for box:reveal.
+      if (s.collapsed && s.veiled) return s;
+      if (s.collapsed) return showCollapsed(s);
       return { ...initialBoxState, epoch: s.epoch };
 
     case 'hidden':
+      // A concealed box stays blank until it is told what to show.
+      return { ...initialBoxState, veiled: s.veiled, epoch: s.epoch };
+
     case 'unfreeze':
       return { ...initialBoxState, epoch: s.epoch };
 

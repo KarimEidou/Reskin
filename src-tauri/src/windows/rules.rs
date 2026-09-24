@@ -23,6 +23,41 @@ pub fn hands_over(phase: Phase) -> bool {
     phase == Phase::Open
 }
 
+/// An open shows the editor before it prepares when its window is
+/// transparent: it paints nothing until `Reveal` (its proxy is held), and a
+/// window that was hidden runs no frames for a moment after it shows — so
+/// by the time it answers `prepared` (after a double rAF) it draws, ready
+/// to swap pictures with the box in one frame. An opaque editor
+/// (compatibility mode) would cover the box with an empty window
+/// meanwhile: it shows once prepared.
+pub fn shows_while_preparing(compatibility_mode: bool) -> bool {
+    !compatibility_mode
+}
+
+/// How the box comes back as the editor closes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BoxReturn {
+    /// It stays hidden (the user or a fullscreen app hides it).
+    Hidden,
+    /// Under the editor's proxy (the close morphed into it): it holds the
+    /// proxy's picture, painting nothing, until the two swap
+    /// (`box:reveal` with `Clear`).
+    Held,
+    /// Nothing covers it (the editor faded out): it paints its picture as
+    /// soon as it is shown.
+    Painted,
+}
+
+/// How the box comes back from a close that shows it (`show_box`) and that
+/// morphs into the proxy or not (`morphs`, only when the box shows).
+pub fn box_return(show_box: bool, morphs: bool) -> BoxReturn {
+    match (show_box, morphs) {
+        (false, _) => BoxReturn::Hidden,
+        (true, true) => BoxReturn::Held,
+        (true, false) => BoxReturn::Painted,
+    }
+}
+
 /// The box may be on screen outside a handoff: the user has not hidden it
 /// and no fullscreen app runs.
 pub fn box_allowed(hidden_by_user: bool, hidden_for_fullscreen: bool) -> bool {
@@ -100,6 +135,26 @@ mod tests {
         // Nor may items reach an opening editor before its Prepare.
         assert!(!hands_over(Phase::Opening));
         assert!(!hands_over(Phase::Closed));
+    }
+
+    #[test]
+    fn only_a_transparent_editor_shows_before_it_prepares() {
+        // Transparent, it paints nothing until Reveal and is drawing by then.
+        assert!(shows_while_preparing(false));
+        // Opaque, it would hide the box behind an empty window meanwhile.
+        assert!(!shows_while_preparing(true));
+    }
+
+    #[test]
+    fn the_box_holds_its_picture_only_under_the_proxy() {
+        // Collapsed onto the proxy: exactly one of the two windows paints
+        // the picture, so the box holds it until the swap.
+        assert_eq!(box_return(true, true), BoxReturn::Held);
+        // Faded out, the editor paints nothing: the box paints at once.
+        assert_eq!(box_return(true, false), BoxReturn::Painted);
+        // A box that stays hidden takes no picture.
+        assert_eq!(box_return(false, false), BoxReturn::Hidden);
+        assert_eq!(box_return(false, true), BoxReturn::Hidden);
     }
 
     #[test]

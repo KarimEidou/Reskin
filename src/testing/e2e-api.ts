@@ -103,6 +103,11 @@ export interface SimulateOpenResult {
    * the box was hidden).
    */
   boxPainted: boolean | null;
+  /**
+   * Box page: the box confirmed its half of the swap (`box:conceal`: it
+   * paints nothing) within Rust's 300 ms; null when no box took part.
+   */
+  boxConcealed: boolean | null;
   /** Stages whose ack never came (the FSM went on without them). */
   timedOut: AckStage[];
 }
@@ -119,6 +124,8 @@ export interface SimulateCloseOptions {
 export interface SimulateCloseResult {
   session: number;
   timedOut: AckStage[];
+  /** Box page: how the box came back (see simulateBoxReturn); null on the editor page. */
+  box: SimulateBoxReturnResult | null;
 }
 
 export interface SimulateBoxReturnResult {
@@ -126,6 +133,11 @@ export interface SimulateBoxReturnResult {
   session: number;
   /** `box_painted` came within Rust's 300 ms. */
   painted: boolean;
+  /**
+   * Held: the box confirmed its half of the swap (`box:reveal`: it paints
+   * the picture) within Rust's 300 ms; null when it was not held.
+   */
+  revealed: boolean | null;
 }
 
 export interface E2EEditorState {
@@ -171,21 +183,29 @@ export interface E2EApi {
   /**
    * Runs Rust's open handoff: (box page, box shown: `box:handoff` with the
    * first item's icon and count) Prepare → prepared (400 ms; and the box's
-   * `box_painted`, 300 ms) → Reveal → revealed → Expand → expanded. After a
-   * late `prepared`, Reveal and Expand{morph: false} follow at once (no wait
-   * for `revealed`).
+   * `box_painted`, 300 ms) → the swap: Reveal (box page: + `box:conceal`) →
+   * revealed (+ the box's `box_painted`) → Expand → expanded. After a late
+   * `prepared`, Expand{morph: false} follows Reveal without waiting for
+   * `revealed` (only for the box, if any, to paint nothing).
    */
   simulateOpen(
     items: ItemInfo[] | string[],
     view?: EditorView,
     opts?: SimulateOpenOptions,
   ): Promise<SimulateOpenResult>;
-  /** Runs Rust's close handoff: Collapse → collapsed → Clear → cleared. */
+  /**
+   * Runs Rust's close handoff: Collapse → collapsed → (box page: the box
+   * comes back, see simulateBoxReturn, held when the collapse morphs) → the
+   * swap: Clear (+ held: `box:reveal`) → cleared (+ the box's
+   * `box_painted`).
+   */
   simulateClose(then?: CollapseThen, opts?: SimulateCloseOptions): Promise<SimulateCloseResult>;
   /**
-   * Box page: the box's part of Rust's close handoff (morph.rs close_inner,
-   * after `collapsed`): `box:collapse` to the hidden box, then show it
-   * (`box:shown`) and wait up to 300 ms for its `box_painted`.
+   * Box page: the box's part of Rust's close handoff alone, after a morph
+   * (morph.rs close_inner, after `collapsed`): `box:collapse` to the hidden
+   * box, held under the editor's proxy, then show it (`box:shown`) and wait
+   * up to 300 ms for its `box_painted`; then `box:reveal` and up to 300 ms
+   * for its `box_painted`.
    */
   simulateBoxReturn(then?: CollapseThen, icon?: string | null): Promise<SimulateBoxReturnResult>;
   setHeartbeatMs(ms: number): void;
