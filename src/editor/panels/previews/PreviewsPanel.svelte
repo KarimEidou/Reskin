@@ -13,7 +13,7 @@
   import { getSession } from '../../state/context';
   import { putPixels, snapToDevicePixels, watchDpr } from '../common/canvas';
   import { debounce } from '../common/schedule';
-  import { isCancelled, panelsWorker } from '../worker/client';
+  import { isCancelled } from '../worker/client';
   import { snapshotDoc, snapshotTransfer } from '../worker/snapshot';
   import DesktopPreview from './DesktopPreview.svelte';
   import TaskbarPreview from './TaskbarPreview.svelte';
@@ -54,7 +54,7 @@
     const list = [...sizes];
     rendering = true;
     try {
-      const out = await panelsWorker().request({ op: 'renderSizes', doc: snap, sizes: list }, { channel: 'previews', transfer: snapshotTransfer(snap), priority: 'low' });
+      const out = await session.panels.request({ op: 'renderSizes', doc: snap, sizes: list }, { channel: 'previews', transfer: snapshotTransfer(snap), priority: 'low' });
       rendered = new Map(out.map((r) => [r.size, r.pixels]));
       failed = null;
       rendering = false;
@@ -92,7 +92,7 @@
     return () => {
       stop();
       schedule.cancel();
-      panelsWorker().cancel('previews');
+      session.panels.cancel('previews');
     };
   });
 
@@ -120,7 +120,7 @@
       <ul class="sizes" aria-label="Icon sizes, actual pixels">
         {#each sizes as size (size)}
           <li class="size" data-size={size} class:ready={rendered.has(size)}>
-            <span class="frame" role="img" aria-label="{size} × {size} px" style:width="{Math.max(16, size / dpr)}px" style:height="{size / dpr}px">
+            <span class="slot" role="img" aria-label="{size} × {size} px" style:width="{Math.max(16, size / dpr)}px" style:height="{size / dpr}px">
               <canvas
                 width={size}
                 height={size}
@@ -230,7 +230,7 @@
     align-items: center;
     gap: 3px;
   }
-  .frame {
+  .slot {
     display: grid;
     place-items: end center;
   }

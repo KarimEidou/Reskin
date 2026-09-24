@@ -10,9 +10,10 @@ import { colorOr, hslToRgb, rgbToHsl, type Rgba as Rgba8 } from '../filters/colo
 import { createPixels, type Pixels } from '../filters/types';
 import { rasterizePolygons } from '../geometry/rasterize';
 import { strokePolygons } from '../geometry/shapes';
+import { autoTrim } from '../helpers/trim';
 import { dilate } from '../raster/distance';
 import type { StickerColorRef, StickerDef, StickerPart } from './library';
-import { flattenPath, polygonsToPath } from './path';
+import { flattenPath } from './path';
 
 /** The sticker art box (path units). */
 export const STICKER_BOX = 100;
@@ -141,6 +142,26 @@ export function renderSticker(def: StickerDef, opts: StickerRenderOptions): Pixe
   return out;
 }
 
+export interface StickerStampOptions {
+  /** Size of the sticker's 100-unit box, px. */
+  box: number;
+  /** Main colour (default: the sticker's own). */
+  color?: string;
+  outline?: StickerOutline | null;
+}
+
+/**
+ * The sticker on its own, cropped to its visible pixels: the image the
+ * stamp tool places (centred on the pointer). Null when nothing shows.
+ */
+export function renderStickerStamp(def: StickerDef, opts: StickerStampOptions): Pixels | null {
+  const outline = opts.outline && opts.outline.width > 0 ? opts.outline.width : 0;
+  // Room for art drawn past the 100-unit box and for the outline.
+  const size = Math.min(4096, Math.ceil(opts.box * 1.5 + 2 * outline + 4));
+  const px = renderSticker(def, { size, box: opts.box, color: opts.color, outline: opts.outline });
+  return autoTrim(px)?.pixels ?? null;
+}
+
 /** One drawable element of a sticker preview (SVG, 100 × 100 box). */
 export type StickerSvgElement =
   | { kind: 'fill'; d: string; rule: 'nonzero' | 'evenodd'; color: string; opacity: number }
@@ -164,7 +185,8 @@ export function stickerSvgElements(def: StickerDef, color: string = def.color): 
         if (part.closed) d += 'Z';
         out.push({ kind: 'stroke', d, width: part.width, cap: part.cap ?? 'round', join: part.join ?? 'round', color: c, opacity });
       } else {
-        out.push({ kind: 'fill', d: polygonsToPath(flattenPath(part.d, { tolerance: 0.1 })), rule: part.rule ?? 'nonzero', color: c, opacity });
+        // Sticker paths are SVG path data: drawn as they are (exact, and nothing to flatten).
+        out.push({ kind: 'fill', d: part.d, rule: part.rule ?? 'nonzero', color: c, opacity });
       }
     }
   }

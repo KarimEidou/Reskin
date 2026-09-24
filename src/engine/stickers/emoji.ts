@@ -5,6 +5,7 @@
  * hide the emoji grid gracefully.
  */
 import { createPixels, type Pixels } from '../filters/types';
+import { autoTrim } from '../helpers/trim';
 
 export interface EmojiDef {
   char: string;
@@ -278,4 +279,13 @@ export function renderEmoji(char: string, opts: EmojiRenderOptions): Pixels | nu
   const out = createPixels(size, size);
   out.data.set(img.data);
   return out;
+}
+
+/**
+ * The emoji on its own, its ink `box` px across, cropped to its visible
+ * pixels: an image for the stamp tool. Null without a canvas or ink.
+ */
+export function renderEmojiStamp(char: string, box: number): Pixels | null {
+  const px = renderEmoji(char, { size: Math.min(4096, Math.ceil(box * 1.25 + 4)), box });
+  return px ? (autoTrim(px)?.pixels ?? null) : null;
 }

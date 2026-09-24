@@ -7,7 +7,7 @@
 import type { Engine, EngineEvent, Layer } from '$engine/index';
 import type { Pixels } from '$engine/filters/types';
 import { throttle, type Scheduled } from '../common/schedule';
-import { isCancelled, panelsWorker } from '../worker/client';
+import { isCancelled, type PanelsClient } from '../worker/client';
 import { snapshotLayer, type LayerSnapshot } from '../worker/snapshot';
 
 const surfaceIds = new WeakMap<object, number>();
@@ -32,6 +32,7 @@ export class LayerThumbs {
   /** Latest thumbnail per layer id. */
   thumbs = $state.raw<Record<string, Pixels>>({});
   private readonly engine: Engine;
+  private readonly worker: PanelsClient;
   private size: number;
   private readonly dirty = new Set<string>();
   private readonly sigs = new Map<string, string>();
@@ -40,8 +41,9 @@ export class LayerThumbs {
   private readonly unsubscribe: () => void;
   private readonly schedule: Scheduled<[]>;
 
-  constructor(engine: Engine, size: number) {
+  constructor(engine: Engine, worker: PanelsClient, size: number) {
     this.engine = engine;
+    this.worker = worker;
     this.size = size;
     this.schedule = throttle(() => void this.flush(), 160);
     this.unsubscribe = engine.subscribe((e) => this.onEvent(e));
@@ -107,7 +109,7 @@ export class LayerThumbs {
     if (snaps.length === 0) return;
     this.busy = true;
     try {
-      const out = await panelsWorker().request(
+      const out = await this.worker.request(
         { op: 'layerThumbs', layers: snaps, size: this.size, crisp: this.engine.doc.pixelArt !== null },
         { transfer: snaps.map((s) => s.data.buffer), priority: 'low' },
       );
@@ -121,8 +123,8 @@ export class LayerThumbs {
       for (const id of Object.keys(next)) if (!this.engine.getLayer(id)) delete next[id];
       this.thumbs = next;
     } catch (e) {
-      // A cancelled batch is retried; a failing one is not (no busy loop).
-      if (isCancelled(e)) ids.forEach((id) => this.dirty.add(id));
+      // A cancelled batch is retried (unless the worker is gone for good); a failing one is not (no busy loop).
+      if (isCancelled(e) && !this.worker.disposed) ids.forEach((id) => this.dirty.add(id));
       else console.warn('layer thumbnails failed', e);
     } finally {
       this.busy = false;

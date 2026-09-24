@@ -33,7 +33,7 @@ export function presetRecipe(id: PresetId, label: string, options: Partial<Prese
     async apply(engine: Engine, iconLayerId: string) {
       const icon = layerImage(engine, iconLayerId);
       if (!icon) return;
-      applyPresetResult(engine, await build(id, icon, engine.doc.width, opts), `Style: ${label}`);
+      applyPresetResult(engine, await build(id, icon, engine.doc.width, opts), { label: `Style: ${label}` });
     },
   };
 }

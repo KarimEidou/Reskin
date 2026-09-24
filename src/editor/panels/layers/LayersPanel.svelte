@@ -2,8 +2,10 @@
   Layers panel: the layer stack top-first with thumbnails, visibility and
   lock toggles, inline rename (double-click / F2), pointer-drag reordering
   (Alt+↑/↓ from the keyboard), and the active layer's blend mode and
-  opacity. Toolbar: add image / text layer, duplicate, delete, and a menu
-  with merge down, flatten and rasterize text.
+  opacity. Ctrl+click a thumbnail to select that layer's pixels (Shift adds,
+  Alt subtracts, both intersect). Toolbar: add image / text layer,
+  duplicate, delete, and a menu with select pixels, merge down, flatten and
+  rasterize text.
 -->
 <script lang="ts">
   import { onDestroy, onMount, tick } from 'svelte';
@@ -21,7 +23,8 @@
   import Trash2 from '@lucide/svelte/icons/trash-2';
   import Type from '@lucide/svelte/icons/type';
   import PencilLine from '@lucide/svelte/icons/pencil-line';
-  import { BLEND_MODES, type BlendMode } from '$engine/index';
+  import SquareDashedMousePointer from '@lucide/svelte/icons/square-dashed-mouse-pointer';
+  import { BLEND_MODES, type BlendMode, type SelectionOp } from '$engine/index';
   import Button from '$lib/ui/Button.svelte';
   import IconButton from '$lib/ui/IconButton.svelte';
   import Menu from '$lib/ui/Menu.svelte';
@@ -33,6 +36,7 @@
   import { watchDpr } from '../common/canvas';
   import PixelThumb from '../common/PixelThumb.svelte';
   import { rafThrottle } from '../common/schedule';
+  import { onSliderPress } from '../common/seal';
   import { dropListIndex, rowShift, toDocIndex } from './reorder';
   import { LayerThumbs } from './thumbs.svelte';
 
@@ -93,7 +97,7 @@
   // ---- thumbnails ------------------------------------------------------------------
   let thumbs: LayerThumbs | null = $state(null);
   onMount(() => {
-    const t = new LayerThumbs(engine, Math.round(THUMB * (devicePixelRatio || 1)));
+    const t = new LayerThumbs(engine, session.panels, Math.round(THUMB * (devicePixelRatio || 1)));
     thumbs = t;
     const stop = watchDpr((dpr) => t.setSize(Math.round(THUMB * dpr)));
     return () => {
@@ -154,12 +158,36 @@
     }
   }
 
+  // ---- selection from a layer's pixels ---------------------------------------------------
+  /** The press that led to a click landed on a row's thumbnail. */
+  let pressOnThumb = false;
+
+  /** Ctrl+click on a thumbnail: replace; +Shift add, +Alt subtract, +Shift+Alt intersect. */
+  function selectionOp(e: MouseEvent): SelectionOp {
+    if (e.shiftKey && e.altKey) return 'intersect';
+    if (e.shiftKey) return 'add';
+    return e.altKey ? 'subtract' : 'replace';
+  }
+
+  function onRowClick(e: MouseEvent, row: Row): void {
+    const thumb = pressOnThumb;
+    pressOnThumb = false;
+    if (suppressClick) {
+      suppressClick = false;
+      return;
+    }
+    if (thumb && (e.ctrlKey || e.metaKey)) engine.selectByAlpha(row.id, selectionOp(e));
+    else select(row.id);
+  }
+
   // ---- pointer drag reordering --------------------------------------------------------
   let drag = $state<{ id: string; from: number; startY: number; dy: number; started: boolean } | null>(null);
   let suppressClick = false;
   const dropAt = $derived(drag?.started ? dropListIndex(drag.from, drag.dy, ROW, rows.length) : -1);
 
   function onPointerDown(e: PointerEvent, row: Row, i: number): void {
+    // Where the press landed (the click that follows is retargeted by the capture).
+    pressOnThumb = e.target instanceof Element && e.target.closest('.thumb-hit') !== null;
     if (e.button !== 0 || editing === row.id) return;
     // A drag whose release produced no click must not swallow this one.
     suppressClick = false;
@@ -235,6 +263,7 @@
 
   const menuItems = $derived([
     { id: 'rename', label: 'Rename', icon: PencilLine, shortcut: 'F2', disabled: !active },
+    { id: 'select-pixels', label: 'Select layer pixels', icon: SquareDashedMousePointer, disabled: !active },
     { id: 'merge', label: 'Merge down', icon: Merge, disabled: !active || activeIndex >= rows.length - 1 },
     { id: 'flatten', label: 'Flatten image', icon: Layers2, disabled: rows.length < 2 },
     { id: 'rasterize', label: 'Rasterize text', icon: SquareDashed, disabled: active?.kind !== 'text' },
@@ -245,6 +274,9 @@
     switch (id) {
       case 'rename':
         if (a) startRename(a);
+        break;
+      case 'select-pixels':
+        if (a) engine.selectByAlpha(a.id);
         break;
       case 'merge':
         if (a) engine.mergeDown(a.id);
@@ -264,7 +296,7 @@
   onDestroy(() => setOpacity.flush());
 </script>
 
-<div class="layers" data-testid="layers-panel">
+<div class="layers" data-testid="layers-panel" {@attach onSliderPress(() => engine.sealHistory())}>
   <div class="toolbar" role="toolbar" aria-label="Layer actions">
     <IconButton label="New layer" icon={Plus} size="sm" onclick={() => engine.addLayer()} data-testid="add-layer" />
     <IconButton label="New text layer" icon={Type} size="sm" onclick={addText} data-testid="add-text" />
@@ -340,13 +372,7 @@
           aria-label="{row.name}{row.kind === 'text' ? ' (text layer)' : ''}{row.visible ? '' : ', hidden'}{row.locked ? ', locked' : ''}"
           aria-describedby="layers-help"
           tabindex={row.active || (activeIndex < 0 && i === 0) ? 0 : -1}
-          onclick={() => {
-            if (suppressClick) {
-              suppressClick = false;
-              return;
-            }
-            select(row.id);
-          }}
+          onclick={(e) => onRowClick(e, row)}
           ondblclick={() => startRename(row)}
           onkeydown={(e) => onRowKey(e, row, i)}
           onpointerdown={(e) => onPointerDown(e, row, i)}
@@ -355,7 +381,9 @@
           onpointercancel={() => (drag = null)}
         >
           <span class="grip" aria-hidden="true"><GripVertical size={14} /></span>
-          <PixelThumb pixels={thumbs?.thumbs[row.id] ?? null} size={THUMB} />
+          <span class="thumb-hit" title="Ctrl+click: select this layer’s pixels (Shift adds, Alt subtracts, both intersect)" data-testid="layer-thumb">
+            <PixelThumb pixels={thumbs?.thumbs[row.id] ?? null} size={THUMB} />
+          </span>
           {#if editing !== row.id}
             <span class="name">
               <span class="text">{row.name}</span>
@@ -417,7 +445,10 @@
       </li>
     {/each}
   </ul>
-  <p id="layers-help" class="sr-only">Arrow keys select, Alt+Arrow keys reorder, F2 renames, Delete removes the layer. Drag rows to reorder.</p>
+  <p id="layers-help" class="sr-only">
+    Arrow keys select, Alt+Arrow keys reorder, F2 renames, Delete removes the layer. Drag rows to reorder. Ctrl+click a thumbnail to select the layer’s
+    pixels.
+  </p>
 </div>
 
 <style>
@@ -523,6 +554,10 @@
   .main:focus-visible {
     outline: var(--focus-width) solid var(--focus-color);
     outline-offset: -2px;
+  }
+  .thumb-hit {
+    display: inline-flex;
+    flex: none;
   }
   .grip {
     display: inline-flex;

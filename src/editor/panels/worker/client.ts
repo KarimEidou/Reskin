@@ -2,7 +2,8 @@
 // client): requests on one channel run one at a time and a newer request
 // replaces a waiting one, so dragging a slider costs at most one extra
 // render. Without Worker support (node tests) requests run on the calling
-// thread, still asynchronously.
+// thread, still asynchronously. The editor session owns one client (see
+// `EditorSession.panels`): created on first use, terminated with it.
 //
 // The worker is single-threaded, so the client hands it one request at a
 // time and picks the next by priority: what the user just asked for (apply
@@ -69,6 +70,7 @@ export class PanelsClient {
   /** Requests ready to run, 'high' ones first (FIFO within a priority). */
   private readonly ready: Job[] = [];
   private readonly channels = new Map<string, { active: Job | null; queued: Job | null }>();
+  private _disposed = false;
 
   constructor(worker: WorkerLike | null | false = spawn()) {
     this.worker = worker || null;
@@ -76,6 +78,11 @@ export class PanelsClient {
       this.worker.onmessage = (ev) => this.onResponse(ev.data as PanelResponse);
       this.worker.onerror = (ev) => this.onWorkerError(ev);
     }
+  }
+
+  /** Disposed: every request rejects as cancelled. */
+  get disposed(): boolean {
+    return this._disposed;
   }
 
   get mode(): 'worker' | 'sync' {
@@ -90,6 +97,7 @@ export class PanelsClient {
   }
 
   request<K extends PanelOp>(req: RequestOf<K>, opts: RequestOptions = {}): Promise<PanelResults[K]> {
+    if (this._disposed) return Promise.reject(new PanelTaskCancelled('disposed'));
     return new Promise((resolve, reject) => {
       const job: Job = {
         msg: { ...req, reqId: this.nextId++ } as PanelMessage,
@@ -146,7 +154,10 @@ export class PanelsClient {
     }
   }
 
+  /** Rejects everything outstanding and terminates the worker; later requests reject at once. */
   dispose(): void {
+    if (this._disposed) return;
+    this._disposed = true;
     const cancelled = new PanelTaskCancelled('disposed');
     if (this.running) this.settle(this.running, cancelled);
     for (const job of this.ready) this.settle(job, cancelled);
@@ -259,12 +270,4 @@ export class PanelsClient {
     this.settle(lost, new Error(`panels worker failed${ev?.message ? `: ${ev.message}` : ''}`));
     this.finish(lost);
   }
-}
-
-let shared: PanelsClient | null = null;
-
-/** The page-wide panels worker (created on first use). */
-export function panelsWorker(): PanelsClient {
-  shared ??= new PanelsClient();
-  return shared;
 }

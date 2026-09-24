@@ -89,6 +89,37 @@ describe('tiles', () => {
     expect(a.equals(orig)).toBe(true);
     expect(tileEquals(a.data, orig.data, 100, r)).toBe(true);
   });
+
+  it('compares and swaps unaligned buffers byte by byte, with the same results', () => {
+    const a = randomSurface(100, 100, 5);
+    const r = tileRect(3, 100, 100);
+    // Views starting one byte into their buffer cannot be read as 32-bit pixels.
+    const shifted = (src: Uint8ClampedArray) => {
+      const buf = new Uint8ClampedArray(src.length + 1);
+      buf.set(src, 1);
+      return buf.subarray(1);
+    };
+    const b = shifted(a.data);
+    expect(tileEquals(a.data, b, 100, r)).toBe(true);
+    b[(r.y * 100 + r.x + 5) * 4 + 2] ^= 1;
+    expect(tileEquals(a.data, b, 100, r)).toBe(false);
+    expect(tileEquals(b, a.data, 100, r)).toBe(false);
+    const tile = shifted(new Uint8ClampedArray(r.w * r.h * 4).fill(4));
+    const before = readTile(b, 100, r);
+    swapTile(b, 100, r, tile);
+    expect(readTile(b, 100, r).every((v) => v === 4)).toBe(true);
+    expect(Array.from(tile)).toEqual(Array.from(before));
+  });
+
+  it('compares whole pixels: any channel difference counts', () => {
+    const a = randomSurface(64, 64, 9);
+    const r = tileRect(0, 64, 64);
+    for (let channel = 0; channel < 4; channel++) {
+      const b = a.clone();
+      b.data[(10 * 64 + 20) * 4 + channel] ^= 0x80;
+      expect(tileEquals(a.data, b.data, 64, r)).toBe(false);
+    }
+  });
 });
 
 describe('resampling', () => {

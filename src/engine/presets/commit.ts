@@ -1,46 +1,16 @@
 /**
- * Putting a preset (or any prepared layer stack) into an Engine as ONE
- * undoable step.
- *
- * The engine has no public "replace the layer stack" operation, so this
- * records a `StackCommand` (the same command the engine's own layer ops
- * use) and then runs it through the engine's undo/redo, which applies it and
- * announces every change (layers, pixels, history) to listeners exactly as
- * any other edit. Pending tool work and inline text editing are settled
- * first so nothing else can slip in between.
+ * Putting a preset (or any prepared layer) into an Engine as ONE undoable
+ * step, through `Engine.replaceLayers`.
  */
 import type { Engine } from '../engine';
 import { createRasterLayer, getLayer, layerPixels } from '../doc/document';
 import { cloneEffects } from '../doc/effects';
 import type { Layer, RasterLayer } from '../doc/types';
 import type { Pixels } from '../filters/types';
-import { captureStack, StackCommand } from '../history/commands';
 import { Surface } from '../raster/surface';
 import { buildPreset } from './build';
 import { getPreset } from './presets';
 import type { PresetId, PresetOptions, PresetResult } from './types';
-
-/**
- * Replaces the document's layer list (bottom → top) and active layer as one
- * history entry labelled `label`. Layers must match the document size.
- */
-export function commitLayerStack(engine: Engine, label: string, layers: Layer[], activeLayerId: string | null): void {
-  const doc = engine.doc;
-  if (layers.length === 0) throw new RangeError('a document needs at least one layer');
-  for (const l of layers) {
-    const px = layerPixels(l);
-    if (l.kind === 'raster' && px && (px.width !== doc.width || px.height !== doc.height)) {
-      throw new RangeError(`layer "${l.name}" does not match the document size`);
-    }
-  }
-  engine.endTextEdit();
-  engine.commitPending();
-  const cmd = new StackCommand(label, captureStack(doc), { layers: layers.slice(), activeLayerId });
-  // Recorded as the newest entry, then applied by redo so listeners hear it.
-  engine.history.push(cmd);
-  engine.undo();
-  engine.redo();
-}
 
 /** A new raster layer for the engine's document from straight RGBA pixels. */
 export function makeRasterLayer(
@@ -69,22 +39,37 @@ export function insertLayer(engine: Engine, label: string, layer: Layer, index?:
   const at = Math.max(0, Math.min(doc.layers.length, index ?? active + 1));
   const layers = doc.layers.slice();
   layers.splice(at, 0, layer);
-  commitLayerStack(engine, label, layers, activate ? layer.id : doc.activeLayerId);
+  engine.replaceLayers(layers, { label, activeLayerId: activate ? layer.id : doc.activeLayerId });
   return layer.id;
+}
+
+export interface ApplyPresetOptions {
+  /** History label (default "Style: <preset>"). */
+  label?: string;
+  /**
+   * Merge key: applying again with the same key while the look is still the
+   * latest change replaces it in place, as the same single step (see
+   * Engine.replaceLayers).
+   */
+  mergeKey?: string;
 }
 
 /**
  * Replaces the whole design with a built preset (one history entry).
  * Returns the id of the preset's icon layer, which becomes active.
  */
-export function applyPresetResult(engine: Engine, result: PresetResult, label = `Style: ${getPreset(result.id).label}`): string {
+export function applyPresetResult(engine: Engine, result: PresetResult, opts: ApplyPresetOptions = {}): string {
   const doc = engine.doc;
   if (result.size !== doc.width || result.size !== doc.height) {
     throw new RangeError(`preset was built at ${result.size} px for a ${doc.width} px document`);
   }
   const layers = result.layers.map((l) => makeRasterLayer(engine, l.name, l.pixels, l));
   const icon = layers[result.iconIndex] ?? layers[layers.length - 1]!;
-  commitLayerStack(engine, label, layers, icon.id);
+  engine.replaceLayers(layers, {
+    label: opts.label ?? `Style: ${getPreset(result.id).label}`,
+    activeLayerId: icon.id,
+    ...(opts.mergeKey === undefined ? {} : { mergeKey: opts.mergeKey, mergeWindowMs: Infinity }),
+  });
   return icon.id;
 }
 

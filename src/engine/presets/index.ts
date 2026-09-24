@@ -15,4 +15,4 @@ export * from './types';
 export { PRESETS, PRESET_IDS, buildFromAnalysis, getPreset, isPresetId } from './presets';
 export { buildPreset, compositePreset, presetDocument } from './build';
 export { ANALYSIS_SIZE, FALLBACK_HUE, analyzeIcon, placeGlyph, placeIcon, type GlyphMode, type IconAnalysis } from './icon';
-export { applyPresetFromLayer, applyPresetResult, commitLayerStack, insertLayer, layerImage, makeRasterLayer } from './commit';
+export { applyPresetFromLayer, applyPresetResult, insertLayer, layerImage, makeRasterLayer, type ApplyPresetOptions } from './commit';

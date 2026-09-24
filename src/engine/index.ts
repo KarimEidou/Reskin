@@ -32,6 +32,7 @@ export * from './render/keylines';
 export * from './history/history';
 export * from './history/commands';
 export * from './history/pixel-transaction';
+export * from './history/preview';
 
 export * from './input/pointer';
 export * from './input/one-euro';

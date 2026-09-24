@@ -109,6 +109,7 @@ Coalesce redraws with `requestAnimationFrame` as above.
 | `overlay` | | Tool overlay needs a redraw (hover, drag preview). |
 | `interaction` | `active` | A pointer gesture started/ended. |
 | `textEdit` | `layerId \| null` | Open/close the inline text editor for a text layer. |
+| `preview` | `layerId, state` | A layer preview opened (`'open'`) or ended (`'committed'`, `'cancelled'`, `'stale'`). |
 | `message` | `level, text` | Show a toast, e.g. "Layer 2 is locked". |
 
 Events fire synchronously; batch UI work per animation frame.
@@ -118,7 +119,9 @@ Events fire synchronously; batch UI work per animation frame.
 `doc`, `activeLayer`, `getLayer(id)`, `toolId` (effective, incl. override),
 `selectedToolId`, `primary`, `secondary`, `symmetry`, `cursor`
 (`{ css, radius }`), `isInteracting`, `hasPending`, `canUndo`, `canRedo`,
-`historyEntries`, `historyIndex`, `textEditLayerId`, `viewport`,
+`historyEntries`, `historyIndex`, `currentEntryId`, `preview` (the open
+layer preview or null), `textEditLayerId`, `viewport`, `subscriberCount`
+(live listeners, for leak checks),
 `textMeasurer`, `history` (read it; mutate through the engine), `tools`
 (the concrete tool objects: `tools.move.params` is the pending transform,
 `tools.lasso.polygon` the polygon being built), `transformBox` (the box the
@@ -196,12 +199,28 @@ stamp (mirrored stamps are mirror images); guides are drawn by
 `importImage(surface, name, fit?) → id` (fits and centres any image),
 `deleteLayer(id?)`, `duplicateLayer(id?) → id`, `renameLayer(id, name)`,
 `moveLayer(id, toIndex)` (bottom = 0), `mergeDown(id?)`, `flatten()`,
+`replaceLayers(layers, opts)` (see below),
 `rasterizeLayer(id?)`, `setLayerProps(id, { name, visible, locked, opacity,
 blend, effects }, { merge?: key })` — pass `merge` for sliders so a drag is
 one entry — `setActiveLayer(id)` (not an undo step), `clearPixels(id?)`
 (Delete: clears the selection or the whole layer), `editLayerPixels(id,
 label, fn(surface))` (any custom pixel edit as one undo step; only changed
 tiles are stored), `layerThumbnail(id, size)`, `thumbnail(size)`.
+
+**Replacing the whole stack** — `replaceLayers(layers, { label,
+activeLayerId?, mergeKey?, mergeWindowMs? }) → entry id | null`: the new
+layer list (bottom → top, layer objects used as given — build them with
+`createRasterLayer`) and active layer become ONE undo step; undo/redo swap
+the lists, so both directions are byte-identical. Style presets, inserted
+stickers and backdrops use it (`applyPresetResult`, `insertLayer` in
+`$engine/presets`). The active layer defaults to the current one when it is
+kept, else the top layer. A pending transform and an inline text edit are
+settled first. Replacements with the same `mergeKey` within
+`mergeWindowMs` (default 1000; `Infinity` = while it is the latest change)
+merge into one entry that keeps the first one's "before" and id — the
+Styles panel re-styles an applied look in place this way. Throws
+`RangeError` for an empty stack, a raster layer of another size, a repeated
+layer or an active layer that is not in the stack.
 
 Refused operations (locked layer, last layer, nothing below to merge…)
 return `false`/`null` and emit a `message`. Values are clamped into the
@@ -262,14 +281,51 @@ fill, gradient and shapes are clipped to it. Mask building blocks:
 h, x, y, { tolerance, contiguous, antialias })`, `antialiasRegion`;
 `selectionOutline(mask)` gives marching-ants segments.
 
+### Layer previews
+
+A live, cancellable edit of one raster layer (adjustments and icon helpers
+being tuned): every result shows on the canvas at once, but the history only
+learns about it when it is committed.
+
+```ts
+const p = engine.beginPreview('Adjust: Blur', { layerId }); // null (+ message) for text / locked layers
+p.update(pixels);                       // same-size straight RGBA: shown now, not recorded
+p.update((surface) => blur(surface));   // or edit in place — the surface holds the ORIGINAL pixels
+p.commit();                             // ONE entry with only the changed tiles (false: nothing changed)
+p.cancel();                             // original restored byte for byte; history and redo steps untouched
+```
+
+`p.original` is the layer's pixels when it began (a private copy: send a
+copy of it to a worker), `p.changed` tells whether anything differs,
+`p.state` is `'open' | 'committed' | 'cancelled' | 'stale'` and every
+change of it is a `preview` event. Updates redraw only the 64×64 tiles that
+change. Beginning a preview commits pending tool work, an inline text edit
+and any other open preview. The engine ends a preview itself — restoring the
+original, state `'stale'` — as soon as anything else would change the
+document or move the history: any edit through the history (including
+locking or deleting its layer), a gesture of an editing tool (hand, zoom and
+eyedropper keep it), redo, `jumpTo`, `clearHistory`, a new document,
+`dispose()`. So tools never capture preview pixels as their "before".
+**Undo** while it shows a change commits it and undoes it at once (redo
+brings it back); an unchanged preview just ends and undo proceeds.
+
 ### History
 
 `undo()` (cancels a pending transform first), `redo()`, `jumpTo(n)` where
 `n` = number of applied entries (0 = oldest reachable state; entry `i` in
 `historyEntries` is "applied" when `i < historyIndex`), `clearHistory()`.
-Entries: `{ id, label, bytes, time }`. Pixel edits store only changed 64×64
-tiles; the stack drops its oldest entries past 256 MB
-(`history.droppedCount` tells you it did).
+Entries: `{ id, label, bytes, time }`; `currentEntryId` is the id of the
+newest applied entry (what undo reverts; ids never repeat, a merged entry
+keeps its id), e.g. to know whether a step is still the latest change. Pixel
+edits store only changed 64×64 tiles; the stack drops its oldest entries past
+256 MB (`history.droppedCount` tells you it did).
+
+Continuous controls pass a merge key (`setLayerProps(…, { merge })`,
+`replaceLayers(…, { mergeKey })`) so one drag is one entry; call
+`sealHistory()` when a new drag begins so two drags within the merge window
+stay two steps (keyboard steps keep merging). Read `history` for
+information only — change it through the engine (`replaceLayers`, previews,
+`sealHistory`), never with `history.push` / `discardRedo`.
 
 ### Document & files
 
@@ -362,7 +418,7 @@ engine.ts        Engine façade          index.ts / dom.ts   public barrels
 doc/             model, layer ops (commands), effects, thumbnails
 raster/          Surface, FloatImage, tiles, resampling, blur, distance, flood fill, unsharp, tone (luminance)
 render/          blend modes, effects, reference compositor, overlay API, keylines, canvas-view (DOM)
-history/         History stack, commands, PixelTransaction
+history/         History stack, commands, PixelTransaction, layer previews
 tools/           Tool interface, registry + metadata, every tool (dab-tool: base of spray/smudge/blur/dodge)
 input/           pointer types, 1€ filter, stroke sampler, coalesced events
 geometry/        affine maths, AA polygon rasterizer, shape outlines

@@ -29,8 +29,10 @@ import { documentThumbnail, layerThumbnail } from './doc/thumbnails';
 import type { Change, HistoryEntryInfo, PushOptions } from './history/history';
 import { History } from './history/history';
 import type { DocCommand } from './history/commands';
-import { CompoundCommand, PropsCommand, SelectionCommand, StackCommand } from './history/commands';
+import { CompoundCommand, PropsCommand, SelectionCommand, StackCommand, captureStack } from './history/commands';
 import { PixelTransaction } from './history/pixel-transaction';
+import type { PreviewHost, PreviewState } from './history/preview';
+import { LayerPreview } from './history/preview';
 import type { Modifiers, PointerInput } from './input/pointer';
 import type { Point } from './geometry/affine';
 import type { Surface } from './raster/surface';
@@ -89,6 +91,8 @@ export type EngineEvent =
   | { kind: 'interaction'; active: boolean }
   /** Open (layer id) or close (null) the inline text editor. */
   | { kind: 'textEdit'; layerId: string | null }
+  /** A layer preview opened or ended (see `beginPreview`). */
+  | { kind: 'preview'; layerId: string; state: PreviewState }
   /** User-facing notice, e.g. "This layer is locked". */
   | { kind: 'message'; level: MessageLevel; text: string };
 
@@ -96,6 +100,31 @@ export type EngineEventKind = EngineEvent['kind'];
 
 /** Tools that may temporarily override the current one (Space → hand…). */
 export type OverrideToolId = 'hand' | 'zoom' | 'eyedropper';
+
+/** Tools whose gestures never change the document (they leave a preview open). */
+const VIEW_TOOLS: ReadonlySet<ToolId> = new Set<ToolId>(['hand', 'zoom', 'eyedropper']);
+
+export interface ReplaceLayersOptions {
+  /** History label of the step. */
+  label: string;
+  /**
+   * The active layer afterwards (must be in the new stack; null for none).
+   * Default: the current active layer when it is kept, else the top layer.
+   */
+  activeLayerId?: string | null;
+  /**
+   * Consecutive replacements with the same key merge into one entry that
+   * keeps the first one's "before" (see `sealHistory`).
+   */
+  mergeKey?: string;
+  /** Longest gap between merged replacements, ms (default 1000; Infinity: while it is the latest change). */
+  mergeWindowMs?: number;
+}
+
+export interface PreviewOptions {
+  /** The raster layer to preview on (default: the active layer). */
+  layerId?: string;
+}
 
 export interface EngineOptions {
   doc?: Doc;
@@ -137,6 +166,21 @@ export class Engine {
   private hoverPoint: Point | null = null;
   private textEdit: TextEditSession | null = null;
   private textSerial = 0;
+  private _preview: LayerPreview | null = null;
+  /** How previews show pixels, record their step and report their end. */
+  private readonly previewHost: PreviewHost = {
+    pixelsChanged: (layer, rect) => this.emit({ kind: 'pixels', layerId: layer.id, rect }),
+    ended: (preview, cmd, restored) => {
+      if (this._preview === preview) this._preview = null;
+      if (restored) this.emit({ kind: 'pixels', layerId: preview.layerId, rect: restored });
+      if (cmd) {
+        // The pixels are already on the layer: record without re-applying.
+        this.history.push(cmd);
+        this.emit({ kind: 'history' });
+      }
+      this.emit({ kind: 'preview', layerId: preview.layerId, state: preview.state });
+    },
+  };
   private disposed = false;
   private readonly ctx: ToolContext;
 
@@ -225,8 +269,9 @@ export class Engine {
     return getLayer(this._doc, id);
   }
 
-  /** Replaces the document; history is cleared. */
+  /** Replaces the document; history is cleared (an open preview goes stale). */
   loadDocument(doc: Doc): void {
+    this.expirePreview();
     this.settle('cancel');
     this.endTextEdit();
     this._doc = doc;
@@ -458,6 +503,7 @@ export class Engine {
     if (this.disposed) return;
     if (this.gesture) this.pointerCancel();
     const toolId = this.toolId;
+    if (!VIEW_TOOLS.has(toolId)) this.expirePreview();
     this.gesture = { toolId, last: p };
     this.hoverPoint = { x: p.x, y: p.y };
     this.emit({ kind: 'interaction', active: true });
@@ -578,6 +624,8 @@ export class Engine {
   /** Runs an op that builds a command; OpErrors become messages. Returns success. */
   private run(build: () => DocCommand | null, opts?: PushOptions): boolean {
     if (this.disposed) return false;
+    // Ops read the layers while building: the preview must be gone first.
+    this.expirePreview();
     let cmd: DocCommand | null;
     try {
       cmd = build();
@@ -594,6 +642,7 @@ export class Engine {
   }
 
   private execute(cmd: DocCommand, opts?: PushOptions): void {
+    this.expirePreview();
     const changes = cmd.redo(this._doc);
     this.history.push(cmd, opts);
     this.emitChanges(changes);
@@ -674,6 +723,41 @@ export class Engine {
     );
   }
 
+  /**
+   * Replaces the whole layer stack (bottom → top) and the active layer as
+   * ONE undo step (style presets, inserted stickers and backdrops). Layers
+   * are used as given (raster layers must match the document size; ids must
+   * be unique). Pending tool work and an inline text edit are settled first.
+   * Returns the id of the history entry (a merged replacement keeps its
+   * entry's id), or null when nothing was recorded.
+   */
+  replaceLayers(layers: readonly Layer[], opts: ReplaceLayersOptions): number | null {
+    if (this.disposed) return null;
+    const { width, height } = this._doc;
+    if (layers.length === 0) throw new RangeError('a document needs at least one layer');
+    const ids = new Set<string>();
+    for (const l of layers) {
+      if (ids.has(l.id)) throw new RangeError(`layer "${l.name}" appears twice`);
+      ids.add(l.id);
+      if (l.kind === 'raster' && (l.surface.width !== width || l.surface.height !== height)) {
+        throw new RangeError(`layer "${l.name}" does not match the document size`);
+      }
+    }
+    const current = this._doc.activeLayerId;
+    const active =
+      opts.activeLayerId !== undefined
+        ? opts.activeLayerId
+        : current !== null && ids.has(current)
+          ? current
+          : layers[layers.length - 1]!.id;
+    if (active !== null && !ids.has(active)) throw new RangeError(`the active layer "${active}" is not in the new stack`);
+    this.endTextEdit();
+    this.settle('commit');
+    const merge = opts.mergeKey === undefined ? undefined : { mergeKey: `layers:${opts.mergeKey}`, mergeWindowMs: opts.mergeWindowMs };
+    const ok = this.run(() => new StackCommand(opts.label, captureStack(this._doc), { layers: layers.slice(), activeLayerId: active }), merge);
+    return ok ? this.history.currentId : null;
+  }
+
   /** Makes a layer active (not an undo step). */
   setActiveLayer(id: string): void {
     if (id === this._doc.activeLayerId || !getLayer(this._doc, id)) return;
@@ -694,6 +778,7 @@ export class Engine {
    */
   editLayerPixels(id: string, label: string, edit: (surface: Surface) => void): boolean {
     if (this.disposed) return false;
+    this.expirePreview();
     this.settle('commit');
     const layer = getLayer(this._doc, id);
     if (!layer || layer.kind !== 'raster') {
@@ -733,6 +818,60 @@ export class Engine {
         if (d[p + 3] === 0) d[p] = d[p + 1] = d[p + 2] = 0;
       }
     });
+  }
+
+  // -------------------------------------------------------------------------
+  // Layer previews
+  // -------------------------------------------------------------------------
+
+  /** The open layer preview, or null. */
+  get preview(): LayerPreview | null {
+    return this._preview;
+  }
+
+  /**
+   * Opens a live preview of a raster layer's pixels (an adjustment being
+   * tuned): `update()` shows each result on the canvas without touching the
+   * history, `commit()` records it as ONE entry, `cancel()` restores the
+   * layer byte for byte and leaves the redo steps alone. Pending tool work,
+   * an inline text edit and another open preview are committed first.
+   *
+   * The preview goes stale — the original restored, a `preview` event with
+   * state 'stale' — as soon as anything else changes the document or moves
+   * the history: an edit of any layer (including locking or deleting its
+   * own), a gesture of an editing tool, redo / jump / clear, a new document.
+   * Undo while it shows a change records it and undoes it at once, so redo
+   * brings it back. Returns null (with a message) for a missing, text or
+   * locked layer.
+   */
+  beginPreview(label: string, opts: PreviewOptions = {}): LayerPreview | null {
+    if (this.disposed) return null;
+    this._preview?.commit();
+    this.endTextEdit();
+    this.settle('commit');
+    const id = opts.layerId ?? this._doc.activeLayerId;
+    const layer = id === null ? null : getLayer(this._doc, id);
+    if (!layer) {
+      this.message('Select a layer first', 'warning');
+      return null;
+    }
+    if (layer.kind !== 'raster') {
+      this.message('Text layers cannot be edited this way — rasterize the layer first', 'warning');
+      return null;
+    }
+    if (layer.locked) {
+      this.message(`${layer.name} is locked`, 'warning');
+      return null;
+    }
+    const preview = new LayerPreview(label, layer, this.previewHost);
+    this._preview = preview;
+    this.emit({ kind: 'preview', layerId: layer.id, state: 'open' });
+    return preview;
+  }
+
+  /** Something else is about to change the document or the history. */
+  private expirePreview(): void {
+    this._preview?.expire();
   }
 
   // -------------------------------------------------------------------------
@@ -811,6 +950,7 @@ export class Engine {
         steps = 2;
       }
       if (steps > 0) {
+        this.expirePreview();
         const changes = h.jumpTo(this._doc, h.index - steps);
         h.discardRedo();
         rolledBack = true;
@@ -950,7 +1090,7 @@ export class Engine {
   // -------------------------------------------------------------------------
 
   get canUndo(): boolean {
-    return this.history.canUndo || this.hasPending;
+    return this.history.canUndo || this.hasPending || (this._preview?.changed ?? false);
   }
 
   get canRedo(): boolean {
@@ -966,10 +1106,16 @@ export class Engine {
     return this.history.index;
   }
 
+  /** Id of the most recently applied entry (the step undo reverts), or null at the oldest state. */
+  get currentEntryId(): number | null {
+    return this.history.currentId;
+  }
+
   /**
    * Undo. A pending transform is cancelled instead, and a text layer that
    * was just created and is still empty is removed instead (that is the
-   * step being undone).
+   * step being undone). An open preview showing a change is recorded and
+   * undone (redo brings it back); one showing nothing just ends.
    */
   undo(): boolean {
     if (this.disposed) return false;
@@ -977,6 +1123,11 @@ export class Engine {
     if (this.hasPending) {
       this.settle('cancel');
       return true;
+    }
+    const preview = this._preview;
+    if (preview) {
+      if (preview.changed) preview.commit();
+      else preview.expire();
     }
     if (this.closeTextEdit(false)) return true;
     const changes = this.history.undo(this._doc);
@@ -988,6 +1139,7 @@ export class Engine {
 
   redo(): boolean {
     if (this.disposed) return false;
+    this.expirePreview();
     this.settle('commit');
     this.closeTextEdit(false);
     const changes = this.history.redo(this._doc);
@@ -1000,6 +1152,7 @@ export class Engine {
   /** Jumps to a history position (0 = oldest reachable state). */
   jumpTo(index: number): void {
     if (this.disposed) return;
+    this.expirePreview();
     this.settle('commit');
     this.closeTextEdit(false);
     const changes = this.history.jumpTo(this._doc, index);
@@ -1008,8 +1161,18 @@ export class Engine {
   }
 
   clearHistory(): void {
+    this.expirePreview();
     this.history.clear();
     this.emit({ kind: 'history' });
+  }
+
+  /**
+   * Seals the newest entry: the next change starts a new step even if it
+   * uses the same merge key within the merge window (call it when a new
+   * slider drag begins, so two drags never become one step).
+   */
+  sealHistory(): void {
+    this.history.sealTop();
   }
 
   // -------------------------------------------------------------------------
@@ -1018,6 +1181,7 @@ export class Engine {
 
   dispose(): void {
     if (this.disposed) return;
+    this.expirePreview();
     this.settle('cancel');
     this.textEdit = null;
     this.disposed = true;
@@ -1028,6 +1192,11 @@ export class Engine {
 
   get isDisposed(): boolean {
     return this.disposed;
+  }
+
+  /** Live `subscribe()` listeners (diagnostics: leak checks). */
+  get subscriberCount(): number {
+    return this.events.size;
   }
 
   // -------------------------------------------------------------------------
@@ -1061,6 +1230,8 @@ export class Engine {
       setActiveLayer: (id) => this.activate(id),
       paintableLayer: () => this.paintableLayer(),
       beginPixels: (layer) => {
+        // Never capture a preview as the tool's "before" pixels.
+        if (this._preview?.layerId === layer.id) this.expirePreview();
         this.compositeCache = null;
         return new PixelTransaction(layer);
       },
@@ -1127,6 +1298,7 @@ export class Engine {
   }
 
   private commitPixels(tx: PixelTransaction, label: string, extra: DocCommand[]): void {
+    this.expirePreview();
     const dirty = tx.takeDirty();
     if (dirty) this.emit({ kind: 'pixels', layerId: tx.layer.id, rect: dirty });
     const cmds: DocCommand[] = [];

@@ -2,9 +2,11 @@
   Adjust panel: filters grouped by category and the icon helpers. Picking
   one opens its settings with a LIVE preview on the active image layer
   (limited to the selection when there is one), computed off the main
-  thread; the preview is written through the engine so the canvas shows it
-  and the whole adjustment is one undo step. Apply keeps it, Cancel
-  restores the layer byte for byte, Reset returns to the defaults.
+  thread and shown through an engine layer preview: the canvas follows
+  every change, the history does not. Apply records the adjustment as one
+  undo step, Cancel restores the layer byte for byte, Reset returns to the
+  defaults. Anything else that changes the design ends the preview (the
+  engine restores the layer) and closes the settings.
 -->
 <script lang="ts">
   import { onDestroy, tick, untrack } from 'svelte';
@@ -15,6 +17,7 @@
   import SquareDashedMousePointer from '@lucide/svelte/icons/square-dashed-mouse-pointer';
   import { FILTER_CATEGORIES, FILTER_LIST, defaultParams, getFilter, type FilterId } from '$engine/filters';
   import { isFilterCancelled } from '$engine/filters/client';
+  import type { LayerPreview } from '$engine/index';
   import Button from '$lib/ui/Button.svelte';
   import EmptyState from '$lib/ui/EmptyState.svelte';
   import IconButton from '$lib/ui/IconButton.svelte';
@@ -23,9 +26,8 @@
   import { getSession } from '../../state/context';
   import Section from '../common/Section.svelte';
   import { chainRecipes, filterRecipe, helperRecipe } from '../styles/recipe';
-  import { isCancelled, panelsWorker } from '../worker/client';
+  import { isCancelled } from '../worker/client';
   import { HELPERS, defaultValues, getHelper, type ControlSpec, type ControlValue, type ControlValues, type HelperId } from './helper-defs';
-  import { LiveLayerEdit } from './live-edit';
   import ParamControls from './ParamControls.svelte';
 
   const session = getSession();
@@ -58,7 +60,7 @@
   let editing = $state<Editing | null>(null);
   let values = $state<ControlValues>({});
   let busy = $state(false);
-  let live: LiveLayerEdit | null = null;
+  let live: LayerPreview | null = null;
   let seq = 0;
   let latest: Promise<void> = Promise.resolve();
 
@@ -87,16 +89,11 @@
     const l = engine.activeLayer;
     if (!l || l.kind !== 'raster' || l.locked) return;
     finish(true);
-    // A pending transform is the user's finished move: keep it (one step)
-    // before the adjustment starts on top of it.
-    engine.commitPending();
     const info = describe(t, l.name);
-    try {
-      live = new LiveLayerEdit(engine, l.id, info.label);
-    } catch (e) {
-      toast({ message: e instanceof Error ? e.message : String(e), kind: 'warning' });
-      return;
-    }
+    // Commits a pending transform (the user's finished move) first.
+    const preview = engine.beginPreview(info.label, { layerId: l.id });
+    if (!preview) return;
+    live = preview;
     values = initial(t);
     editing = info;
     compute();
@@ -113,7 +110,8 @@
       return;
     }
     const token = ++seq;
-    const src = edit.source();
+    const { width, height, data } = edit.original;
+    const src = { width, height, data: data.slice() };
     const sel = e.usesSelection ? engine.doc.selection : null;
     const mask = sel && sel.width === src.width && sel.height === src.height ? sel.data.slice() : null;
     const params = $state.snapshot(values) as Record<string, unknown>;
@@ -121,12 +119,12 @@
     const job =
       e.target.kind === 'filter'
         ? session.filters.run(e.target.id, src, params, { channel: 'adjust', mask, transfer: true })
-        : panelsWorker().request({ op: 'helper', id: e.target.id, pixels: src, values: params, mask }, { channel: 'adjust-helper', transfer: [src.data.buffer] });
+        : session.panels.request({ op: 'helper', id: e.target.id, pixels: src, values: params, mask }, { channel: 'adjust-helper', transfer: [src.data.buffer] });
     latest = job.then(
       (px) => {
         if (token !== seq || live !== edit) return;
         busy = false;
-        if (!edit.show(px.data)) staleEnd();
+        if (!edit.update(px)) staleEnd();
       },
       (err: unknown) => {
         if (isFilterCancelled(err) || isCancelled(err)) return;
@@ -136,29 +134,21 @@
     );
   }
 
+  /** The preview ended without us (Ctrl+Z, painting, the layer locked or deleted…): close the settings. */
   function staleEnd(): void {
-    // Someone else changed the layer (painting, undo): keep what is there.
     park();
     session.filters.cancel('adjust');
-    panelsWorker().cancel('adjust-helper');
+    session.panels.cancel('adjust-helper');
     seq++;
-    live?.commit();
     live = null;
     editing = null;
     busy = false;
   }
 
-  // Close the editor as soon as the edit goes stale (Ctrl+Z, painting, a
-  // pending transform, the layer locked or deleted), not only on the next
-  // slider change.
+  // The engine ends the preview as soon as something else changes the
+  // design; close the settings right then, not on the next slider change.
   $effect(() => {
-    void session.rev.history;
-    void session.rev.layers;
-    void session.rev.pixels;
-    void session.rev.document;
-    void session.rev.tool;
-    void session.rev.overlay;
-    void session.rev.interaction;
+    void session.rev.preview;
     untrack(() => {
       if (editing && live && !live.active) staleEnd();
     });
@@ -197,7 +187,7 @@
   function cancel(): void {
     park();
     session.filters.cancel('adjust');
-    panelsWorker().cancel('adjust-helper');
+    session.panels.cancel('adjust-helper');
     seq++;
     live?.cancel();
     live = null;
@@ -209,7 +199,7 @@
   function finish(keep: boolean): void {
     if (!live) return;
     session.filters.cancel('adjust');
-    panelsWorker().cancel('adjust-helper');
+    session.panels.cancel('adjust-helper');
     seq++;
     if (keep) live.commit();
     else live.cancel();
