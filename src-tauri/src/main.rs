@@ -8,5 +8,5 @@ fn main() {
     if let Some(code) = reskin_lib::cli::run_early(&args) {
         std::process::exit(code);
     }
-    reskin_lib::run(reskin_lib::cli::AppArgs::parse(&args));
+    std::process::exit(reskin_lib::run(&args));
 }

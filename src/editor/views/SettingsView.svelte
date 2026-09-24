@@ -2,7 +2,8 @@
   Settings: Appearance (theme, accent, box skin/size/opacity with a live
   BoxVisual preview, editor size), Motion, Behaviour (hotkey recorder, …),
   Advanced (compatibility, low memory, refresh icons, export sizes) and
-  About. Every change goes through updateSettings; refusals become toasts.
+  About (version, Releases, the open-source licenses in a lazily loaded
+  dialog). Every change goes through updateSettings; refusals become toasts.
 -->
 <script lang="ts">
   import ExternalLink from '@lucide/svelte/icons/external-link';
@@ -18,6 +19,7 @@
   import { motion } from '$lib/motion/speed.svelte';
   import { ICO_SIZES, PIXEL_GRIDS, REQUIRED_ICO_SIZES } from '$lib/settings/defaults';
   import { settings, updateSettings } from '$lib/settings/store.svelte';
+  import { refreshSystem, system } from '$lib/settings/system.svelte';
   import BoxVisual from '$lib/ui/BoxVisual.svelte';
   import { metricsFor } from '$lib/ui/box-geometry';
   import Button from '$lib/ui/Button.svelte';
@@ -92,18 +94,30 @@
       await updateSettings(patch);
     } catch (e) {
       toast({ message: `Couldn't save the setting: ${errorText(e)}`, kind: 'error' });
+    } finally {
+      // Every change retries a saved hotkey that doesn't work yet.
+      if (system.hotkeyError) void refreshSystem();
     }
   }
 
   async function saveHotkey(hotkey: string): Promise<void> {
-    // Rethrow so the recorder shows Rust's reason inline too.
+    let failure: string | null = null;
     try {
       await updateSettings({ hotkey });
-      toast({ message: hotkey ? `Shortcut set to ${hotkey}.` : 'Global shortcut turned off.', kind: 'success' });
     } catch (e) {
-      toast({ message: `Couldn't use that shortcut: ${errorText(e)}`, kind: 'error' });
-      throw new Error(errorText(e));
+      // Rust names the setting ("Global shortcut: …"); here it goes without saying.
+      failure = errorText(e).replace(/^Global shortcut: /, '');
     }
+    // Saving the shortcut that is already saved only retries registering
+    // it, which fails quietly while another app holds it: ask Rust.
+    await refreshSystem();
+    if (failure === null && hotkey && system.hotkeyError) failure = system.hotkeyError;
+    if (failure !== null) {
+      toast({ message: `Couldn't use that shortcut: ${failure}`, kind: 'error' });
+      // Rethrow so the recorder shows the reason inline too.
+      throw new Error(failure);
+    }
+    toast({ message: hotkey ? `Shortcut set to ${hotkey}.` : 'Global shortcut turned off.', kind: 'success' });
   }
 
   async function openLicense(): Promise<void> {
@@ -111,6 +125,19 @@
       await commands.openExternal('license');
     } catch (e) {
       toast({ message: `Could not open the license: ${errorText(e)}`, kind: 'error' });
+    }
+  }
+
+  /** The licenses dialog, loaded the first time it opens. */
+  let LicensesDialog = $state<typeof import('./settings/LicensesDialog.svelte').default | null>(null);
+  let licensesOpen = $state(false);
+
+  async function openLicenses(): Promise<void> {
+    try {
+      LicensesDialog ??= (await import('./settings/LicensesDialog.svelte')).default;
+      licensesOpen = true;
+    } catch (e) {
+      toast({ message: `Could not show the licenses: ${errorText(e)}`, kind: 'error' });
     }
   }
 
@@ -126,6 +153,8 @@
 
   // Scroll spy: the nav follows the section at the top of the page.
   onMount(() => {
+    // Windows may have changed the accent or the hotkey's fate meanwhile.
+    void refreshSystem();
     const root = scroller;
     if (!root) return;
     const onScroll = () => {
@@ -189,7 +218,7 @@
               checked={s.useAccent}
               onchange={(v) => set({ useAccent: v })}
             />
-            {#if info?.accent}<span class="accent" style:background={info.accent} title="Windows accent {info.accent}"></span>{/if}
+            {#if system.accent}<span class="accent" style:background={system.accent} title="Windows accent {system.accent}"></span>{/if}
           </div>
         </div>
 
@@ -295,7 +324,7 @@
         <h2 id="s-behaviour">Behaviour</h2>
         <div class="card">
           <SettingRow label="Global shortcut" description="Toggles the box.">
-            <HotkeyRecorder value={s.hotkey} onsave={saveHotkey} />
+            <HotkeyRecorder value={s.hotkey} problem={system.hotkeyError} onsave={saveHotkey} />
           </SettingRow>
           <div class="toggle-row">
             <Toggle label="Start with Windows" description="The box is there when you sign in." checked={s.autostart} onchange={(v) => set({ autostart: v })} />
@@ -400,7 +429,14 @@
             </Button>
           </div>
         </div>
-        <p class="credits">Made with Tauri, Svelte and Lucide icons. Updates are published on the Releases page.</p>
+        <p class="credits">
+          Made with Tauri, Svelte, Lucide icons and other open-source software:
+          <button type="button" class="link" onclick={openLicenses}>Open-source licenses</button>. Updates are
+          published on the Releases page.
+        </p>
+        {#if LicensesDialog && licensesOpen}
+          <LicensesDialog onclose={() => (licensesOpen = false)} onreleases={() => shell.openReleases()} />
+        {/if}
       </section>
     </div>
   </div>
@@ -743,5 +779,22 @@
     margin: 0;
     color: var(--text-3);
     font-size: var(--text-sm);
+  }
+  .link {
+    padding: 0;
+    border: 0;
+    background: none;
+    color: var(--accent-text);
+    font: inherit;
+    text-decoration: underline;
+    text-underline-offset: 2px;
+  }
+  .link:hover {
+    color: var(--text);
+  }
+  .link:focus-visible {
+    outline: var(--focus-width) solid var(--focus-color);
+    outline-offset: 2px;
+    border-radius: var(--radius-sm);
   }
 </style>

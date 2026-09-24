@@ -495,8 +495,8 @@ fn autosave_slot() {
 fn settings_first_run_and_round_trip() {
     let tmp = TempDir::new("settings");
     let path = AppDirs::at(tmp.path()).settings_file();
-    let (s, first_run) = settings::load(&path);
-    assert!(first_run);
+    let s = settings::load(&path);
+    assert!(!s.onboarded, "no settings file: first run");
     assert_eq!(s, Settings::default());
     assert!(!path.exists(), "loading must not create the file");
 
@@ -510,9 +510,39 @@ fn settings_first_run_and_round_trip() {
     assert_eq!(saved.hotkey, "Ctrl+Shift+F9");
     assert_eq!(saved.recent_colors, ["#ff0000"]);
 
-    let (loaded, first_run) = settings::load(&path);
-    assert!(!first_run);
+    let loaded = settings::load(&path);
     assert_eq!(loaded, saved);
+}
+
+#[test]
+fn the_welcome_is_due_until_it_was_finished() {
+    let tmp = TempDir::new("settings-onboarded");
+    let path = tmp.join("settings.json");
+    // Written before the welcome was finished (the box was dragged): the
+    // welcome is still due.
+    let dragged = Settings {
+        box_position: Some(reskin_core::model::SavedPos {
+            x: 40,
+            y: 60,
+            monitor: None,
+        }),
+        ..Settings::default()
+    };
+    settings::save(&path, &dragged).unwrap();
+    assert!(!settings::load(&path).onboarded);
+    // An older file without the field: not finished either.
+    fs::write(&path, br#"{"theme":"dark"}"#).unwrap();
+    assert!(!settings::load(&path).onboarded);
+
+    settings::save(
+        &path,
+        &Settings {
+            onboarded: true,
+            ..dragged
+        },
+    )
+    .unwrap();
+    assert!(settings::load(&path).onboarded);
 }
 
 #[test]
@@ -522,9 +552,15 @@ fn corrupt_settings_are_backed_up() {
     let bodies: [&[u8]; 4] = [b"{ this is not json", b"[1,2,3]", b"\"text\"", b""];
     for body in bodies {
         fs::write(&path, body).unwrap();
-        let (s, first_run) = settings::load(&path);
-        assert!(!first_run);
-        assert_eq!(s, Settings::default());
+        let s = settings::load(&path);
+        // A settings file existed: Reskin ran here before, no welcome.
+        assert_eq!(
+            s,
+            Settings {
+                onboarded: true,
+                ..Settings::default()
+            }
+        );
         assert!(!path.exists());
         let backups: Vec<String> = file_names(tmp.path())
             .into_iter()
@@ -545,8 +581,7 @@ fn settings_with_some_bad_fields_keep_the_good_ones() {
         br#"{"theme":"dark","idleOpacity":"very","boxSkin":"neon","sounds":1,"futureField":[1],"pixelGrid":16}"#,
     )
     .unwrap();
-    let (s, first_run) = settings::load(&path);
-    assert!(!first_run);
+    let s = settings::load(&path);
     let d = Settings::default();
     assert_eq!(s.theme, reskin_core::model::ThemeMode::Dark);
     assert_eq!(s.box_skin, reskin_core::model::BoxSkin::Neon);

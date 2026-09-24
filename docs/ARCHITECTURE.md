@@ -16,6 +16,7 @@ src/lib/ui/                     shared Svelte components incl. BoxVisual.svelte 
 src/lib/{motion,theme,sound,settings}/
 src/testing/tauri-mock.ts       e2e-only fake backend (installed when built with `--mode e2e`)
 e2e/*.spec.ts                   Playwright specs against the e2e build
+scripts/                        bundle budget, third-party notices (unit tested with node --test)
 crates/reskin-core/             platform logic (pure modules + `win/` for Windows shell)
 src-tauri/                      the Tauri app (windows, animator, mailbox, commands, CLI, tray, smoke test)
 ```
@@ -46,6 +47,20 @@ src-tauri/                      the Tauri app (windows, animator, mailbox, comma
   500 ms, `startMailbox` sends keep-alive polls every 500 ms. They poll from
   the last *handled* envelope, so they acknowledge nothing (Rust answers at
   once with the envelope still being handled) and their answers are dropped.
+* Windows state that changes behind a page's back (accent colour, animation
+  effects, a hotkey another app took): `app_boot` reads it live
+  (`BootInfo.accent`, `systemReducedMotion`, `hotkeyError`), and
+  `src/lib/boot.ts` calls it again whenever the page's window gains focus
+  or becomes visible (`settings/system.svelte.ts`: `system`,
+  `refreshSystem()`); no event needed.
+* `settings_set(settings)`: the settings that mirror OS state (hotkey,
+  "Start with Windows", Explorer verb) are applied before saving; a part
+  Windows refuses is taken back (the old hotkey stays registered: the new
+  one is registered first; autostart / verb take the state Windows
+  reports), the rest is saved and pushed to both pages (`settings:changed`,
+  `Settings` mailbox command), and the command then fails with what was
+  refused. A saved hotkey that isn't registered is retried with every
+  change, quietly (`BootInfo.hotkeyError` says why it doesn't work).
 
 ### Morph / handoff protocol (session numbers increase per open)
 
@@ -163,11 +178,27 @@ Pure (all hosts, unit tested on Linux):
   `Library::new(dir)` with `list/save/load/delete` (files
   `{format:"reskin-library", version, id, name, thumb, updatedAt, data}`),
   `autosave_write/autosave_read`.
-* `settings` — `load(path) -> (Settings, first_run)` (damaged files backed up),
-  `save(path, &Settings) -> Result<Settings>`, `normalize`, `parse_hotkey(&str)
-  -> Result<Option<Hotkey>>` (`""` = disabled); `Hotkey` `Display` gives
+* `settings` — `load(path) -> Settings` (damaged files backed up; first run
+  = `!onboarded`: a missing file, or one written before the welcome was
+  finished; recovered defaults count as onboarded), `save(path, &Settings)
+  -> Result<Settings>`, `normalize`, `parse_hotkey(&str) ->
+  Result<Option<Hotkey>>` (`""` = disabled); `Hotkey` `Display` gives
   "Ctrl+Alt+Shift+R", `to_accelerator()` gives the global-shortcut plugin
-  form ("Control+Alt+Shift+KeyR").
+  form ("Control+Alt+Shift+KeyR"). Settings that mirror OS state:
+  `trait SystemSettings` (hotkey registration, autostart entry, Explorer
+  verb), `apply_system_change(sys, old, new) -> (Settings, errors)` (a
+  refused change is taken back), `reconcile_system_settings(sys, saved)`
+  (startup: hotkey registered, "Start with Windows" follows Task Manager,
+  a missing entry is recreated, an unreadable one left alone, the verb
+  re-pointed).
+  `settings::autostart`: `run_command(exe)` (`"<exe>" --autostart`, quoted),
+  `is_run_command_for`, `run_target(value)`, `repaired_run_command(value,
+  exe, exists)` (quoted, and pointed at `exe` only when the executable it
+  starts is gone: another copy of Reskin keeps it), `is_approved(flags)`
+  (Task Manager's `StartupApproved`), `StartupEntry::{Missing, Enabled,
+  Disabled}`; on Windows `state(name)`, `enable(name, exe)`,
+  `disable(name)`, `repoint(name, exe)` (repairs the value, keeps Task
+  Manager's choice) for `HKCU\…\Run\Reskin` (`ENTRY_NAME`).
 * `history` — `Journal` persisted as `{version, entries, failures}`:
   `load` (missing → empty; damaged → backed up; newer version → error),
   `entries`, `get`, `failure(id)`, `pending`, `entries_for`, `active_for`,
@@ -214,7 +245,9 @@ Windows (`win/`, `#[cfg(windows)]`, type-checked on Linux with
 * `desktop` — `find_desktop_icon(path) -> Result<Option<DesktopSpot>>` (also
   `::{CLSID}`), `desktop_icon_size()`.
 * `elevate` — `run_elevated(exe, args) -> Result<i32>` (blocks ≤ 5 min; call
-  off the STA; `Error::Cancelled` on UAC cancel), `is_elevated()`.
+  off the STA; `Error::Cancelled` on UAC cancel), `is_uac_elevated()` (the
+  full token of a UAC administrator), `run_unelevated(exe, args)` (through
+  Explorer: `IShellDispatch2::ShellExecute` on the desktop's view).
   `WinJobExec` lives in `src-tauri/src/helper.rs`.
 * `fonts` — `system_fonts()`.
 * `wallpaper` — `wallpaper_path`, `wallpaper_info(Option<(w, h)>)`,
@@ -226,14 +259,29 @@ Windows (`win/`, `#[cfg(windows)]`, type-checked on Linux with
 ## Rust: src-tauri
 
 * `main.rs` handles `--elevated-apply`, `--restore-all [--quiet]`, `--self-test`
-  before building Tauri; otherwise `reskin_lib::run()`.
-* `lib.rs` builder: single-instance first, then dialog, opener, autostart,
-  global-shortcut; `setup` creates the box (visible) and schedules the editor
-  pre-warm; `invoke_handler` registers every command in `commands.ts`.
+  before building Tauri; otherwise exits with `reskin_lib::run(argv)`.
+* `lib.rs` `run`: panic hook (`reskin.log`, and an error box: release builds
+  abort on panic); started as administrator (`is_uac_elevated`) it restarts
+  unelevated through Explorer (`--relaunched`) and returns; no WebView2
+  Runtime → an error box offering Microsoft's download, exit 1. Builder:
+  single-instance first, then dialog, opener, global-shortcut; `setup`
+  creates the box (visible; a failure is reported, not returned into Tauri),
+  reconciles the OS-backed settings on a thread (`commands::settings::
+  reconcile_at_startup`) and schedules the editor pre-warm (skipped in
+  low-memory mode unless the welcome or `--edit` opens it; the welcome,
+  due while `!onboarded`, never opens at an `--autostart` start);
+  `invoke_handler` registers every command in `commands.ts`. Error boxes
+  never show under `--smoke-test`.
+* `hotkey.rs`: `apply(app, hotkey)` registers the new shortcut before
+  releasing the old one; `registered()`, `problem(saved)` (why the saved one
+  doesn't work, for `BootInfo.hotkeyError`).
+* `AppState::system_reduced_motion()` reads `SPI_GETCLIENTAREAANIMATION` live;
+  `first_run()` clears once the welcome sets `onboarded`.
 * `windows/{box_window,editor_window}.rs` build windows `from_config` + WebView2
-  tuning; `windows/mailbox.rs` (seq queue + long-poll); `windows/morph.rs`
-  (handoff FSM with acks/timeouts/fallback); `windows/animator.rs` (box motion,
-  drag loop, fling/snap, flights).
+  tuning (compatibility mode: the box's clip region is rebuilt on
+  `ScaleFactorChanged`); `windows/mailbox.rs` (seq queue + long-poll);
+  `windows/morph.rs` (handoff FSM with acks/timeouts/fallback);
+  `windows/animator.rs` (box motion, drag loop, fling/snap, flights).
 * `commands/*.rs`: `boot, box_cmds, editor_cmds, items, apply, library, system, settings`.
 * Permissions: `build.rs` lists every command in `AppManifest::commands`;
   `capabilities/box.json` and `capabilities/editor.json` grant per window.
@@ -258,12 +306,19 @@ Windows (`win/`, `#[cfg(windows)]`, type-checked on Linux with
   same outDir), so the box never loads chunks shared with the editor (they
   would carry the union of both pages' Svelte runtime and library code);
   the dev server serves both pages from one environment.
-  `pnpm bundle:budget` guards the box's initial JS.
+  `pnpm bundle:budget` guards the box's initial JS. Under `tauri build`
+  (which sets `TAURI_ENV_*`) `pnpm build` also runs
+  `scripts/third-party-notices.mjs`: `dist/THIRD_PARTY_NOTICES.txt` (production
+  npm tree + Svelte runtime, crates `cargo tree` links into `reskin.exe`,
+  license texts deduplicated), embedded in the app (Settings › About ›
+  Open-source licenses fetches it) and attached to each release; `pnpm
+  notices` writes it by hand.
 * Every page entry (`src/*/main.ts`) starts with
   `if (__E2E__) (await import('../testing/tauri-mock')).install('<box|editor>')`
   so the e2e build runs against the fake backend; production builds drop it.
-* Unit tests: `src/**/*.test.ts` (Vitest, node env). E2E: `e2e/*.spec.ts`;
-  tests drive the fake backend through `window.__e2e` (see tauri-mock.ts).
+* Unit tests: `src/**/*.test.ts` (Vitest, node env) and `scripts/*.test.mjs`
+  (`node --test`), both in `pnpm test`. E2E: `e2e/*.spec.ts`; tests drive
+  the fake backend through `window.__e2e` (see tauri-mock.ts).
 
 ## Checks (all must pass before pushing)
 

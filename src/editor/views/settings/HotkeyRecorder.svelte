@@ -1,10 +1,12 @@
 <!--
   Records the global hotkey that toggles the box: click "Change", press the
   new combination. Validated like Rust (hotkey.ts) before saving; errors are
-  shown inline and announced.
+  shown inline and announced, and so is a saved shortcut that doesn't work
+  (another app holds it).
 -->
 <script lang="ts">
   import Keyboard from '@lucide/svelte/icons/keyboard';
+  import TriangleAlert from '@lucide/svelte/icons/triangle-alert';
   import { DEFAULT_HOTKEY } from '$lib/settings/defaults';
   import { formatHotkey, hotkeyFromEvent, parseHotkey } from '$lib/settings/hotkey';
   import Button from '$lib/ui/Button.svelte';
@@ -12,11 +14,13 @@
 
   interface Props {
     value: string;
+    /** Why the saved hotkey doesn't work right now (null: it works). */
+    problem?: string | null;
     /** Saves a canonical hotkey ("" = off); rejects with a message when refused. */
     onsave: (hotkey: string) => Promise<void>;
   }
 
-  let { value, onsave }: Props = $props();
+  let { value, problem = null, onsave }: Props = $props();
   const id = $props.id();
 
   let recording = $state(false);
@@ -95,7 +99,7 @@
       class:recording
       class:invalid={error !== null}
       data-capture-keys={recording ? '' : undefined}
-      aria-describedby="{id}-help {id}-error"
+      aria-describedby="{id}-help {id}-problem {id}-error"
       aria-label={recording ? 'Press the new shortcut, or Escape to cancel' : `Global shortcut: ${value || 'off'}. Activate to change`}
       onclick={() => (recording ? undefined : start())}
       onkeydown={onKeyDown}
@@ -124,6 +128,12 @@
     {/if}
   </div>
   <p class="help" id="{id}-help">Shows or hides the box from anywhere. Use Ctrl, Alt or Win with a key.</p>
+  {#if problem && value && !recording}
+    <p class="problem" id="{id}-problem" role="status" data-testid="hotkey-problem">
+      <TriangleAlert size={14} aria-hidden="true" />
+      <span>Not working: {problem}. Choose another shortcut, or record this one again once that app is closed.</span>
+    </p>
+  {/if}
   <p class="error" id="{id}-error" role="alert" data-testid="hotkey-error">{error ?? ''}</p>
 </div>
 
@@ -177,10 +187,25 @@
     color: var(--text-3);
   }
   .help,
+  .problem,
   .error {
     margin: 0;
     font-size: var(--text-xs);
     text-align: right;
+  }
+  .problem {
+    display: flex;
+    align-items: flex-start;
+    justify-content: flex-end;
+    gap: var(--space-1);
+    max-width: 360px;
+    color: var(--warning);
+    font-weight: var(--weight-medium);
+    line-height: var(--leading-normal);
+  }
+  .problem :global(svg) {
+    flex: none;
+    margin-top: 1px;
   }
   .help {
     color: var(--text-3);

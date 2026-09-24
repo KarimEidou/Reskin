@@ -1,13 +1,21 @@
-//! settings_get / settings_set. Setting changes with OS side effects
-//! (hotkey, autostart, Explorer verb, box size/skin) are applied here.
+//! settings_get / settings_set. The settings that mirror OS state (hotkey,
+//! "Start with Windows", Explorer verb) are applied before they are saved,
+//! and a change Windows refuses is taken back, so the saved settings — and
+//! what both pages are told — always match the OS. Window-level changes
+//! (box size, compatibility mode, low-memory mode) follow once saved.
+
+use std::path::PathBuf;
 
 use reskin_core::model::{BoxMetrics, Settings};
+use reskin_core::settings::autostart::{self, ENTRY_NAME, StartupEntry};
+use reskin_core::settings::{SystemSettings, apply_system_change, reconcile_system_settings};
+use reskin_core::win::contextmenu;
 use tauri::{AppHandle, LogicalSize, Manager, Runtime, State};
-use tauri_plugin_autostart::ManagerExt;
 
 use super::CmdResult;
 use crate::state::AppState;
-use crate::windows::box_window;
+use crate::windows::morph::Phase;
+use crate::windows::{box_window, editor_window, raw};
 use crate::{hotkey, log};
 
 #[tauri::command]
@@ -15,21 +23,33 @@ pub fn settings_get(state: State<'_, AppState>) -> Settings {
     state.settings()
 }
 
+/// Saves `settings`. When Windows refuses part of the change (a hotkey
+/// another app holds, a registry write) the rest is saved without it, both
+/// pages get the saved value, and the command fails with what was refused.
 #[tauri::command]
 pub async fn settings_set(app: AppHandle, settings: Settings) -> CmdResult<Settings> {
     tauri::async_runtime::spawn_blocking(move || {
         let state = app.state::<AppState>();
+        let _one_at_a_time = state.lock_settings_changes();
         let old = state.settings();
-        // The box position is owned by the drag loop; never let a stale
-        // copy from a page overwrite it.
-        let mut incoming = settings;
-        incoming.box_position = old.box_position.clone();
-        let new = state.update_settings(&app, |s| *s = incoming);
-        let errors = apply_side_effects(&app, &old, &new);
+        let requested = reskin_core::settings::normalize(settings);
+        let (accepted, errors) = apply_system_change(&mut Os { app: &app }, &old, requested);
+        let new = state.update_settings(&app, |s| {
+            // The box position is owned by the drag loop; never let a stale
+            // copy from a page overwrite it.
+            let position = s.box_position.take();
+            *s = Settings {
+                box_position: position,
+                ..accepted
+            };
+        });
+        apply_window_changes(&app, &old, &new);
         if errors.is_empty() {
             Ok(new)
         } else {
-            // Settings are saved; report what couldn't be applied.
+            for e in &errors {
+                log::line(&format!("settings: {e}"));
+            }
             Err(errors.join("\n"))
         }
     })
@@ -37,78 +57,119 @@ pub async fn settings_set(app: AppHandle, settings: Settings) -> CmdResult<Setti
     .map_err(|e| e.to_string())?
 }
 
-/// Applies OS-level effects of a settings change. Returns user-facing
-/// error messages for anything that failed.
-pub fn apply_side_effects<R: Runtime>(
-    app: &AppHandle<R>,
-    old: &Settings,
-    new: &Settings,
-) -> Vec<String> {
-    let mut errors = Vec::new();
-    if old.hotkey != new.hotkey
-        && let Err(e) = hotkey::apply(app, &accelerator(&new.hotkey))
+/// Startup: makes the OS state and the saved settings agree (see
+/// `reconcile_system_settings`). Runs off the main thread: registering the
+/// hotkey waits for the event loop.
+pub fn reconcile_at_startup<R: Runtime>(app: &AppHandle<R>) {
+    let state = app.state::<AppState>();
+    let _one_at_a_time = state.lock_settings_changes();
+    // An entry an older Reskin wrote unquoted, or whose exe is gone, is
+    // repaired without changing whether it is on.
+    if let Ok(exe) = std::env::current_exe()
+        && let Err(e) = autostart::repoint(ENTRY_NAME, &exe)
     {
-        errors.push(e);
+        log::line(&format!("settings: Start with Windows: {e}"));
     }
-    if old.autostart != new.autostart {
-        let al = app.autolaunch();
-        let r = if new.autostart {
-            al.enable()
+    let saved = state.settings();
+    let (settings, errors) = reconcile_system_settings(&mut Os { app }, saved.clone());
+    for e in &errors {
+        log::line(&format!("settings at startup: {e}"));
+    }
+    if (settings.autostart, settings.context_menu) != (saved.autostart, saved.context_menu) {
+        state.update_settings(app, |s| {
+            s.autostart = settings.autostart;
+            s.context_menu = settings.context_menu;
+        });
+    }
+}
+
+/// The Windows side of the settings that mirror OS state.
+struct Os<'a, R: Runtime> {
+    app: &'a AppHandle<R>,
+}
+
+fn current_exe() -> reskin_core::Result<PathBuf> {
+    std::env::current_exe().map_err(Into::into)
+}
+
+impl<R: Runtime> SystemSettings for Os<'_, R> {
+    fn hotkey(&self) -> String {
+        hotkey::registered()
+    }
+
+    fn set_hotkey(&mut self, hotkey: &str) -> reskin_core::Result<()> {
+        hotkey::apply(self.app, hotkey).map_err(reskin_core::Error::Other)
+    }
+
+    fn autostart(&self) -> reskin_core::Result<StartupEntry> {
+        autostart::state(ENTRY_NAME)
+    }
+
+    fn set_autostart(&mut self, on: bool) -> reskin_core::Result<()> {
+        if on {
+            autostart::enable(ENTRY_NAME, &current_exe()?)
         } else {
-            al.disable()
-        };
-        if let Err(e) = r {
-            errors.push(format!("Start with Windows: {e}"));
+            autostart::disable(ENTRY_NAME)
         }
     }
-    if old.context_menu != new.context_menu {
-        let r = if new.context_menu {
-            std::env::current_exe()
-                .map_err(|e| e.to_string())
-                .and_then(|exe| {
-                    reskin_core::win::contextmenu::install(&exe).map_err(|e| e.to_string())
-                })
+
+    fn context_menu(&self) -> bool {
+        contextmenu::is_installed()
+    }
+
+    fn set_context_menu(&mut self, on: bool) -> reskin_core::Result<()> {
+        if on {
+            contextmenu::install(&current_exe()?)
         } else {
-            reskin_core::win::contextmenu::uninstall().map_err(|e| e.to_string())
-        };
-        if let Err(e) = r {
-            errors.push(format!("Explorer menu: {e}"));
+            contextmenu::uninstall()
         }
     }
+}
+
+/// Effects of a saved change on the windows and on first-run state.
+fn apply_window_changes<R: Runtime>(app: &AppHandle<R>, old: &Settings, new: &Settings) {
+    let state = app.state::<AppState>();
     if old.box_size != new.box_size {
         resize_box(app, new);
     }
     if old.compatibility_mode != new.compatibility_mode {
         // Transparency is fixed when a window is created: rebuild both at
         // the next editor close (or now, when the editor isn't open).
-        let state = app.state::<crate::state::AppState>();
-        if state.morph.phase() == crate::windows::morph::Phase::Closed {
+        if state.morph.phase() == Phase::Closed {
             rebuild_windows(app, new);
         } else {
             state.request_window_rebuild();
         }
+    } else if new.low_memory && !old.low_memory && state.morph.phase() == Phase::Closed {
+        // An open editor goes when it closes (morph::close); a hidden,
+        // pre-warmed one goes now.
+        drop_editor(app);
     }
-    for e in &errors {
-        log::line(&format!("settings: {e}"));
+    if new.onboarded {
+        state.finish_first_run();
     }
-    errors
+}
+
+/// Destroys the (hidden) editor; the next open builds a new one.
+fn drop_editor<R: Runtime>(app: &AppHandle<R>) {
+    if let Some(editor) = app.get_webview_window(editor_window::LABEL) {
+        let _ = editor.destroy();
+        app.state::<AppState>().mailbox.reset();
+    }
 }
 
 /// Recreates the box (shown again unless hidden by the user) and drops the
 /// editor so the next open builds it with the new mode.
 pub fn rebuild_windows<R: Runtime>(app: &AppHandle<R>, s: &Settings) {
-    let state = app.state::<crate::state::AppState>();
-    if let Some(editor) = app.get_webview_window(crate::windows::editor_window::LABEL) {
-        let _ = editor.destroy();
-        state.mailbox.reset();
-    }
+    let state = app.state::<AppState>();
+    drop_editor(app);
     match box_window::recreate(app, s) {
         Ok(w) => {
-            let h = crate::windows::raw::hwnd_of(&w);
+            let h = raw::hwnd_of(&w);
             state.animator.set_hwnd(h);
             if !state.box_hidden_by_user() && !state.hidden_for_fullscreen() {
-                crate::windows::raw::show_no_activate(h);
-                crate::windows::raw::set_topmost(h, true);
+                raw::show_no_activate(h);
+                raw::set_topmost(h, true);
             }
         }
         Err(e) => log::line(&format!("rebuilding the box failed: {e}")),
@@ -117,7 +178,6 @@ pub fn rebuild_windows<R: Runtime>(app: &AppHandle<R>, s: &Settings) {
 
 /// Resizes the box window for a new size class, keeping its centre.
 fn resize_box<R: Runtime>(app: &AppHandle<R>, s: &Settings) {
-    use crate::windows::raw;
     let Some(w) = app.get_webview_window(box_window::LABEL) else {
         return;
     };
@@ -134,7 +194,7 @@ fn resize_box<R: Runtime>(app: &AppHandle<R>, s: &Settings) {
         (cy - side / 2.0).round() as i32,
     );
     let _ = w.set_size(LogicalSize::new(m.window, m.window));
-    let state = app.state::<crate::state::AppState>();
+    let state = app.state::<AppState>();
     state.animator.jump_to((x, y));
     if s.compatibility_mode {
         box_window::apply_compat_shape(&w, &m);
@@ -147,35 +207,5 @@ fn resize_box<R: Runtime>(app: &AppHandle<R>, s: &Settings) {
                 p.y = y;
             }
         });
-    }
-}
-
-/// Converts the user-facing hotkey ("Ctrl+Alt+Shift+R") to the global
-/// shortcut plugin's accelerator syntax; empty stays empty.
-pub fn accelerator(hotkey: &str) -> String {
-    match reskin_core::settings::parse_hotkey(hotkey) {
-        Ok(Some(h)) => h.to_accelerator(),
-        _ => String::new(),
-    }
-}
-
-/// Startup: make OS state match the saved settings.
-pub fn apply_at_startup<R: Runtime>(app: &AppHandle<R>, s: &Settings) {
-    if let Err(e) = hotkey::apply(app, &accelerator(&s.hotkey)) {
-        log::line(&format!("hotkey: {e}"));
-    }
-    let al = app.autolaunch();
-    if al.is_enabled().unwrap_or(false) != s.autostart {
-        let _ = if s.autostart {
-            al.enable()
-        } else {
-            al.disable()
-        };
-    }
-    if s.context_menu {
-        // Re-point the verb at this exe (it may have moved after an update).
-        if let Ok(exe) = std::env::current_exe() {
-            let _ = reskin_core::win::contextmenu::install(&exe);
-        }
     }
 }

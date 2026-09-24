@@ -20,8 +20,6 @@ use crate::windows::morph::Morph;
 pub struct AppState {
     pub dirs: AppDirs,
     pub settings: RwLock<Settings>,
-    /// No settings.json existed at startup.
-    pub first_run: bool,
     pub mailbox: Mailbox,
     pub morph: Morph,
     pub animator: Animator,
@@ -31,9 +29,12 @@ pub struct AppState {
     /// Applies waiting for the user to approve elevation.
     pub elevations: Elevations,
     journal: Mutex<Journal>,
+    /// Held while a settings change is applied to the OS and saved.
+    settings_changes: Mutex<()>,
+    /// The first-run welcome hasn't been finished (`Settings::onboarded`).
+    first_run: AtomicBool,
     box_hidden_by_user: AtomicBool,
     hidden_for_fullscreen: AtomicBool,
-    system_reduced_motion: AtomicBool,
     /// Compatibility mode changed: rebuild both windows at the next close.
     rebuild_windows: AtomicBool,
 }
@@ -43,15 +44,14 @@ impl AppState {
         args: &AppArgs,
         dirs: AppDirs,
         settings: Settings,
-        first_run: bool,
         journal: Journal,
         sta: Sta,
     ) -> Self {
         let smoke = Smoke::new(args.smoke, args.capture_handoff);
         Self {
             dirs,
+            first_run: AtomicBool::new(!settings.onboarded),
             settings: RwLock::new(settings),
-            first_run,
             mailbox: Mailbox::default(),
             morph: Morph::default(),
             animator: Animator::spawn(),
@@ -60,9 +60,9 @@ impl AppState {
             smoke,
             elevations: Elevations::default(),
             journal: Mutex::new(journal),
+            settings_changes: Mutex::new(()),
             box_hidden_by_user: AtomicBool::new(false),
             hidden_for_fullscreen: AtomicBool::new(false),
-            system_reduced_motion: AtomicBool::new(false),
             rebuild_windows: AtomicBool::new(false),
         }
     }
@@ -72,6 +72,15 @@ impl AppState {
             .read()
             .unwrap_or_else(|e| e.into_inner())
             .clone()
+    }
+
+    /// Serialises settings changes that touch OS state: each one is applied
+    /// against the OS as the previous one left it. Never taken on the main
+    /// thread (a change waits for the main thread to register the hotkey).
+    pub fn lock_settings_changes(&self) -> MutexGuard<'_, ()> {
+        self.settings_changes
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
     }
 
     /// Mutates, normalises and persists the settings, then tells both
@@ -106,6 +115,17 @@ impl AppState {
         self.journal.lock().unwrap_or_else(|e| e.into_inner())
     }
 
+    /// The first-run welcome is due (and the box's hint after it).
+    pub fn first_run(&self) -> bool {
+        self.first_run.load(Ordering::SeqCst)
+    }
+
+    /// The welcome was finished: a box built later (after a compatibility-
+    /// mode toggle) boots without the first-run hint.
+    pub fn finish_first_run(&self) {
+        self.first_run.store(false, Ordering::SeqCst);
+    }
+
     pub fn box_hidden_by_user(&self) -> bool {
         self.box_hidden_by_user.load(Ordering::SeqCst)
     }
@@ -130,11 +150,10 @@ impl AppState {
         self.rebuild_windows.swap(false, Ordering::SeqCst)
     }
 
+    /// Windows' "Animation effects" are off. Read live (one cheap
+    /// `SystemParametersInfo` call) so the handoff and the flourish follow
+    /// a change right away, as the pages' reduced-motion media query does.
     pub fn system_reduced_motion(&self) -> bool {
-        self.system_reduced_motion.load(Ordering::SeqCst)
-    }
-
-    pub fn set_system_reduced_motion(&self, v: bool) {
-        self.system_reduced_motion.store(v, Ordering::SeqCst);
+        !reskin_core::win::wallpaper::client_area_animation()
     }
 }

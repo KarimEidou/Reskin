@@ -108,6 +108,25 @@ describe('SettingsSync', () => {
     await expect(ok).resolves.toMatchObject({ boxSkin: 'minimal' });
   });
 
+  it('ends on what Rust saved when it refuses part of a change', async () => {
+    // Rust saves the change without what Windows refused (a hotkey another
+    // app holds), pushes that value to the page, and rejects with why. The
+    // push may come before or after the rejection.
+    for (const pushFirst of [true, false]) {
+      backend.saves = [];
+      const { sync } = makeSync();
+      const done = sync.update({ hotkey: 'Ctrl+Alt+K', sounds: true });
+      await flush();
+      const saved = { ...defaultSettings(), sounds: true };
+      if (pushFirst) sync.external(saved);
+      backend.saves[0]!.reject(new Error('Global shortcut: Ctrl+Alt+K is already in use by another app'));
+      await expect(done).rejects.toThrow('already in use');
+      if (!pushFirst) sync.external(saved);
+      expect(sync.current).toMatchObject({ hotkey: 'Ctrl+Alt+Shift+R', sounds: true });
+      expect(sync.pendingCount).toBe(0);
+    }
+  });
+
   it('keeps pending patches on top of values pushed from elsewhere', async () => {
     const { sync } = makeSync();
     const pending = sync.update({ sounds: true });
