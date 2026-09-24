@@ -13,6 +13,8 @@ export const EVENTS = {
   shown: 'box:shown',
   /** Settings changed anywhere; payload is the full settings. */
   settings: 'settings:changed',
+  /** An apply succeeded: show the Undo chip; payload is the history entry id. */
+  undo: 'box:undo',
 } as const;
 
 export interface EventPayloads {
@@ -20,6 +22,7 @@ export interface EventPayloads {
   'box:progress': BoxProgress;
   'box:shown': null;
   'settings:changed': Settings;
+  'box:undo': string;
 }
 
 export function on<K extends keyof EventPayloads>(
