@@ -46,6 +46,11 @@ export function forEachTile(
   for (let ty = ty0; ty <= ty1; ty++) for (let tx = tx0; tx <= tx1; tx++) fn(ty * cols + tx);
 }
 
+/** A whole-pixel (32-bit) view of an RGBA buffer, or null when it is not 4-byte aligned. */
+function pixelWords(d: Uint8ClampedArray): Uint32Array | null {
+  return d.byteOffset % 4 === 0 && d.length % 4 === 0 ? new Uint32Array(d.buffer, d.byteOffset, d.length / 4) : null;
+}
+
 /** Copies a tile's pixels out of a full-surface buffer. */
 export function readTile(data: Uint8ClampedArray, width: number, r: Rect): Pixels {
   const out = new Uint8ClampedArray(r.w * r.h * 4);
@@ -67,6 +72,21 @@ export function writeTile(data: Uint8ClampedArray, width: number, r: Rect, tile:
 
 /** Exchanges tile pixels with the surface in place (used by undo/redo). */
 export function swapTile(data: Uint8ClampedArray, width: number, r: Rect, tile: Uint8ClampedArray): void {
+  const d32 = pixelWords(data);
+  const t32 = d32 && pixelWords(tile);
+  if (d32 && t32) {
+    // One exchange per pixel instead of four.
+    for (let y = 0; y < r.h; y++) {
+      const s = (r.y + y) * width + r.x;
+      const t = y * r.w;
+      for (let i = 0; i < r.w; i++) {
+        const v = d32[s + i];
+        d32[s + i] = t32[t + i];
+        t32[t + i] = v;
+      }
+    }
+    return;
+  }
   const row = r.w * 4;
   for (let y = 0; y < r.h; y++) {
     const s = ((r.y + y) * width + r.x) * 4;
@@ -79,8 +99,18 @@ export function swapTile(data: Uint8ClampedArray, width: number, r: Rect, tile: 
   }
 }
 
-/** True when the tile area is byte-identical in two same-sized buffers. */
+/** True when the tile area is byte-identical in two same-sized RGBA buffers. */
 export function tileEquals(a: Uint8ClampedArray, b: Uint8ClampedArray, width: number, r: Rect): boolean {
+  const a32 = pixelWords(a);
+  const b32 = a32 && pixelWords(b);
+  if (a32 && b32) {
+    // One comparison per pixel instead of four.
+    for (let y = 0; y < r.h; y++) {
+      const s = (r.y + y) * width + r.x;
+      for (let i = s, end = s + r.w; i < end; i++) if (a32[i] !== b32[i]) return false;
+    }
+    return true;
+  }
   const row = r.w * 4;
   for (let y = 0; y < r.h; y++) {
     const s = ((r.y + y) * width + r.x) * 4;

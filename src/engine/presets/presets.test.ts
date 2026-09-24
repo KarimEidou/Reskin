@@ -12,7 +12,6 @@ import {
   applyPresetResult,
   buildFromAnalysis,
   buildPreset,
-  commitLayerStack,
   compositePreset,
   getPreset,
   insertLayer,
@@ -237,6 +236,22 @@ describe('committing to an engine', () => {
     expect(engine.doc.layers.map((l) => l.name)).toEqual(result.layers.map((l) => l.name));
   });
 
+  it('re-styles in place with a merge key while the look is the latest change', () => {
+    const { engine } = engineWithIcon();
+    const before = engine.doc.layers.slice();
+    applyPresetResult(engine, buildPreset('neon', tileIcon(), 512), { mergeKey: 'style:neon' });
+    const entry = engine.currentEntryId;
+    applyPresetResult(engine, buildPreset('neon', tileIcon(), 512, { hue: 40 }), { mergeKey: 'style:neon' });
+    expect(engine.historyEntries.map((e) => e.label)).toEqual(['Style: Neon']);
+    expect(engine.currentEntryId).toBe(entry);
+    // Another change in between: the next apply is a step of its own.
+    engine.addLayer();
+    applyPresetResult(engine, buildPreset('neon', tileIcon(), 512), { mergeKey: 'style:neon' });
+    expect(engine.historyEntries.map((e) => e.label)).toEqual(['Style: Neon', 'New layer', 'Style: Neon']);
+    engine.jumpTo(0);
+    expect(engine.doc.layers).toEqual(before);
+  });
+
   it('inserts a single layer at a position as one step', () => {
     const { engine } = engineWithIcon();
     const px = renderSticker(getSticker('star')!, { size: 512 });
@@ -250,7 +265,7 @@ describe('committing to an engine', () => {
 
   it('refuses stacks that do not fit the document', () => {
     const { engine } = engineWithIcon();
-    expect(() => commitLayerStack(engine, 'x', [], null)).toThrow(RangeError);
+    expect(() => engine.replaceLayers([], { label: 'x' })).toThrow(RangeError);
     expect(() => applyPresetResult(engine, buildPreset('glass', tileIcon(64), 128))).toThrow(RangeError);
     expect(engine.historyEntries).toHaveLength(0);
   });

@@ -10,6 +10,7 @@
   import ColorSwatch from '$lib/ui/ColorSwatch.svelte';
   import Popover from '$lib/ui/Popover.svelte';
   import { hexOf, rememberColor } from '../common/color';
+  import { onSliderPress } from '../common/seal';
   import HexInput from './HexInput.svelte';
   import HsvPicker from './HsvPicker.svelte';
 
@@ -24,9 +25,11 @@
     oninput?: (hex: string) => void;
     /** Committed. */
     onchange?: (hex: string) => void;
+    /** A new pointer drag begins in the picker (e.g. to start a new undo step). */
+    onstart?: () => void;
   }
 
-  let { value, label, showLabel = true, alpha = true, disabled = false, oninput, onchange }: Props = $props();
+  let { value, label, showLabel = true, alpha = true, disabled = false, oninput, onchange, onstart }: Props = $props();
 
   let open = $state(false);
   let anchor: HTMLButtonElement | undefined = $state();
@@ -63,7 +66,7 @@
 </div>
 
 <Popover bind:open {anchor} label={label} placement="bottom-start" width="240px" initialFocus="first">
-  <div class="pop">
+  <div class="pop" {@attach onSliderPress(() => onstart?.())}>
     <HsvPicker value={rgba} {alpha} {label} oninput={input} onchange={commit} />
     <HexInput value={rgba} {alpha} label="Hex" hideLabel onchange={commit} />
     {#if recent.length > 0}

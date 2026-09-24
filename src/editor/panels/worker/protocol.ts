@@ -7,13 +7,14 @@
 //   presetBuild  → PresetResult        preset layer stack at `size`
 //   helper       → Pixels              icon helper on a layer image
 //   sticker      → Pixels              vector sticker rasterized
+//   stickerStamp → Pixels | null       sticker cropped to its art (stamp tool)
 
 import { layerThumbnail } from '$engine/doc/thumbnails';
 import { renderSizes } from '$engine/export/export';
 import type { Pixels } from '$engine/filters/types';
 import { createCanvasTextRasterizer } from '$engine/helpers';
 import { analyzeIcon, buildFromAnalysis, compositePreset, type IconAnalysis, type PresetId, type PresetOptions, type PresetResult } from '$engine/presets';
-import { getSticker, renderSticker, type StickerOutline } from '$engine/stickers';
+import { getSticker, renderSticker, renderStickerStamp, type StickerDef, type StickerOutline } from '$engine/stickers';
 import { runHelper, type HelperId } from '../adjust/helper-defs';
 import { docFromSnapshot, layerFromSnapshot, type DocSnapshot, type LayerSnapshot } from './snapshot';
 
@@ -23,7 +24,8 @@ export type PanelRequest =
   | { op: 'presetThumb'; iconKey: string; icon: Pixels; id: PresetId; size: number; options: Partial<PresetOptions> }
   | { op: 'presetBuild'; iconKey: string; icon: Pixels; id: PresetId; size: number; options: Partial<PresetOptions> }
   | { op: 'helper'; id: HelperId; pixels: Pixels; values: Record<string, unknown>; mask: Uint8Array | null }
-  | { op: 'sticker'; id: string; size: number; box: number; color: string | null; outline: StickerOutline | null };
+  | { op: 'sticker'; id: string; size: number; box: number; color: string | null; outline: StickerOutline | null }
+  | { op: 'stickerStamp'; id: string; box: number; color: string | null; outline: StickerOutline | null };
 
 export interface PanelResults {
   layerThumbs: (Pixels | null)[];
@@ -32,6 +34,7 @@ export interface PanelResults {
   presetBuild: PresetResult;
   helper: Pixels;
   sticker: Pixels;
+  stickerStamp: Pixels | null;
 }
 
 export type PanelOp = PanelRequest['op'];
@@ -55,6 +58,12 @@ function buffers(list: (Pixels | null | undefined)[]): Transferable[] {
     }
   }
   return out;
+}
+
+function sticker(id: string): StickerDef {
+  const def = getSticker(id);
+  if (!def) throw new RangeError(`unknown sticker "${id}"`);
+  return def;
 }
 
 /** Icon analyses by icon key (the Styles grid builds 12 presets from one icon). */
@@ -100,9 +109,11 @@ export function handlePanelRequest(req: PanelRequest): { result: unknown; transf
       return { result: px, transfer: buffers([px]) };
     }
     case 'sticker': {
-      const def = getSticker(req.id);
-      if (!def) throw new RangeError(`unknown sticker "${req.id}"`);
-      const px = renderSticker(def, { size: req.size, box: req.box, color: req.color ?? undefined, outline: req.outline });
+      const px = renderSticker(sticker(req.id), { size: req.size, box: req.box, color: req.color ?? undefined, outline: req.outline });
+      return { result: px, transfer: buffers([px]) };
+    }
+    case 'stickerStamp': {
+      const px = renderStickerStamp(sticker(req.id), { box: req.box, color: req.color ?? undefined, outline: req.outline });
       return { result: px, transfer: buffers([px]) };
     }
   }

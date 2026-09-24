@@ -80,21 +80,36 @@ export function captureStack(doc: Doc): StackState {
   return { layers: doc.layers.slice(), activeLayerId: doc.activeLayerId };
 }
 
+/** Memory kept alive by the layers only one of two stacks holds. */
+function stackBytes(before: StackState, after: StackState): number {
+  const a = new Set(before.layers);
+  const b = new Set(after.layers);
+  let n = OVERHEAD;
+  for (const l of a) if (!b.has(l)) n += layerBytes(l);
+  for (const l of b) if (!a.has(l)) n += layerBytes(l);
+  return n;
+}
+
 /** Structural change: add/delete/reorder/replace layers, active layer. */
 export class StackCommand implements DocCommand {
-  readonly bytes: number;
+  private _after: StackState;
+  private _bytes: number;
 
   constructor(
     readonly label: string,
     readonly before: StackState,
-    readonly after: StackState,
+    after: StackState,
   ) {
-    const a = new Set(before.layers);
-    const b = new Set(after.layers);
-    let n = OVERHEAD;
-    for (const l of a) if (!b.has(l)) n += layerBytes(l);
-    for (const l of b) if (!a.has(l)) n += layerBytes(l);
-    this.bytes = n;
+    this._after = after;
+    this._bytes = stackBytes(before, after);
+  }
+
+  get after(): StackState {
+    return this._after;
+  }
+
+  get bytes(): number {
+    return this._bytes;
   }
 
   private static apply(doc: Doc, s: StackState): Change[] {
@@ -109,6 +124,14 @@ export class StackCommand implements DocCommand {
 
   redo(doc: Doc): Change[] {
     return StackCommand.apply(doc, this.after);
+  }
+
+  /** A later stack replacement (pushed right after, from our `after`) becomes our result. */
+  merge(next: DocCommand): boolean {
+    if (!(next instanceof StackCommand)) return false;
+    this._after = next.after;
+    this._bytes = stackBytes(this.before, this._after);
+    return true;
   }
 }
 

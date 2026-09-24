@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { Engine, createEffect, renderSizes } from '$engine/index';
 import { layerThumbnail } from '$engine/doc/thumbnails';
-import { getSticker, renderSticker } from '$engine/stickers';
+import { getSticker, renderSticker, renderStickerStamp } from '$engine/stickers';
 import { PanelsClient, isCancelled, type WorkerLike } from './client';
 import type { PanelMessage } from './protocol';
 import { handlePanelMessage } from './protocol';
@@ -80,6 +80,12 @@ describe('worker requests', () => {
 
     const bad = handlePanelMessage({ op: 'sticker', reqId: 6, id: 'nope', size: 64, box: 40, color: null, outline: null }).response;
     expect(bad).toEqual({ reqId: 6, error: 'unknown sticker "nope"' });
+
+    const outline = { color: '#ffffff', width: 3 };
+    const stamp = handlePanelMessage({ op: 'stickerStamp', reqId: 7, id: 'heart', box: 50, color: '#2255ff', outline }).response as { result: { width: number; data: Uint8ClampedArray } };
+    const want = renderStickerStamp(getSticker('heart')!, { box: 50, color: '#2255ff', outline })!;
+    expect(stamp.result.width).toBe(want.width);
+    expect(same(stamp.result.data, want.data)).toBe(true);
   });
 });
 
@@ -101,6 +107,20 @@ describe('PanelsClient', () => {
     await expect(later).rejects.toSatisfy(isCancelled);
     await expect(client.request({ op: 'sticker', id: 'nope', size: 16, box: 12, color: null, outline: null })).rejects.toThrow('unknown sticker');
     client.dispose();
+  });
+
+  it('terminates its worker once and rejects every later request', async () => {
+    let terminated = 0;
+    const fake: WorkerLike = { onmessage: null, onerror: null, postMessage: () => {}, terminate: () => terminated++ };
+    const client = new PanelsClient(fake);
+    const running = client.request({ op: 'sticker', id: 'star', size: 16, box: 12, color: null, outline: null });
+    client.dispose();
+    client.dispose();
+    expect(terminated).toBe(1);
+    await expect(running).rejects.toSatisfy(isCancelled);
+    await expect(client.request({ op: 'sticker', id: 'star', size: 16, box: 12, color: null, outline: null })).rejects.toSatisfy(isCancelled);
+    expect(client.mode).toBe('sync');
+    expect(client.pending).toBe(0);
   });
 
   it('hands the worker one request at a time, user requests before background work', async () => {

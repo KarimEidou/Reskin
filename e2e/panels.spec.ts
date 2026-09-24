@@ -1,23 +1,14 @@
-// The editor sidebar panels, driven through their UI in the panels harness
-// (src/editor/panels/dev: the real session, engine and Sidebar against the
-// fake backend, served by the Vite dev server in e2e mode). Also renders
-// every panel in both themes for visual review.
+// The editor sidebar panels, driven through their UI in the real editor
+// (editor.html of the e2e build, opened on an item through the handoff).
+// Also checks that opening and closing the editor again and again leaks
+// nothing, and renders every panel in both themes for visual review.
 
 import type { Page } from '@playwright/test';
-import { acquireHarness, releaseHarness } from '../src/editor/panels/dev/server';
-import { compositeHash, history, layerHash, layers, openHarness, openTab, shoot, sidebar } from '../src/editor/panels/dev/driver';
 import type { SidebarTab } from '../src/editor/state/session.svelte';
-import { expect, test } from './support/fixtures';
+import { compositeHash, docToPage, freezeClock, history, layerHash, layers, openEditor, openItem, openTab, shoot, sidebar } from './panels-driver';
+import { expect, openPage, SAMPLE_PATHS, simulateClose, test } from './support/fixtures';
 
-let url = '';
-
-test.beforeAll(async () => {
-  url = await acquireHarness();
-});
-
-test.afterAll(async () => {
-  await releaseHarness();
-});
+const TABS: SidebarTab[] = ['layers', 'color', 'adjust', 'effects', 'styles', 'backdrop', 'stickers', 'history'];
 
 function row(page: Page, name: string) {
   return page.getByTestId('layer-row').filter({ hasText: name });
@@ -25,7 +16,7 @@ function row(page: Page, name: string) {
 
 test.describe('layers', () => {
   test('add, rename, reorder by drag, visibility and opacity', async ({ page }) => {
-    await openHarness(page, url);
+    await openEditor(page);
     expect((await layers(page)).map((l) => l.name)).toEqual(['Steam']);
 
     await page.getByTestId('add-layer').click();
@@ -72,7 +63,7 @@ test.describe('layers', () => {
   });
 
   test('keyboard: select, rename with F2, duplicate, delete, merge', async ({ page }) => {
-    await openHarness(page, url);
+    await openEditor(page);
     await page.getByTestId('duplicate-layer').click();
     await expect(page.getByTestId('layer-row')).toHaveCount(2);
     const copy = row(page, 'Steam copy').locator('button.main');
@@ -94,7 +85,7 @@ test.describe('layers', () => {
   });
 
   test('thumbnails follow the layer pixels', async ({ page }) => {
-    await openHarness(page, url);
+    await openEditor(page);
     const thumb = row(page, 'Steam').locator('canvas');
     await expect(thumb).toBeVisible();
     const sample = () =>
@@ -114,11 +105,84 @@ test.describe('layers', () => {
     await expect.poll(sample).not.toEqual(before);
     expect(await sample()).toEqual([255, 0, 0, 255]);
   });
+
+  test('Ctrl+click a thumbnail selects its pixels; Shift adds, Alt subtracts, both intersect', async ({ page }) => {
+    await openEditor(page);
+    // Two layers with overlapping opaque bands: Left x 100–300, Right x 200–400.
+    await page.evaluate(() => {
+      const e = (globalThis as any).__reskinSession.engine;
+      for (const [name, x0] of [['Left', 100], ['Right', 200]] as const) {
+        const id = e.addLayer({ name });
+        e.editLayerPixels(id, 'Paint', (s: { data: Uint8ClampedArray }) => {
+          for (let y = 100; y < 400; y++) for (let x = x0; x < x0 + 200; x++) s.data.set([20, 120, 220, 255], (y * 512 + x) * 4);
+        });
+      }
+    });
+    const thumb = (name: string) => row(page, name).getByTestId('layer-thumb');
+    // The thumbnail explains itself on hover.
+    await thumb('Left').hover();
+    await expect(page.getByRole('tooltip')).toContainText('Ctrl+click: select this layer’s pixels');
+    /** Which of: only Left, both, only Right, neither are selected. */
+    const selected = () =>
+      page.evaluate(() => {
+        const sel = (globalThis as any).__reskinSession.engine.doc.selection;
+        return [150, 250, 350, 450].map((x) => (sel ? sel.data[250 * 512 + x] > 0 : true));
+      });
+    const active = () => page.evaluate(() => (globalThis as any).__reskinSession.engine.activeLayer.name);
+
+    await thumb('Left').click({ modifiers: ['Control'] });
+    await expect.poll(selected).toEqual([true, true, false, false]);
+    // The active layer does not change.
+    expect(await active()).toBe('Right');
+    await thumb('Right').click({ modifiers: ['Control', 'Shift'] });
+    await expect.poll(selected).toEqual([true, true, true, false]);
+    await thumb('Left').click({ modifiers: ['Control', 'Alt'] });
+    await expect.poll(selected).toEqual([false, false, true, false]);
+    await thumb('Left').click({ modifiers: ['Control'] });
+    await thumb('Right').click({ modifiers: ['Control', 'Shift', 'Alt'] });
+    await expect.poll(selected).toEqual([false, true, false, false]);
+    expect((await history(page)).labels.filter((l) => l === 'Select layer pixels')).toHaveLength(5);
+
+    // A plain click still selects the layer; the menu selects the active layer's pixels.
+    await thumb('Left').click();
+    await expect.poll(active).toBe('Left');
+    await page.getByRole('button', { name: 'More layer actions' }).click();
+    await page.getByRole('menuitem', { name: 'Select layer pixels' }).click();
+    await expect.poll(selected).toEqual([true, true, false, false]);
+  });
+
+  test('keyboard steps on the opacity slider are one undo step; every drag is a step of its own', async ({ page }) => {
+    // Every step lands inside the merge window, however slow the machine.
+    await freezeClock(page);
+    await openEditor(page);
+    const slider = page.getByTestId('layers-panel').getByRole('slider', { name: 'Opacity' });
+    await slider.focus();
+    for (let i = 0; i < 4; i++) await page.keyboard.press('ArrowLeft');
+    await expect.poll(async () => (await layers(page))[0]!.opacity).toBeCloseTo(0.96, 5);
+    expect((await history(page)).labels).toHaveLength(1);
+    // Two drags right after (well inside the merge window): two more steps.
+    const box = (await slider.boundingBox())!;
+    const y = box.y + box.height / 2;
+    for (const [from, to] of [
+      [0.9, 0.7],
+      [0.7, 0.4],
+    ] as const) {
+      await page.mouse.move(box.x + box.width * from, y);
+      await page.mouse.down();
+      await page.mouse.move(box.x + box.width * to, y, { steps: 4 });
+      await page.mouse.up();
+    }
+    await expect.poll(async () => (await layers(page))[0]!.opacity).toBeLessThan(0.5);
+    await expect.poll(async () => (await history(page)).labels.length).toBe(3);
+    await page.locator('body').click({ position: { x: 5, y: 5 } });
+    await page.keyboard.press('Control+z');
+    await expect.poll(async () => (await layers(page))[0]!.opacity).toBeGreaterThan(0.6);
+  });
 });
 
 test.describe('color', () => {
   test('the picker, hex entry and swatches set the engine colours; commits are remembered', async ({ page }) => {
-    await openHarness(page, url);
+    await openEditor(page);
     await openTab(page, 'color');
     const primary = () => page.evaluate(() => (globalThis as any).__reskinSession.engine.primary);
 
@@ -169,7 +233,7 @@ test.describe('color', () => {
 
 test.describe('adjust', () => {
   async function startInvert(page: Page) {
-    await openHarness(page, url);
+    await openEditor(page);
     await openTab(page, 'adjust');
     const before = await layerHash(page);
     await page.locator('[data-filter="invert"]').click();
@@ -180,7 +244,8 @@ test.describe('adjust', () => {
 
   test('a live preview, Apply keeps it as one step, Ctrl+Z restores exactly', async ({ page }) => {
     const before = await startInvert(page);
-    expect((await history(page)).labels).toEqual(['Invert']);
+    // The preview is on the canvas, not in the history, until it is applied.
+    expect((await history(page)).labels).toEqual([]);
     const preview = await layerHash(page);
     await page.getByTestId('adjust-apply').click();
     await expect(page.getByTestId('adjust-editor')).toHaveCount(0);
@@ -195,8 +260,17 @@ test.describe('adjust', () => {
     await expect.poll(() => layerHash(page)).toBe(preview);
   });
 
+  test('leaving the panel keeps the adjustment as one step of the design and of its recipe', async ({ page }) => {
+    await startInvert(page);
+    const inverted = await layerHash(page);
+    await openTab(page, 'styles');
+    expect(await layerHash(page)).toBe(inverted);
+    expect((await history(page)).labels).toEqual(['Invert']);
+    await expect(page.getByTestId('styles-panel')).toContainText('“Apply style to all” will use: Invert');
+  });
+
   test('Cancel restores the layer byte for byte and leaves no history', async ({ page }) => {
-    await openHarness(page, url);
+    await openEditor(page);
     await openTab(page, 'adjust');
     const before = await layerHash(page);
     await page.locator('[data-filter="hueSaturation"]').click();
@@ -204,7 +278,7 @@ test.describe('adjust', () => {
     await hue.focus();
     for (let i = 0; i < 6; i++) await page.keyboard.press('PageUp');
     await expect.poll(() => layerHash(page)).not.toBe(before);
-    expect((await history(page)).labels).toEqual(['Hue / Saturation']);
+    expect((await history(page)).labels).toEqual([]);
     await page.getByTestId('adjust-cancel').click();
     await expect.poll(() => layerHash(page)).toBe(before);
     expect(await history(page)).toEqual({ labels: [], index: 0, canRedo: false });
@@ -212,11 +286,18 @@ test.describe('adjust', () => {
 
   test('Ctrl+Z while previewing ends the adjustment and restores the layer exactly', async ({ page }) => {
     const before = await startInvert(page);
+    const inverted = await layerHash(page);
     await page.locator('body').click({ position: { x: 5, y: 5 } });
     await page.keyboard.press('Control+z');
     await expect(page.getByTestId('adjust-editor')).toHaveCount(0);
     expect(await layerHash(page)).toBe(before);
     expect((await history(page)).index).toBe(0);
+    // The undone adjustment is a redo step: Ctrl+Y brings it back.
+    expect(await history(page)).toEqual({ labels: ['Invert'], index: 0, canRedo: true });
+    await page.keyboard.press('Control+y');
+    await expect.poll(() => layerHash(page)).toBe(inverted);
+    await page.keyboard.press('Control+z');
+    await expect.poll(() => layerHash(page)).toBe(before);
     // Opening an adjustment whose defaults change nothing keeps the redo step.
     await page.locator('[data-filter="brightnessContrast"]').click();
     await expect(page.getByTestId('adjust-editor')).toBeVisible();
@@ -225,8 +306,19 @@ test.describe('adjust', () => {
     expect(await layerHash(page)).toBe(before);
   });
 
+  test('changing the design elsewhere ends the preview and restores the layer', async ({ page }) => {
+    const before = await startInvert(page);
+    await page.evaluate(() => {
+      const e = (globalThis as any).__reskinSession.engine;
+      e.setLayerProps(e.activeLayer.id, { locked: true });
+    });
+    await expect(page.getByTestId('adjust-editor')).toHaveCount(0);
+    expect(await layerHash(page)).toBe(before);
+    expect((await history(page)).labels).toEqual(['Lock layer']);
+  });
+
   test('Reset returns to the defaults; icon helpers preview too', async ({ page }) => {
-    await openHarness(page, url);
+    await openEditor(page);
     await openTab(page, 'adjust');
     const before = await layerHash(page);
     await page.locator('[data-filter="brightnessContrast"]').click();
@@ -254,7 +346,9 @@ test.describe('adjust', () => {
 
 test.describe('effects', () => {
   test('add, toggle and remove layer effects', async ({ page }) => {
-    await openHarness(page, url);
+    // Every step lands inside the merge window, however slow the machine.
+    await freezeClock(page);
+    await openEditor(page);
     await openTab(page, 'effects');
     const plain = await compositeHash(page);
     await page.getByRole('button', { name: 'Drop shadow' }).click();
@@ -290,7 +384,7 @@ test.describe('effects', () => {
 
 test.describe('backdrop', () => {
   test('adds a bottom layer, then updates it', async ({ page }) => {
-    await openHarness(page, url);
+    await openEditor(page);
     await openTab(page, 'backdrop');
     const plain = await compositeHash(page);
     await page.getByTestId('apply-backdrop').click();
@@ -311,7 +405,7 @@ test.describe('backdrop', () => {
 
 test.describe('stickers', () => {
   test('adds a sticker as a new centred layer and selects the move tool', async ({ page }) => {
-    await openHarness(page, url);
+    await openEditor(page);
     await openTab(page, 'stickers');
     await page.getByTestId('sticker-search').fill('love');
     await expect(page.getByTestId('sticker')).toHaveCount(1);
@@ -343,11 +437,67 @@ test.describe('stickers', () => {
     await page.getByTestId('emoji').first().click();
     await expect.poll(async () => (await layers(page)).length).toBe(3);
   });
+
+  test('stamps a sticker or an emoji by clicking on the canvas', async ({ page }) => {
+    await openEditor(page);
+    await page.getByTestId('add-layer').click();
+    await openTab(page, 'stickers');
+    await page.getByTestId('sticker-search').fill('love');
+    // The Stamp button shows on hover.
+    await page.locator('[data-sticker="heart"]').hover();
+    await page.getByRole('button', { name: 'Stamp Heart' }).click();
+    /** The stamp tool's image: its size and a checksum of its pixels. */
+    const stamp = () =>
+      page.evaluate(() => {
+        const e = (globalThis as any).__reskinSession.engine;
+        const s = e.getToolOptions('stamp').stamp;
+        let sum = 0;
+        if (s) for (let i = 0; i < s.data.length; i++) sum = (sum * 31 + s.data[i]) % 1_000_000_007;
+        return { tool: e.toolId, width: s?.width ?? 0, height: s?.height ?? 0, sum };
+      });
+    await expect.poll(stamp).toMatchObject({ tool: 'stamp' });
+    const heart = await stamp();
+    // Cropped to the art at the panel's size (46 % of the canvas, plus the outline).
+    expect(heart.width).toBeGreaterThan(200);
+    expect(heart.width).toBeLessThan(300);
+
+    const at = await docToPage(page, 160, 180);
+    await page.mouse.click(at.x, at.y);
+    await expect.poll(async () => (await history(page)).labels.at(-1)).toBe('Stamp');
+    expect((await layers(page)).map((l) => l.name)).toEqual(['Steam', 'Layer 1']);
+    // Centred where the canvas was clicked, in the sticker's colour.
+    const placed = await page.evaluate(() => {
+      const s = (globalThis as any).__reskinSession.engine.activeLayer.surface;
+      const b = s.alphaBounds();
+      const x = b.x + b.w / 2;
+      const y = b.y + b.h / 2;
+      return { x, y, w: b.w, rgb: s.getPixel(Math.floor(x), Math.floor(y)).slice(0, 3) };
+    });
+    expect(Math.abs(placed.x - 160)).toBeLessThanOrEqual(1);
+    expect(Math.abs(placed.y - 180)).toBeLessThanOrEqual(1);
+    expect(placed.w).toBe(heart.width);
+    expect(placed.rgb[0]).toBeGreaterThan(200);
+
+    // Alt+click and Alt+Enter stamp too (sticker and emoji).
+    await page.getByTestId('sticker-search').fill('star');
+    await page.locator('[data-sticker="star"]').click({ modifiers: ['Alt'] });
+    await expect.poll(async () => (await stamp()).sum).not.toBe(heart.sum);
+    expect((await layers(page)).length).toBe(2);
+    await page.getByTestId('sticker-search').fill('rocket');
+    const rocket = page.getByTestId('emoji').first();
+    await rocket.focus();
+    await expect(page.getByRole('button', { name: 'Stamp rocket' })).toBeVisible();
+    const star = (await stamp()).sum;
+    await page.keyboard.press('Alt+Enter');
+    await expect.poll(async () => (await stamp()).sum).not.toBe(star);
+    expect(await stamp()).toMatchObject({ tool: 'stamp' });
+    expect((await layers(page)).length).toBe(2);
+  });
 });
 
 test.describe('history', () => {
   test('lists every step and jumps back and forth', async ({ page }) => {
-    await openHarness(page, url);
+    await openEditor(page);
     await page.getByTestId('add-layer').click();
     await page.getByTestId('add-layer').click();
     await openTab(page, 'history');
@@ -372,7 +522,7 @@ test.describe('history', () => {
 
 test.describe('previews', () => {
   test('render every export size 1:1 through the export path, plus desktop and taskbars', async ({ page }) => {
-    await openHarness(page, url);
+    await openEditor(page);
     const sizes = await page.evaluate(() => window.__e2e!.settings.icoSizes);
     const previews = page.getByTestId('previews');
     await expect(previews.locator('li.size.ready')).toHaveCount(sizes.length);
@@ -442,17 +592,17 @@ test.describe('previews', () => {
   });
 
   test('a missing wallpaper falls back to the desktop colour', async ({ page }) => {
-    await openHarness(page, url);
+    await openPage(page, 'editor');
     await page.evaluate(() => window.__e2e!.failNext('wallpaper', 'no wallpaper'));
-    await page.reload();
-    await expect(page.locator('main[data-ready="true"]')).toBeAttached({ timeout: 30_000 });
+    await openItem(page);
     await expect(page.getByTestId('desktop-preview')).toBeVisible();
+    await expect(page.getByTestId('previews')).toContainText('Your wallpaper could not be read, so the desktop colour is shown.');
   });
 });
 
 test.describe('sidebar', () => {
   test('tabs are keyboard operable and bound to the session', async ({ page }) => {
-    await openHarness(page, url);
+    await openEditor(page);
     const tabs = sidebar(page).getByRole('tab');
     await expect(tabs).toHaveCount(8);
     await tabs.first().focus();
@@ -469,7 +619,7 @@ test.describe('sidebar', () => {
   });
 
   test('each tab keeps its scroll position, also when switched from elsewhere', async ({ page }) => {
-    await openHarness(page, url);
+    await openEditor(page);
     await openTab(page, 'adjust');
     await expect(page.getByTestId('adjust-panel')).toBeVisible();
     const scroller = page.getByTestId('panel-adjust');
@@ -484,12 +634,53 @@ test.describe('sidebar', () => {
   });
 });
 
+test.describe('lifecycle', () => {
+  test('opening and closing the editor again and again leaks no listeners, timers or workers', async ({ page }) => {
+    test.setTimeout(120_000);
+    await openPage(page, 'editor');
+    const counts = () => page.evaluate(() => (globalThis as any).__reskinProbe());
+    /** One open → work in every panel → close, as a user would. */
+    async function cycle(): Promise<void> {
+      await openItem(page, SAMPLE_PATHS.steam);
+      await expect(page.getByTestId('previews').locator('li.size.ready').first()).toBeVisible();
+      for (const tab of TABS) {
+        await openTab(page, tab);
+        if (tab === 'adjust') {
+          await page.locator('[data-filter="invert"]').click();
+          await expect(page.getByTestId('adjust-editor')).toBeVisible();
+          await page.getByTestId('adjust-cancel').click();
+        }
+        if (tab === 'styles') await expect(page.locator('[data-testid="preset-tile"][data-ready="true"]')).toHaveCount(12, { timeout: 20_000 });
+      }
+      await openTab(page, 'layers');
+      await simulateClose(page);
+    }
+    /** Counts once nothing is pending any more (debounces, autosave, idle work). */
+    async function settled(): Promise<Record<string, number>> {
+      let last = JSON.stringify(await counts());
+      for (let i = 0; i < 8; i++) {
+        await page.waitForTimeout(2500);
+        const now = JSON.stringify(await counts());
+        if (now === last) return JSON.parse(now);
+        last = now;
+      }
+      throw new Error(`the editor never settled: ${last}`);
+    }
+
+    await cycle();
+    const baseline = await settled();
+    // The session's two workers (panels, filters), started on first use.
+    expect(baseline.workers).toBe(2);
+    expect(baseline.intervals).toBe(0);
+    for (let n = 2; n <= 5; n++) await cycle();
+    await expect.poll(counts, { timeout: 20_000, intervals: [500] }).toEqual(baseline);
+  });
+});
+
 // ---------------------------------------------------------------------------
 // Visual review (not assertions). RESKIN_SCREENSHOTS=1 refreshes
 // e2e/__screenshots__/panels-*.png.
 // ---------------------------------------------------------------------------
-
-const TABS: SidebarTab[] = ['layers', 'color', 'adjust', 'effects', 'styles', 'backdrop', 'stickers', 'history'];
 
 test.describe('panel gallery', () => {
   test.use({ viewport: { width: 1000, height: 900 }, deviceScaleFactor: 2 });
@@ -497,7 +688,7 @@ test.describe('panel gallery', () => {
   for (const theme of ['dark', 'light'] as const) {
     test(`every panel (${theme})`, async ({ page }, info) => {
       test.setTimeout(90_000);
-      await openHarness(page, url, { settings: { theme } });
+      await openEditor(page, { settings: { theme } });
       // Some content to show: an effect, a second layer, a few history steps.
       await page.evaluate(() => {
         const e = (globalThis as any).__reskinSession.engine;

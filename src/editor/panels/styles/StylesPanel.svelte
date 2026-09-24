@@ -3,7 +3,8 @@
   (thumbnails built in the panels worker and cached per icon). Clicking one
   replaces the design with that look as ONE undo step and records it as the
   recipe "Apply style to all" replays. Accent, intensity and shape re-style
-  the grid, and the applied look while it is still the latest change.
+  the grid, and the applied look while it is still the latest change (the
+  engine merges the new stack into that same step).
 -->
 <script module lang="ts">
   import type { Pixels } from '$engine/filters/types';
@@ -23,14 +24,14 @@
   /**
    * Designs without an original icon are styled from their composite. Once
    * a look is applied, that composite is the styled one, so the unstyled
-   * source is kept per document together with the history step of the look
+   * source is kept per document together with the history entry of the look
    * built from it: while that look is still the latest change, reopening the
    * panel styles the same source again (not a style of a style).
    */
-  const designSources = new WeakMap<object, { source: Pixels; look: unknown }>();
+  const designSources = new WeakMap<object, { source: Pixels; entry: number | null }>();
 
-  /** The look last applied to each document (its preset and history step), so the panel shows it again after a tab switch. */
-  const appliedLooks = new WeakMap<object, { id: PresetId; cmd: unknown }>();
+  /** The look last applied to each document (its preset and history entry), so the panel shows it again after a tab switch. */
+  const appliedLooks = new WeakMap<object, { id: PresetId; entry: number | null }>();
 
   interface Tuning {
     matchIcon: boolean;
@@ -56,12 +57,11 @@
   import Toggle from '$lib/ui/Toggle.svelte';
   import { toast } from '$lib/ui/toasts.svelte';
   import { getSession } from '../../state/context';
-  import { discardRedo } from '../adjust/live-edit';
   import { watchDpr } from '../common/canvas';
   import PixelThumb from '../common/PixelThumb.svelte';
   import Section from '../common/Section.svelte';
   import { debounce } from '../common/schedule';
-  import { isCancelled, panelsWorker } from '../worker/client';
+  import { isCancelled } from '../worker/client';
   import { snapshotDoc, snapshotTransfer } from '../worker/snapshot';
   import { presetRecipe, type PresetBuilder } from './recipe';
 
@@ -97,13 +97,13 @@
 
   onMount(() => {
     const kept = designSources.get(engine.doc);
-    if (!session.original && kept && kept.look === engine.history.peek()) {
+    if (!session.original && kept && kept.entry === engine.currentEntryId) {
       designSource = kept.source;
     } else if (!session.original) {
       // No original icon (a blank design or an image): style the current
       // design, composited in the worker through the export path.
       const snap = snapshotDoc(engine.doc);
-      panelsWorker()
+      session.panels
         .request({ op: 'renderSizes', doc: snap, sizes: [256] }, { transfer: snapshotTransfer(snap) })
         .then(([r]) => {
           const px = r?.pixels;
@@ -152,7 +152,7 @@
       }
       next[p.id] = thumbs[p.id];
       const copy = { width: src.width, height: src.height, data: src.data.slice() };
-      panelsWorker()
+      session.panels
         .request({ op: 'presetThumb', iconKey: key, icon: copy, id: p.id, size, options: opts }, { channel: `preset-thumb-${p.id}`, transfer: [copy.data.buffer], priority: 'low' })
         .then((px) => {
           remember(cacheKey, px);
@@ -176,15 +176,20 @@
 
   // ---- applying ----------------------------------------------------------------------------
   const lastLook = appliedLooks.get(engine.doc);
-  const lookIsLatest = lastLook !== undefined && lastLook.cmd === engine.history.peek();
+  const lookIsLatest = lastLook !== undefined && lastLook.entry !== null && lastLook.entry === engine.currentEntryId;
   let applying = $state<PresetId | null>(null);
   let applied = $state<PresetId | null>(lookIsLatest ? lastLook.id : null);
-  /** History command of our last apply (to re-style it in place). */
-  let appliedCmd: unknown = lookIsLatest ? lastLook.cmd : null;
+  /** History entry of our last apply (re-styled in place while it is the latest). */
+  let appliedEntry: number | null = lookIsLatest ? lastLook.entry : null;
+
+  /** The applied look is still the latest change. */
+  function lookIsCurrent(): boolean {
+    return appliedEntry !== null && engine.currentEntryId === appliedEntry;
+  }
 
   const builder: PresetBuilder = (id, src, size, opts) => {
     const copy = { width: src.width, height: src.height, data: new Uint8ClampedArray(src.data) };
-    return panelsWorker().request({ op: 'presetBuild', iconKey: hashPixels(copy), icon: copy, id, size, options: opts }, { transfer: [copy.data.buffer] });
+    return session.panels.request({ op: 'presetBuild', iconKey: hashPixels(copy), icon: copy, id, size, options: opts }, { transfer: [copy.data.buffer] });
   };
 
   /** Options changed while a look was being applied: re-style once it lands. */
@@ -203,24 +208,21 @@
     const doc = engine.doc;
     try {
       const copy = { width: src.width, height: src.height, data: src.data.slice() };
-      const result = await panelsWorker().request(
+      const result = await session.panels.request(
         { op: 'presetBuild', iconKey, icon: copy, id, size: doc.width, options: opts },
         { channel: 'preset-apply', transfer: [copy.data.buffer] },
       );
       // Another design was opened meanwhile: this look was not meant for it.
       if (engine.doc !== doc) return;
-      if (inPlace) {
-        // Only while the look is still the latest change (the user may have
-        // edited meanwhile): replace it instead of stacking another step.
-        if (!appliedCmd || engine.history.peek() !== appliedCmd) return;
-        engine.undo();
-        discardRedo(engine);
-      }
-      applyPresetResult(engine, result, `Style: ${label}`);
-      appliedCmd = engine.history.peek();
+      // Re-styling only while the look is still the latest change (the user
+      // may have edited meanwhile); the same merge key then replaces it in
+      // place instead of stacking another step.
+      if (inPlace && !lookIsCurrent()) return;
+      applyPresetResult(engine, result, { label: `Style: ${label}`, mergeKey: `style:${id}` });
+      appliedEntry = engine.currentEntryId;
       applied = id;
-      appliedLooks.set(doc, { id, cmd: appliedCmd });
-      if (!session.original) designSources.set(doc, { source: src, look: appliedCmd });
+      appliedLooks.set(doc, { id, entry: appliedEntry });
+      if (!session.original) designSources.set(doc, { source: src, entry: appliedEntry });
       session.recipe = presetRecipe(id, label, opts, builder);
     } catch (e) {
       if (!isCancelled(e)) toast({ message: `Could not apply ${label}: ${e instanceof Error ? e.message : String(e)}`, kind: 'error' });
@@ -235,7 +237,7 @@
 
   // Re-style the applied look when the options change (only while it is the latest change).
   const restyle = debounce(() => {
-    if (applied && appliedCmd && engine.history.peek() === appliedCmd) void apply(applied, true);
+    if (applied && lookIsCurrent()) void apply(applied, true);
   }, 280);
 
   let destroyed = false;
@@ -257,7 +259,7 @@
   // The applied marker follows undo / other edits.
   const stillApplied = $derived.by(() => {
     void session.rev.history;
-    return applied !== null && engine.history.peek() === appliedCmd;
+    return applied !== null && lookIsCurrent();
   });
 
   const shapeOptions = [{ value: 'auto', label: 'Preset’s own' }, ...BACKDROP_SHAPES.map((s) => ({ value: s.id, label: s.label }))];

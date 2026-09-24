@@ -1,25 +1,22 @@
-// The Styles panel: twelve presets rendered live from the item's icon,
-// applied as one undoable step and recorded for "Apply style to all".
-// Also captures the grid and several applied presets for visual review.
+// The Styles panel in the real editor: twelve presets rendered live from
+// the item's icon, applied as one undoable step and recorded for "Apply
+// style to all". Also captures the grid and several applied presets for
+// visual review.
 
-import { acquireHarness, releaseHarness } from '../src/editor/panels/dev/server';
-import { compositeHash, history, layers, openHarness, openTab, shoot, sidebar } from '../src/editor/panels/dev/driver';
+import { canvas, compositeHash, history, layers, openEditor, openTab, shoot, sidebar } from './panels-driver';
 import { expect, test } from './support/fixtures';
-
-let url = '';
-
-test.beforeAll(async () => {
-  url = await acquireHarness();
-});
-
-test.afterAll(async () => {
-  await releaseHarness();
-});
 
 const tiles = (page: import('@playwright/test').Page) => page.getByTestId('preset-tile');
 
+/**
+ * A look is built in the panels worker after the request that is running
+ * there (right after the tab opens: the thumbnails); on a busy machine that
+ * takes longer than the default expect timeout.
+ */
+const BUILT = { timeout: 15_000 };
+
 test('the grid shows twelve live thumbnails of the icon', async ({ page }) => {
-  await openHarness(page, url);
+  await openEditor(page);
   await openTab(page, 'styles');
   await expect(tiles(page)).toHaveCount(12);
   await expect(page.locator('[data-testid="preset-tile"][data-ready="true"]')).toHaveCount(12, { timeout: 20_000 });
@@ -39,12 +36,12 @@ test('the grid shows twelve live thumbnails of the icon', async ({ page }) => {
 });
 
 test('applying a preset is one undo step and becomes the batch recipe', async ({ page }) => {
-  await openHarness(page, url);
+  await openEditor(page);
   await openTab(page, 'styles');
   const before = await compositeHash(page);
   const names = (await layers(page)).map((l) => l.name);
   await page.locator('[data-preset="neon"]').click();
-  await expect(page.locator('[data-preset="neon"]')).toHaveAttribute('aria-pressed', 'true');
+  await expect(page.locator('[data-preset="neon"]')).toHaveAttribute('aria-pressed', 'true', BUILT);
   await expect.poll(() => compositeHash(page)).not.toBe(before);
   expect((await history(page)).labels).toEqual(['Style: Neon']);
   expect((await layers(page)).map((l) => l.name)).toEqual(['Backdrop', 'Neon fill', 'Neon']);
@@ -67,10 +64,10 @@ test('applying a preset is one undo step and becomes the batch recipe', async ({
 });
 
 test('after a tab switch the applied look is still marked and re-styles in place', async ({ page }) => {
-  await openHarness(page, url);
+  await openEditor(page);
   await openTab(page, 'styles');
   await page.locator('[data-preset="clay"]').click();
-  await expect(page.locator('[data-preset="clay"]')).toHaveAttribute('aria-pressed', 'true');
+  await expect(page.locator('[data-preset="clay"]')).toHaveAttribute('aria-pressed', 'true', BUILT);
   await openTab(page, 'layers');
   await openTab(page, 'styles');
   await expect(page.locator('[data-preset="clay"]')).toHaveAttribute('aria-pressed', 'true');
@@ -84,10 +81,10 @@ test('after a tab switch the applied look is still marked and re-styles in place
 });
 
 test('the recipe replays on another icon ("Apply style to all")', async ({ page }) => {
-  await openHarness(page, url);
+  await openEditor(page);
   await openTab(page, 'styles');
   await page.locator('[data-preset="sticker"]').click();
-  await expect.poll(() => history(page).then((h) => h.labels.length)).toBe(1);
+  await expect.poll(() => history(page).then((h) => h.labels.length), BUILT).toBe(1);
   const replayed = await page.evaluate(async () => {
     const s = (globalThis as any).__reskinSession;
     const Engine = s.engine.constructor;
@@ -107,7 +104,7 @@ test.describe('preset gallery', () => {
   for (const theme of ['dark', 'light'] as const) {
     test(`grid and applied looks (${theme})`, async ({ page }, info) => {
       test.setTimeout(120_000);
-      await openHarness(page, url, { settings: { theme } });
+      await openEditor(page, { settings: { theme } });
       await openTab(page, 'styles');
       await expect(page.locator('[data-testid="preset-tile"][data-ready="true"]')).toHaveCount(12, { timeout: 20_000 });
       await shoot(sidebar(page), info, `panels-styles-grid-${theme}.png`);
@@ -118,7 +115,7 @@ test.describe('preset gallery', () => {
         await expect.poll(() => compositeHash(page), { timeout: 15_000 }).not.toBe(before);
         await expect(page.locator(`[data-preset="${id}"]`)).toHaveAttribute('aria-pressed', 'true');
         await page.waitForTimeout(300);
-        await shoot(page.getByTestId('stage'), info, `panels-preset-${id}.png`);
+        await shoot(canvas(page), info, `panels-preset-${id}.png`);
       }
     });
   }
@@ -129,7 +126,7 @@ test.describe('preset gallery', () => {
       ['C:\\Users\\e2e\\Desktop\\Projects\\', 'folder'],
       ['C:\\Users\\e2e\\Desktop\\Docs Portal.url', 'site'],
     ] as const) {
-      await openHarness(page, url, {}, `?item=${encodeURIComponent(item)}`);
+      await openEditor(page, {}, item);
       await openTab(page, 'styles');
       await expect(page.locator('[data-testid="preset-tile"][data-ready="true"]')).toHaveCount(12, { timeout: 20_000 });
       await shoot(page.getByTestId('styles-panel').locator('[role="list"]'), info, `panels-styles-${name}.png`);

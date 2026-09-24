@@ -2,23 +2,38 @@
   Stickers panel: vector stickers (recolourable, optional outline) and
   emoji, with search. Clicking one adds it as a new layer centred on the
   canvas at the chosen size and switches to the move tool so it can be
-  placed.
+  placed. Its Stamp button (shown on hover / focus), Alt+click or Alt+Enter
+  loads it into the stamp tool instead, rendered with the same colour,
+  outline and size options, to click it onto the canvas anywhere.
 -->
 <script lang="ts">
   import Search from '@lucide/svelte/icons/search';
+  import Stamp from '@lucide/svelte/icons/stamp';
   import Sticker from '@lucide/svelte/icons/sticker';
-  import { EMOJI_GROUPS, canRenderEmoji, renderEmoji, searchEmoji, searchStickers, stickerSvgElements, type StickerDef } from '$engine/stickers';
+  import type { Pixels } from '$engine/filters/types';
+  import { Surface } from '$engine/index';
+  import { insertLayer, makeRasterLayer } from '$engine/presets';
+  import {
+    EMOJI_GROUPS,
+    canRenderEmoji,
+    renderEmoji,
+    renderEmojiStamp,
+    searchEmoji,
+    searchStickers,
+    stickerSvgElements,
+    type StickerDef,
+    type StickerOutline,
+  } from '$engine/stickers';
   import EmptyState from '$lib/ui/EmptyState.svelte';
   import SegmentedControl from '$lib/ui/SegmentedControl.svelte';
   import Slider from '$lib/ui/Slider.svelte';
   import Toggle from '$lib/ui/Toggle.svelte';
   import { toast } from '$lib/ui/toasts.svelte';
-  import { insertLayer, makeRasterLayer } from '$engine/presets';
   import { getSession } from '../../state/context';
   import ColorField from '../color/ColorField.svelte';
   import { hexOf } from '../common/color';
   import Section from '../common/Section.svelte';
-  import { isCancelled, panelsWorker } from '../worker/client';
+  import { isCancelled } from '../worker/client';
 
   const session = getSession();
   const engine = session.engine;
@@ -31,6 +46,9 @@
   let outlineWidth = $state(4); // % of the sticker size
   let size = $state(46); // % of the canvas
   let adding = $state<string | null>(null);
+  /** Items whose Stamp button shows: the one under the pointer and the one holding focus. */
+  let hovered = $state<string | null>(null);
+  let focused = $state<string | null>(null);
 
   const stickers = $derived(searchStickers(query));
   const emojiOk = canRenderEmoji();
@@ -41,45 +59,83 @@
     return colorMode === 'custom' ? custom : def.color;
   }
 
-  function place(label: string, pixels: { width: number; height: number; data: Uint8ClampedArray }): void {
+  /** The sticker box at the chosen size, document px. */
+  function boxSize(): number {
+    return (engine.doc.width * size) / 100;
+  }
+
+  function outlineFor(box: number): StickerOutline | null {
+    return outline ? { color: outlineColor, width: Math.max(0.5, (box * outlineWidth) / 100) } : null;
+  }
+
+  function place(label: string, pixels: Pixels): void {
     const layer = makeRasterLayer(engine, label, pixels);
     insertLayer(engine, `Add ${label.toLowerCase()}`, layer);
     engine.setTool('move');
   }
 
-  async function addSticker(def: StickerDef): Promise<void> {
+  /** Loads an image into the stamp tool and selects the tool. */
+  function useStamp(pixels: Pixels): void {
+    engine.setToolOptions('stamp', { stamp: Surface.fromRgba(pixels.width, pixels.height, pixels.data) });
+    engine.setTool('stamp');
+  }
+
+  async function addSticker(def: StickerDef, stamp: boolean): Promise<void> {
     if (adding) return;
     adding = def.id;
     const target = engine.doc;
-    const doc = target.width;
-    const box = (doc * size) / 100;
+    const box = boxSize();
+    const color = colorFor(def);
     try {
-      const px = await panelsWorker().request({
-        op: 'sticker',
-        id: def.id,
-        size: doc,
-        box,
-        color: colorFor(def),
-        outline: outline ? { color: outlineColor, width: Math.max(0.5, (box * outlineWidth) / 100) } : null,
-      });
-      // Another design was opened (or resized) meanwhile: not meant for it.
-      if (engine.doc !== target || target.width !== px.width) return;
-      place(def.label, px);
+      if (stamp) {
+        const px = await session.panels.request({ op: 'stickerStamp', id: def.id, box, color, outline: outlineFor(box) });
+        // Another design was opened meanwhile: the size was meant for the old one.
+        if (engine.doc !== target || !px) return;
+        useStamp(px);
+      } else {
+        const px = await session.panels.request({ op: 'sticker', id: def.id, size: target.width, box, color, outline: outlineFor(box) });
+        // Another design was opened (or resized) meanwhile: not meant for it.
+        if (engine.doc !== target || target.width !== px.width) return;
+        place(def.label, px);
+      }
     } catch (e) {
-      if (!isCancelled(e)) toast({ message: `Could not add the sticker: ${e instanceof Error ? e.message : String(e)}`, kind: 'error' });
+      if (!isCancelled(e)) toast({ message: `Could not ${stamp ? 'stamp' : 'add'} the sticker: ${e instanceof Error ? e.message : String(e)}`, kind: 'error' });
     } finally {
       adding = null;
     }
   }
 
-  function addEmoji(char: string, name: string): void {
-    const doc = engine.doc.width;
-    const px = renderEmoji(char, { size: doc, box: (doc * size) / 100 });
+  function addEmoji(char: string, name: string, stamp: boolean): void {
+    const px = stamp ? renderEmojiStamp(char, boxSize()) : renderEmoji(char, { size: engine.doc.width, box: boxSize() });
     if (!px) {
       toast({ message: 'Emoji cannot be drawn here.', kind: 'error' });
       return;
     }
-    place(name.replace(/^./, (c) => c.toUpperCase()), px);
+    if (stamp) useStamp(px);
+    else place(name.replace(/^./, (c) => c.toUpperCase()), px);
+  }
+
+  /** Alt+Enter on an item stamps it (Enter alone adds it). */
+  function stampKey(e: KeyboardEvent, run: () => void): void {
+    if (e.key !== 'Enter' || !e.altKey) return;
+    e.preventDefault();
+    e.stopPropagation();
+    run();
+  }
+
+  /** Hover and focus tracking that shows an item's Stamp button. */
+  function reveal(key: string) {
+    return {
+      onpointerenter: () => (hovered = key),
+      onpointerleave: () => {
+        if (hovered === key) hovered = null;
+      },
+      onfocusin: () => (focused = key),
+      onfocusout: (e: FocusEvent) => {
+        const next = e.relatedTarget;
+        if (focused === key && !(next instanceof Node && (e.currentTarget as HTMLElement).contains(next))) focused = null;
+      },
+    };
   }
 
   const COLOR_MODES = [
@@ -115,14 +171,17 @@
         {#each stickers as def (def.id)}
           {@const els = stickerSvgElements(def, colorFor(def))}
           {@const ow = outline ? outlineWidth * 2 : 0}
-          <div role="listitem">
+          {@const key = `s:${def.id}`}
+          <div role="listitem" class="item" {...reveal(key)}>
             <button
               type="button"
               class="cell"
               aria-label="Add {def.label} sticker"
-              title={def.label}
+              aria-keyshortcuts="Alt+Enter"
+              title="{def.label} — click to add, Alt+click to stamp"
               aria-busy={adding === def.id}
-              onclick={() => void addSticker(def)}
+              onclick={(e) => void addSticker(def, e.altKey)}
+              onkeydown={(e) => stampKey(e, () => void addSticker(def, true))}
               data-testid="sticker"
               data-sticker={def.id}
             >
@@ -147,6 +206,11 @@
                 {/each}
               </svg>
             </button>
+            {#if hovered === key || focused === key}
+              <button type="button" class="stamp" aria-label="Stamp {def.label}" title="Stamp it on the canvas" onclick={() => void addSticker(def, true)} data-testid="stamp-sticker">
+                <Stamp size={12} aria-hidden="true" />
+              </button>
+            {/if}
           </div>
         {/each}
       </div>
@@ -162,8 +226,23 @@
           <h4>{g.label}</h4>
           <div class="emoji" role="list">
             {#each g.items as e (e.char)}
-              <div role="listitem">
-                <button type="button" class="em" aria-label="Add {e.name} emoji" title={e.name} onclick={() => addEmoji(e.char, e.name)} data-testid="emoji">{e.char}</button>
+              {@const key = `e:${e.char}`}
+              <div role="listitem" class="item" {...reveal(key)}>
+                <button
+                  type="button"
+                  class="em"
+                  aria-label="Add {e.name} emoji"
+                  aria-keyshortcuts="Alt+Enter"
+                  title="{e.name} — click to add, Alt+click to stamp"
+                  onclick={(ev) => addEmoji(e.char, e.name, ev.altKey)}
+                  onkeydown={(ev) => stampKey(ev, () => addEmoji(e.char, e.name, true))}
+                  data-testid="emoji">{e.char}</button
+                >
+                {#if hovered === key || focused === key}
+                  <button type="button" class="stamp" aria-label="Stamp {e.name}" title="Stamp it on the canvas" onclick={() => addEmoji(e.char, e.name, true)} data-testid="stamp-emoji">
+                    <Stamp size={12} aria-hidden="true" />
+                  </button>
+                {/if}
               </div>
             {/each}
           </div>
@@ -215,6 +294,9 @@
     grid-template-columns: repeat(6, minmax(0, 1fr));
     gap: 2px;
   }
+  .item {
+    position: relative;
+  }
   .cell,
   .em {
     display: grid;
@@ -245,6 +327,38 @@
   }
   .cell[aria-busy='true'] {
     opacity: 0.5;
+  }
+  /* The item's Stamp button, on its top-right corner while hovered or
+     focused (half outside, so the item's own centre stays clickable). */
+  .stamp {
+    position: absolute;
+    top: -4px;
+    right: -4px;
+    z-index: 1;
+    display: grid;
+    place-items: center;
+    width: 18px;
+    height: 18px;
+    padding: 0;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-xs);
+    background: var(--surface-overlay);
+    color: var(--text-2);
+    box-shadow: var(--shadow-1);
+    cursor: default;
+    animation: stamp-in var(--fade-1) linear;
+  }
+  .stamp:hover {
+    color: var(--accent-text);
+  }
+  .stamp:focus-visible {
+    outline: var(--focus-width) solid var(--focus-color);
+    outline-offset: 1px;
+  }
+  @keyframes stamp-in {
+    from {
+      opacity: 0;
+    }
   }
   svg {
     width: 100%;

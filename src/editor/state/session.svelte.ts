@@ -1,10 +1,12 @@
 // The editor session: the one reactive hub every editor component talks to.
 //
-// It owns the image engine, the queue of dropped items (each keeps its own
-// design while you switch between them), the apply / elevation / batch
-// flows, library + export + clipboard actions and the crash-recovery
-// autosave. Components read `$state` fields directly and re-derive engine
-// data from the `rev` counters, which are bumped by engine events.
+// It owns the image engine, the workers the panels compute in (created on
+// first use, terminated with the session), the queue of dropped items (each
+// keeps its own design and style recipe while you switch between them), the
+// apply / elevation / batch flows, library + export + clipboard actions and
+// the crash-recovery autosave. Components read `$state` fields directly and
+// re-derive engine data from the `rev` counters, which are bumped by engine
+// events.
 //
 // Rust talks to the editor through the mailbox (see App.svelte / the morph
 // controller); this module only calls commands.
@@ -23,8 +25,9 @@ import { commands } from '$lib/ipc/commands';
 import { settings } from '$lib/settings/store.svelte';
 import { toast } from '$lib/ui/toasts.svelte';
 import { play } from '$lib/sound/synth';
-import { Engine, Surface, type EngineEvent, type EngineEventKind } from '$engine/index';
+import { Engine, Surface, type EngineEvent, type EngineEventKind, type LayerPreview } from '$engine/index';
 import { FilterClient } from '$engine/filters/client';
+import { PanelsClient } from '../panels/worker/client';
 
 export type SidebarTab =
   | 'layers'
@@ -43,6 +46,8 @@ export interface QueueEntry {
   status: QueueStatus;
   /** Serialized design while another item is being edited. */
   project: string | null;
+  /** The style recipe of that design while another item is being edited. */
+  recipe: StyleRecipe | null;
   /** Small preview (data URL) for the queue strip. */
   thumb: string | null;
   outcome: ApplyOutcome | null;
@@ -52,6 +57,11 @@ export interface QueueEntry {
  * A re-playable style (preset / backdrop / adjustments) so "Apply style to
  * all" can rebuild it on every queued item's own icon. `apply` receives an
  * engine holding a fresh document whose only layer is the item's icon.
+ *
+ * A recipe belongs to one design: the panels chain their steps onto the
+ * current design's recipe, each queued item keeps its own while another one
+ * is edited, and a new design (a standalone image or project, New blank, a
+ * Library design, a recovered autosave) starts without one.
  */
 export interface StyleRecipe {
   label: string;
@@ -102,6 +112,7 @@ const REV_KINDS: EngineEventKind[] = [
   'interaction',
   'textEdit',
   'message',
+  'preview',
 ];
 
 const AUTOSAVE_DELAY_MS = 2000;
@@ -114,8 +125,9 @@ export function isTarget(info: ItemInfo): boolean {
 
 export class EditorSession {
   readonly engine: Engine;
-  readonly filters: FilterClient;
   private readonly deps: SessionDeps;
+  private filterClient: FilterClient | null = null;
+  private panelsClient: PanelsClient | null = null;
 
   view = $state<EditorView>('start');
   queue = $state<QueueEntry[]>([]);
@@ -130,8 +142,13 @@ export class EditorSession {
   original = $state.raw<Surface | null>(null);
   /** A design is loaded (queued item, standalone image, project or blank). */
   hasDesign = $state(false);
-  /** Style last applied from the Styles/Backdrop/Adjust panels. */
+  /** The current design's style recipe (Styles/Backdrop/Adjust panels), replayed by "Apply style to all". */
   recipe = $state.raw<StyleRecipe | null>(null);
+  /**
+   * The design's recipe once the open layer preview is kept: set by the
+   * Adjust panel for the adjustment being tuned, used by `keepPreview`.
+   */
+  previewRecipe: { preview: LayerPreview; recipe: () => StyleRecipe } | null = null;
   /** Bumped on every engine event of that kind; read to re-derive. */
   rev = $state<Rev>(Object.fromEntries(REV_KINDS.map((k) => [k, 0])) as Rev);
 
@@ -142,8 +159,35 @@ export class EditorSession {
   constructor(deps: SessionDeps, engine: Engine = new Engine()) {
     this.deps = deps;
     this.engine = engine;
-    this.filters = new FilterClient();
     this.unsubscribe = engine.subscribe((e) => this.onEngineEvent(e));
+  }
+
+  // --- workers -----------------------------------------------------------------
+
+  /**
+   * Filters and backdrop renders off the main thread. The worker starts on
+   * first use and ends with the session; afterwards requests reject as
+   * cancelled.
+   */
+  get filters(): FilterClient {
+    if (!this.filterClient) {
+      this.filterClient = new FilterClient(this.disposed ? { worker: false } : {});
+      if (this.disposed) this.filterClient.dispose();
+    }
+    return this.filterClient;
+  }
+
+  /**
+   * The panels worker (thumbnails, previews, presets, icon helpers,
+   * stickers). Starts on first use and ends with the session; afterwards
+   * requests reject as cancelled.
+   */
+  get panels(): PanelsClient {
+    if (!this.panelsClient) {
+      this.panelsClient = new PanelsClient(this.disposed ? false : undefined);
+      if (this.disposed) this.panelsClient.dispose();
+    }
+    return this.panelsClient;
   }
 
   // --- derived state ---------------------------------------------------------
@@ -201,7 +245,7 @@ export class EditorSession {
     const firstNew = this.queue.length;
     for (const info of targets) {
       if (this.queue.some((q) => q.info.id === info.id || q.info.path === info.path)) continue;
-      this.queue.push({ info, status: 'pending', project: null, thumb: info.icon, outcome: null });
+      this.queue.push({ info, status: 'pending', project: null, recipe: null, thumb: info.icon, outcome: null });
     }
     if (this.currentIndex < 0 && this.queue.length > firstNew) {
       await this.select(firstNew);
@@ -242,6 +286,7 @@ export class EditorSession {
       this.newDesignFromIcon(entry.info, this.original);
     }
     this.engine.clearHistory();
+    this.recipe = entry.recipe;
     this.hasDesign = true;
   }
 
@@ -253,8 +298,12 @@ export class EditorSession {
     if (index < this.currentIndex) this.currentIndex -= 1;
     if (wasCurrent) {
       this.currentIndex = -1;
-      if (this.queue.length > 0) await this.select(Math.min(index, this.queue.length - 1));
-      else this.hasDesign = false;
+      if (this.queue.length > 0) {
+        await this.select(Math.min(index, this.queue.length - 1));
+      } else {
+        this.hasDesign = false;
+        this.recipe = null;
+      }
     }
   }
 
@@ -263,12 +312,31 @@ export class EditorSession {
     this.original = null;
     this.engine.newDocument({ name: 'Untitled' });
     this.engine.clearHistory();
+    this.recipe = null;
     this.hasDesign = true;
   }
 
+  /**
+   * Keeps the open layer preview (an adjustment being tuned) as a step of
+   * the design, and its step in the recipe (see `previewRecipe`). Returns
+   * true when a step was recorded.
+   */
+  keepPreview(): boolean {
+    const preview = this.engine.preview;
+    const pending = this.previewRecipe;
+    this.previewRecipe = null;
+    if (!preview?.commit()) return false;
+    if (pending?.preview === preview) this.recipe = pending.recipe();
+    return true;
+  }
+
+  /** Keeps the current item's design and recipe in its queue entry. */
   private async stashCurrent(): Promise<void> {
     const entry = this.current;
     if (!entry) return;
+    // An adjustment still being previewed is kept, as when leaving its panel.
+    this.keepPreview();
+    entry.recipe = this.recipe;
     try {
       entry.project = await this.engine.serialize();
       entry.thumb = await this.deps.encode(this.engine.thumbnail(THUMB_SIZE));
@@ -312,6 +380,7 @@ export class EditorSession {
     this.original = icon;
     this.newDesignFromIcon(info, icon);
     this.engine.clearHistory();
+    this.recipe = null;
     this.hasDesign = true;
   }
 
@@ -329,6 +398,7 @@ export class EditorSession {
     const json = await this.deps.commands.readProject(info.id);
     await this.engine.loadProject(JSON.parse(json));
     this.engine.clearHistory();
+    this.recipe = null;
     this.hasDesign = true;
   }
 
@@ -439,17 +509,21 @@ export class EditorSession {
   }
 
   /**
-   * Batch: rebuilds the current style on every other pending item's own
-   * icon and applies it (no flourish), then returns to the current item.
+   * Batch: replays the current design's recipe on every other pending
+   * item's own icon and applies it (no flourish), then returns to the
+   * current item. Each styled item keeps the recipe as its own.
    */
   async applyStyleToAll(): Promise<{ applied: number; failed: number }> {
-    const recipe = this.recipe;
     const result = { applied: 0, failed: 0 };
-    if (!recipe || this.busy) return result;
+    if (this.busy) return result;
     const others = this.queue
       .map((entry, index) => ({ entry, index }))
       .filter(({ entry, index }) => index !== this.currentIndex && entry.status !== 'applied');
     if (others.length === 0) return result;
+    // An adjustment still being tuned is part of the design, so of its recipe.
+    this.keepPreview();
+    const recipe = this.recipe;
+    if (!recipe) return result;
     await this.stashCurrent();
     const back = this.currentIndex;
     const scratch = new Engine();
@@ -481,6 +555,7 @@ export class EditorSession {
           });
           entry.outcome = outcome;
           entry.project = await scratch.serialize();
+          entry.recipe = recipe;
           entry.thumb = await this.deps.encode(scratch.thumbnail(THUMB_SIZE));
           if (outcome.type === 'applied') {
             entry.status = 'applied';
@@ -533,6 +608,7 @@ export class EditorSession {
     const json = await this.deps.commands.libraryLoad(id);
     await this.engine.loadProject(JSON.parse(json));
     this.engine.clearHistory();
+    this.recipe = null;
     this.hasDesign = true;
     this.view = 'edit';
   }
@@ -606,6 +682,7 @@ export class EditorSession {
   async restoreAutosave(json: string): Promise<void> {
     await this.engine.loadProject(JSON.parse(json));
     this.engine.clearHistory();
+    this.recipe = null;
     this.hasDesign = true;
     this.view = 'edit';
   }
@@ -636,15 +713,19 @@ export class EditorSession {
     this.busy = null;
     this.original = null;
     this.recipe = null;
+    this.previewRecipe = null;
     this.compare = 'off';
     this.hasDesign = false;
   }
 
+  /** Ends the session: timers, engine listeners and both workers go away. */
   dispose(): void {
+    if (this.disposed) return;
     this.disposed = true;
-    if (this.autosaveTimer) clearTimeout(this.autosaveTimer);
+    this.cancelAutosave();
     this.unsubscribe();
-    this.filters.dispose();
+    this.filterClient?.dispose();
+    this.panelsClient?.dispose();
     this.engine.dispose();
   }
 }

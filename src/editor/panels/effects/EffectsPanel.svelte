@@ -2,7 +2,8 @@
   Effects panel: the active layer's non-destructive effects (drop shadow,
   outer glow, outline, colour overlay, inner shadow). Add from the menu or
   the quick chips; each card has an enable switch, remove, and its
-  parameters. Slider drags coalesce into one undo step per control.
+  parameters. A slider or colour drag is one undo step (its updates merge;
+  a new drag seals the previous step so two drags never merge).
 -->
 <script lang="ts">
   import { onDestroy } from 'svelte';
@@ -23,6 +24,7 @@
   import ColorField from '../color/ColorField.svelte';
   import { hexOf } from '../common/color';
   import { throttle } from '../common/schedule';
+  import { onSliderPress } from '../common/seal';
   import { EFFECTS, effectInfo, pxRange, type EffectField } from './fields';
 
   const session = getSession();
@@ -103,6 +105,7 @@
     <ColorField
       label={f.label}
       value={hexOf(e.color)}
+      onstart={() => engine.sealHistory()}
       oninput={(h) => live(i, { color: parseColor(h) ?? e.color }, 'color')}
       onchange={(h) => {
         live.cancel();
@@ -157,7 +160,7 @@
   {/if}
 {/snippet}
 
-<div class="effects" data-testid="effects-panel" tabindex="-1" bind:this={root}>
+<div class="effects" data-testid="effects-panel" tabindex="-1" bind:this={root} {@attach onSliderPress(() => engine.sealHistory())}>
   {#if !layer}
     <EmptyState icon={Sparkles} title="No layer selected" description="Select a layer to give it shadows, glows and outlines." compact />
   {:else}

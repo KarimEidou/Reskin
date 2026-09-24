@@ -10,7 +10,9 @@ import {
   parsePath,
   polygonsToPath,
   renderEmoji,
+  renderEmojiStamp,
   renderSticker,
+  renderStickerStamp,
   searchEmoji,
   searchStickers,
   stickerSvgElements,
@@ -150,6 +152,23 @@ describe('sticker set', () => {
     expect(() => renderSticker(plus, { size: 0 })).toThrow(RangeError);
   });
 
+  it('renders stamps cropped to the art, outline included', () => {
+    const heart = getSticker('heart')!;
+    const box = 120;
+    for (const outline of [null, { color: '#ffffff', width: 8 }]) {
+      const stamp = renderStickerStamp(heart, { box, color: '#2255ff', outline })!;
+      // Cropped: every edge touches the art.
+      expect(edgeAlpha(stamp)).toBeGreaterThan(0);
+      // Same pixels as the full render, just without the empty margin.
+      const full = renderSticker(heart, { size: 400, box, color: '#2255ff', outline });
+      expect(alphaSum(stamp)).toBeCloseTo(alphaSum(full), 3);
+      expect(stamp.width).toBeLessThanOrEqual(box * 1.25 + (outline ? 2 * outline.width : 0));
+    }
+    const plain = renderStickerStamp(heart, { box })!;
+    const outlined = renderStickerStamp(heart, { box, outline: { color: '#ffffff', width: 8 } })!;
+    expect(outlined.width).toBeGreaterThan(plain.width + 12);
+  });
+
   it('derives shade and tint variants', () => {
     const v = stickerVariants('#7c5cff');
     expect(v.main).toBe('#7c5cff');
@@ -169,6 +188,10 @@ describe('sticker set', () => {
     }
     const check = stickerSvgElements(getSticker('check')!);
     expect(check[0]).toMatchObject({ kind: 'stroke', color: '#2fbf71', cap: 'round' });
+    // Filled parts keep their own path data: exact curves, nothing flattened.
+    const heart = getSticker('heart')!;
+    const part = heart.layers[0]!.parts[0] as { d: string };
+    expect(stickerSvgElements(heart)[0]).toMatchObject({ kind: 'fill', d: part.d });
   });
 
   it('searches labels and keywords', () => {
@@ -191,5 +214,6 @@ describe('emoji', () => {
   it('declines to render without a canvas (node)', () => {
     expect(canRenderEmoji()).toBe(false);
     expect(renderEmoji('🚀', { size: 64 })).toBeNull();
+    expect(renderEmojiStamp('🚀', 64)).toBeNull();
   });
 });

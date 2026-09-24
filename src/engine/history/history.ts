@@ -112,6 +112,11 @@ export class History<T> {
     return this.list.map((e) => ({ id: e.id, label: e.cmd.label, bytes: e.cmd.bytes, time: e.time }));
   }
 
+  /** Id of the most recently applied entry (the one undo reverts), or null at the oldest state. */
+  get currentId(): number | null {
+    return this.applied > 0 ? this.list[this.applied - 1].id : null;
+  }
+
   /** The most recently applied command. */
   peek(): Command<T> | null {
     return this.applied > 0 ? this.list[this.applied - 1].cmd : null;
@@ -168,10 +173,12 @@ export class History<T> {
     if (this.applied < this.list.length) this.list.length = this.applied;
   }
 
-  /** Stops the top entry from absorbing later pushes. */
+  /**
+   * Stops the newest applied entry (and any redo entry) from absorbing later
+   * pushes: the next push starts a new entry, also after an undo.
+   */
   sealTop(): void {
-    const top = this.list[this.list.length - 1];
-    if (top) top.mergeKey = null;
+    for (let i = Math.max(0, this.applied - 1); i < this.list.length; i++) this.list[i].mergeKey = null;
   }
 
   clear(): void {
