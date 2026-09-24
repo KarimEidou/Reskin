@@ -277,6 +277,28 @@ describe('EditorSession Save & Apply in a queue', () => {
     s.dispose();
   });
 
+  it('design sources in the queue wait for nothing: the last target flourishes, and none of them opens', async () => {
+    const deps = await queuedDeps();
+    const s = new EditorSession(deps, new Engine());
+    await s.openItems([item('a')]);
+    await s.importSources([{ kind: 'image', name: 'Sketch', surface: new Surface(8, 8) }], 'queue');
+    await s.openItems([item('b')]);
+    expect(s.queue.map((q) => q.info.name)).toEqual(['a', 'Sketch', 'b']);
+    // "Apply style to all" leaves the design source alone too.
+    expect(s.styleTargets.map((q) => q.info.name)).toEqual(['b']);
+    await s.apply();
+    // Past the design source, on to the next target.
+    expect(s.currentIndex).toBe(2);
+    await s.apply();
+    expect(deps.applied.map((r) => [r.item, r.flourish])).toEqual([
+      ['a', false],
+      ['b', true],
+    ]);
+    expect(s.currentIndex).toBe(2);
+    expect(s.queue.map((q) => q.status)).toEqual(['applied', 'pending', 'applied']);
+    s.dispose();
+  });
+
   it('moves on to the next item not applied yet, from the end back to the start', async () => {
     const { s, deps } = await queued();
     await s.select(2);
@@ -661,6 +683,24 @@ describe('EditorSession designs without a target', () => {
     s.dispose();
   });
 
+  it('a picture added as a layer keeps the work in progress; Undo takes back just the picture', async () => {
+    const deps = makeDeps({ a: await frameOf([255, 0, 0, 255]) }, applied);
+    const s = new EditorSession(deps, new Engine());
+    await s.openItems([item('a')]);
+    // An adjustment being tuned in its panel.
+    const preview = s.engine.beginPreview('Invert', { layerId: s.engine.activeLayer!.id })!;
+    preview.update((surface) => surface.fill(10, 20, 30, 255));
+    s.previewRecipe = { preview, recipe: () => chainRecipes(s.recipe, filterRecipe('invert', 'Invert', {}, 512)) };
+    await s.importSources([{ kind: 'image', name: 'Pasted image', surface: new Surface(8, 8) }], 'layer');
+    expect(preview.state).toBe('committed');
+    expect(s.recipe?.label).toBe('Invert');
+    expect(s.engine.historyEntries.map((e) => e.label)).toEqual(['Invert', 'Import Pasted image']);
+    s.engine.undo();
+    expect(s.engine.doc.layers.map((l) => l.name)).toEqual(['a']);
+    expect(center(s)).toEqual([10, 20, 30, 255]);
+    s.dispose();
+  });
+
   it('with nothing open, imports simply open', async () => {
     const deps = makeDeps({ a: await frameOf([255, 0, 0, 255]) }, applied);
     const s = new EditorSession(deps, new Engine());
@@ -689,12 +729,12 @@ describe('EditorSession style recipes', () => {
     await s.select(1);
     expect(s.recipe).toBeNull();
     // A panel chains onto the current item's recipe, not onto the other item's.
-    s.recipe = chainRecipes(s.recipe, filterRecipe('invert', 'Invert', {}));
+    s.recipe = chainRecipes(s.recipe, filterRecipe('invert', 'Invert', {}, 512));
     expect(s.recipe.label).toBe('Invert');
     const invert = s.recipe;
     await s.select(0);
     expect(s.recipe).toBe(neon);
-    expect(chainRecipes(s.recipe, filterRecipe('grayscale', 'Grayscale', {})).label).toBe('Neon + Grayscale');
+    expect(chainRecipes(s.recipe, filterRecipe('grayscale', 'Grayscale', {}, 512)).label).toBe('Neon + Grayscale');
     await s.select(1);
     expect(s.recipe).toBe(invert);
     s.dispose();
@@ -806,7 +846,7 @@ describe('EditorSession style recipes', () => {
     s.recipe = recipe('Neon');
     const preview = s.engine.beginPreview('Invert', { layerId: s.engine.activeLayer!.id })!;
     preview.update((surface) => surface.fill(10, 20, 30, 255));
-    s.previewRecipe = { preview, recipe: () => chainRecipes(s.recipe, filterRecipe('invert', 'Invert', {})) };
+    s.previewRecipe = { preview, recipe: () => chainRecipes(s.recipe, filterRecipe('invert', 'Invert', {}, 512)) };
     await s.select(1);
     expect(s.previewRecipe).toBeNull();
     expect(s.recipe).toBeNull();
@@ -988,6 +1028,41 @@ describe('EditorSession Library', () => {
     s.dispose();
   });
 
+  it('updates keep the Library name; a rename says so, and so does the toast', async () => {
+    const { s, deps } = await queued();
+    const saves = () => vi.mocked(deps.commands.librarySave).mock.calls.map(([e]) => [e.id, e.name]);
+    await s.saveToLibrary('Mono');
+    expect(toasts().at(-1)).toMatchObject({ message: 'Saved "Mono" to the Library.', kind: 'success' });
+    expect([s.libraryId, s.libraryName]).toEqual(['lib1', 'Mono']);
+    paint(s);
+    await s.saveToLibrary();
+    expect(toasts().at(-1)!.message).toBe('Updated "Mono" in the Library.');
+    await s.saveToLibrary('Mono v2');
+    expect(toasts().at(-1)!.message).toBe('Updated "Mono" in the Library, now named "Mono v2".');
+    expect(saves()).toEqual([
+      [null, 'Mono'],
+      ['lib1', 'Mono'],
+      ['lib1', 'Mono v2'],
+    ]);
+    expect([s.libraryName, s.engine.doc.meta.name]).toEqual(['Mono v2', 'Mono v2']);
+    s.dispose();
+  });
+
+  it('a Library design renamed while its design waits in the queue: the design takes the new name', async () => {
+    const { s, deps } = await queued();
+    await s.saveToLibrary('Mono');
+    await s.select(1);
+    s.libraryDesignRenamed('lib1', 'Night');
+    expect(s.queue[0]!.libraryName).toBe('Night');
+    await s.select(0);
+    expect([s.libraryId, s.libraryName, s.engine.doc.meta.name]).toEqual(['lib1', 'Night', 'Night']);
+    expect(s.unsaved).toBe(false);
+    // Saving it again updates the design under its new name, not the old one.
+    await s.saveToLibrary();
+    expect(vi.mocked(deps.commands.librarySave).mock.calls.at(-1)![0]).toMatchObject({ id: 'lib1', name: 'Night' });
+    s.dispose();
+  });
+
   it('opening a Library design replaces the current item’s design but keeps its target', async () => {
     const project = await new Engine().serialize();
     const { s, deps } = await queued();
@@ -998,7 +1073,7 @@ describe('EditorSession Library', () => {
     expect(s.original).toBe(original);
     expect(s.engine.doc.meta.name).toBe('Neon');
     expect(s.engine.doc.meta.source).toEqual({ kind: 'shortcut', name: 'a', path: item('a').path });
-    expect(s.libraryId).toBe('lib7');
+    expect([s.libraryId, s.libraryName]).toEqual(['lib7', 'Neon']);
     expect(s.unsaved).toBe(false);
     expect(s.engine.canUndo).toBe(false);
     s.dispose();
@@ -1034,6 +1109,21 @@ describe('EditorSession autosave', () => {
     // Undone back to where it was loaded: nothing unsaved.
     s.engine.undo();
     expect(s.unsaved).toBe(false);
+    s.dispose();
+  });
+
+  it('a flush keeps the design as it is then: the reset of the next open cannot take it back', async () => {
+    const { s, deps } = await queued();
+    paint(s, [9, 9, 9, 255]);
+    const flushed = s.flushAutosave();
+    // A close Rust started: the editor opens again at once (Prepare resets it).
+    s.reset();
+    await s.openItems([item('b')]);
+    await flushed;
+    await vi.advanceTimersByTimeAsync(5000);
+    expect(writes(deps)).toHaveLength(1);
+    const kept = JSON.parse(writes(deps)[0]!);
+    expect(kept.meta.source.path).toBe(item('a').path);
     s.dispose();
   });
 

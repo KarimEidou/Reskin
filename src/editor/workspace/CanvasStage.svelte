@@ -2,10 +2,12 @@
   The canvas stage: the engine's CanvasView on a DPR-correct canvas with
   zoom/pan (wheel at cursor, Space / middle-drag), coalesced pointer input
   with capture, the tool overlay, marching ants, keyline guides,
-  before/after (hold \ or the split view), the inline text editor, image
-  paste (a new layer, announced with an Undo) and a drop highlight. Redraws are coalesced to one per animation
-  frame; the view state and controls are shared through `stage` (the
-  command registry's view keys — Ctrl+0 / Ctrl+1 / Ctrl ±, K — use them).
+  before/after (hold \ or the split view), the inline text editor, images
+  pasted or dropped on it (the import popover asks what they become, at
+  the pointer) and a drop highlight. Redraws are coalesced to one per
+  animation frame; the view state and controls are shared through `stage`
+  (the command registry's view keys — Ctrl+0 / Ctrl+1 / Ctrl ±, K — use
+  them).
 -->
 <script lang="ts">
   import { onMount } from 'svelte';
@@ -21,12 +23,12 @@
     toPointerInputs,
     type Surface,
   } from '$engine/index';
-  import { CanvasView, decodeImage, type CanvasViewTheme } from '$engine/dom';
+  import { CanvasView, type CanvasViewTheme } from '$engine/dom';
   import { ease } from '$lib/motion/easing';
   import { dur, motion } from '$lib/motion/speed.svelte';
   import Button from '$lib/ui/Button.svelte';
   import EmptyState from '$lib/ui/EmptyState.svelte';
-  import { toast } from '$lib/ui/toasts.svelte';
+  import { getShell } from '../chrome/shell.svelte';
   import { getSession } from '../state/context';
   import { stage } from './stage.svelte';
   import {
@@ -40,9 +42,10 @@
     wheelZoom,
   } from './geometry';
   import { FocusOrigin, isInOverlay, isSpaceControl, isTypingTarget, stageKeyAction, type ElementLike } from './keys';
-  import { announcePaste } from './pasted';
+  import { imageFile, importImageFile } from './pasted';
 
   const session = getSession();
+  const shell = getShell();
   const engine = session.engine;
 
   let host: HTMLDivElement | undefined = $state();
@@ -74,6 +77,8 @@
   let compareHeld = false;
   let compareBefore: 'off' | 'split' = 'off';
   let pointerOver = false;
+  /** Where the pointer last was over the canvas (client px): a paste asks there. */
+  const pointerAt = { x: 0, y: 0 };
   let viewAnim = 0;
   /** How the focused element got focus (Space belongs to keyboard-focused buttons). */
   const focusOrigin = new FocusOrigin();
@@ -305,6 +310,8 @@
   }
 
   function onPointerMove(e: PointerEvent): void {
+    pointerAt.x = e.clientX;
+    pointerAt.y = e.clientY;
     if (gestureButton === -1) {
       if (!session.hasDesign) return;
       // The stage can move without resizing (the open morph, panels
@@ -349,8 +356,10 @@
     }
   }
 
-  function onPointerEnter(): void {
+  function onPointerEnter(e: PointerEvent): void {
     pointerOver = true;
+    pointerAt.x = e.clientX;
+    pointerAt.y = e.clientY;
     updateOrigin();
   }
 
@@ -573,38 +582,6 @@
 
   // ---- paste & drop -----------------------------------------------------------------------
 
-  function imageFile(list: DataTransfer | null): File | null {
-    if (!list) return null;
-    for (const item of list.items) {
-      if (item.kind === 'file' && item.type.startsWith('image/')) {
-        const f = item.getAsFile();
-        if (f) return f;
-      }
-    }
-    for (const f of list.files) if (f.type.startsWith('image/')) return f;
-    return null;
-  }
-
-  function importName(file: File, fallback: string): string {
-    const stem = file.name.replace(/\.[^.]+$/, '').trim();
-    return stem && !/^image$/i.test(stem) ? stem : fallback;
-  }
-
-  async function importFile(file: File, fallback: string, pasted = false): Promise<void> {
-    const doc = engine.doc;
-    try {
-      const surface = await decodeImage(file);
-      // The design changed while decoding (another queue item, closed): drop it.
-      if (!session.hasDesign || engine.doc !== doc) return;
-      if (!session.importSurface(surface, importName(file, fallback))) return;
-      stage.focusCanvas();
-      if (pasted) announcePaste(engine);
-    } catch (error) {
-      console.warn('image import failed', error);
-      toast({ message: "Couldn't read that image.", kind: 'error' });
-    }
-  }
-
   function onPaste(e: ClipboardEvent): void {
     if (e.defaultPrevented || !session.hasDesign) return;
     const target = e.target as ElementLike | null;
@@ -612,7 +589,8 @@
     const file = imageFile(e.clipboardData);
     if (!file) return;
     e.preventDefault();
-    void importFile(file, 'Pasted image', true);
+    // The import popover asks where the pointer is.
+    void importImageFile(shell, file, 'Pasted image', pointerOver ? { ...pointerAt } : null);
   }
 
   const hasFiles = (e: DragEvent) => !!e.dataTransfer && [...e.dataTransfer.types].includes('Files');
@@ -633,7 +611,7 @@
     if (!hasFiles(e) || !session.hasDesign) return;
     e.preventDefault();
     const file = imageFile(e.dataTransfer);
-    if (file) void importFile(file, 'Dropped image');
+    if (file) void importImageFile(shell, file, 'Dropped image', { x: e.clientX, y: e.clientY });
   }
 
   // ---- lifecycle ------------------------------------------------------------------------

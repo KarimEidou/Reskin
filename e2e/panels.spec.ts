@@ -411,6 +411,30 @@ test.describe('effects', () => {
     await expect(page.getByTestId('effect-card')).toHaveCount(0);
     await expect.poll(() => compositeHash(page)).toBe(plain);
   });
+
+  test("a layer's effects join the design's recipe, sized for each icon they are replayed on", async ({ page }) => {
+    await openEditor(page);
+    // A 32 px pixel-art icon: its shadow is a sixteenth of the master's.
+    await page.evaluate(() => (globalThis as any).__reskinSession.engine.setPixelArt(32));
+    await openTab(page, 'effects');
+    await page.getByRole('button', { name: 'Drop shadow' }).click();
+    await expect(page.getByTestId('effect-card')).toHaveCount(1);
+    const chosen = await page.evaluate(() => (globalThis as any).__reskinSession.engine.activeLayer.effects[0].distance);
+    expect(chosen).toBe(0.5);
+    await openTab(page, 'styles');
+    await expect(page.getByTestId('styles-panel')).toContainText('“Apply style to all” will use: Effects');
+    // Replayed on another icon at the 512 px master (as "Apply style to all" does).
+    const replayed = await page.evaluate(async () => {
+      const s = (globalThis as any).__reskinSession;
+      const scratch = new s.engine.constructor();
+      const blank = scratch.doc.layers[0].id;
+      const id = scratch.addLayer();
+      scratch.deleteLayer(blank);
+      await s.recipe.apply(scratch, id);
+      return scratch.getLayer(id).effects.map((e: { type: string; distance: number }) => [e.type, e.distance]);
+    });
+    expect(replayed).toEqual([['dropShadow', 8]]);
+  });
 });
 
 test.describe('backdrop', () => {
@@ -430,6 +454,26 @@ test.describe('backdrop', () => {
     await page.getByTestId('backdrop-style').filter({ hasText: 'Sunset' }).click();
     await expect.poll(async () => layerHash(page, (await layers(page))[0]!.id)).not.toBe(first);
     expect((await layers(page)).map((l) => l.name)).toEqual(['Backdrop', 'Steam']);
+    expect((await history(page)).labels).toEqual(['Add backdrop', 'Update backdrop']);
+  });
+
+  test("a blob's seed is typed in whole, and a new seed gives a new shape", async ({ page }) => {
+    await openEditor(page);
+    await openTab(page, 'backdrop');
+    await sidebar(page).getByRole('radio', { name: 'Blob' }).click();
+    const seed = sidebar(page).getByRole('spinbutton', { name: 'Seed' });
+    await seed.fill('100');
+    await seed.press('Enter');
+    await expect(seed).toHaveValue('100');
+    await expect(seed).toHaveAttribute('aria-valuenow', '100');
+    await page.getByTestId('apply-backdrop').click();
+    await expect.poll(async () => (await layers(page)).map((l) => l.name)).toEqual(['Backdrop', 'Steam']);
+    const first = await layerHash(page, (await layers(page))[0]!.id);
+
+    await seed.press('ArrowUp');
+    await expect(seed).toHaveValue('101');
+    await page.getByTestId('apply-backdrop').click();
+    await expect.poll(async () => layerHash(page, (await layers(page))[0]!.id)).not.toBe(first);
     expect((await history(page)).labels).toEqual(['Add backdrop', 'Update backdrop']);
   });
 });

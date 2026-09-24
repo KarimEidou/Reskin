@@ -1,6 +1,8 @@
 // Plausible `ItemInfo`s for the e2e fake backend: a path's extension picks
 // the kind, its folder picks the location/access, and the icon is drawn at
-// runtime. Ids are stable per path, like Rust's ItemId map.
+// runtime. Ids are stable per path, like Rust's ItemId map. Apply modes and
+// notes follow src-tauri/src/items.rs (`modes_for`, `notes_for`). A shortcut
+// whose path mentions "AppsFolder" or "Store App" is a Store app's.
 
 import type {
   Access,
@@ -57,14 +59,18 @@ const SOURCE: Record<ItemKind, IconSource> = {
   project: 'none',
 };
 
-function modesFor(kind: ItemKind, location: ItemLocation, storeApp: boolean): ApplyMode[] {
+/** Mirror of Rust `items::modes_for`: the apply modes, preferred first. */
+function modesFor(kind: ItemKind, access: Access, storeApp: boolean): ApplyMode[] {
   switch (kind) {
     case 'shortcut':
-      if (storeApp) return ['newShortcut'];
-      return location === 'publicDesktop' ? ['inPlace', 'personalCopy'] : ['inPlace'];
-    case 'internetShortcut':
+    case 'internetShortcut': {
+      const modes: ApplyMode[] =
+        access === 'writable' ? ['inPlace'] : access === 'needsElevation' ? ['inPlace', 'personalCopy'] : ['personalCopy'];
+      // Explorer ignores a Store app shortcut's own icon: a classic one shows it.
+      return storeApp ? [...modes, 'newShortcut'] : modes;
+    }
     case 'folder':
-      return location === 'publicDesktop' ? ['inPlace', 'personalCopy'] : ['inPlace'];
+      return access === 'readOnly' ? [] : ['inPlace'];
     case 'systemIcon':
       return ['inPlace'];
     case 'executable':
@@ -76,8 +82,27 @@ function modesFor(kind: ItemKind, location: ItemLocation, storeApp: boolean): Ap
   }
 }
 
-function targetFor(kind: ItemKind, name: string): string | null {
+/** Mirror of Rust `items::notes_for`. */
+function notesFor(kind: ItemKind, location: ItemLocation, access: Access, storeApp: boolean): string[] {
+  const notes: string[] = [];
+  if (location === 'publicDesktop') {
+    notes.push('On the Public Desktop (all users) — changing it needs administrator approval, or Reskin can make a personal copy.');
+  } else if (location === 'taskbarPin') {
+    notes.push('A taskbar pin — Explorer may cache its icon until you sign out.');
+  }
+  if (storeApp) notes.push('A Store app shortcut — Windows may ignore a custom icon; Reskin can create a classic shortcut instead.');
+  if (kind === 'executable' || kind === 'file') {
+    notes.push('Reskin never modifies programs; it will create a new desktop shortcut with your icon.');
+  } else if (kind === 'image') {
+    notes.push('An image — it becomes the starting point of your design.');
+  }
+  if (access === 'readOnly' && kind !== 'image' && kind !== 'project') notes.push('This item is read-only.');
+  return notes;
+}
+
+function targetFor(kind: ItemKind, name: string, storeApp: boolean): string | null {
   const slug = name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '') || 'item';
+  if (storeApp) return `shell:AppsFolder\\${name.replace(/\s+/g, '')}_8wekyb3d8bbwe!App`;
   if (kind === 'shortcut') return `C:\\Program Files\\${name}\\${name}.exe`;
   if (kind === 'internetShortcut') {
     return /steam/i.test(name) ? 'steam://rungameid/570' : `https://www.example.com/${slug}`;
@@ -98,25 +123,22 @@ export async function makeItem(path: string, opts: MakeItemOptions): Promise<Ite
   const name = displayName(path);
   const storeApp = kind === 'shortcut' && /AppsFolder|Store App/i.test(path);
   const access: Access = location === 'publicDesktop' ? 'needsElevation' : 'writable';
-  const notes: string[] = [];
-  if (access === 'needsElevation') notes.push('Public desktop — changing it needs admin rights');
-  if (storeApp) notes.push('Store app: Windows ignores custom icons on its shortcut; Reskin makes a classic one');
   return {
     id: opts.id,
     kind,
     name,
     path,
-    target: targetFor(kind, name),
+    target: targetFor(kind, name, storeApp),
     location,
     access,
-    modes: modesFor(kind, location, storeApp),
+    modes: modesFor(kind, access, storeApp),
     icon: kind === 'project' ? null : await iconDataUrl({ kind, name }),
     iconSource: SOURCE[kind],
     customIcon: opts.reskinned ?? false,
     reskinned: opts.reskinned ?? false,
     storeApp,
     systemIcon: null,
-    notes,
+    notes: notesFor(kind, location, access, storeApp),
   };
 }
 
@@ -146,6 +168,6 @@ export async function makeSystemItem(id: SystemIconId, itemId: string, reskinned
     reskinned,
     storeApp: false,
     systemIcon: id,
-    notes: [],
+    notes: ['A system icon — Reskin changes it for your account only.'],
   };
 }

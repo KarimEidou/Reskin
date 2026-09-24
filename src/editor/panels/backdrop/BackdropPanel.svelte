@@ -27,6 +27,7 @@
   import { isFilterCancelled } from '$engine/filters/client';
   import Button from '$lib/ui/Button.svelte';
   import IconButton from '$lib/ui/IconButton.svelte';
+  import NumberField from '$lib/ui/NumberField.svelte';
   import SegmentedControl from '$lib/ui/SegmentedControl.svelte';
   import Slider from '$lib/ui/Slider.svelte';
   import Toggle from '$lib/ui/Toggle.svelte';
@@ -34,7 +35,6 @@
   import { getSession } from '../../state/context';
   import ColorField from '../color/ColorField.svelte';
   import GradientEditor from '../color/GradientEditor.svelte';
-  import NumField from '../common/NumField.svelte';
   import PixelThumb from '../common/PixelThumb.svelte';
   import Section from '../common/Section.svelte';
   import { debounce } from '../common/schedule';
@@ -208,7 +208,7 @@
     <SegmentedControl label="Shape" iconOnly fullWidth options={SHAPES} value={spec.shape} onchange={(v) => update({ shape: v as BackdropShape })} />
     {#if spec.shape === 'blob'}
       <div class="row">
-        <NumField label="Seed" value={spec.blob.seed} min={0} max={99999} width="80px" onchange={(v) => update({ blob: { ...spec.blob, seed: v } })} />
+        <NumberField label="Seed" value={spec.blob.seed} min={0} max={99999} width="80px" onchange={(v) => update({ blob: { ...spec.blob, seed: v } })} />
         <IconButton label="New random shape" icon={Dices} onclick={() => update({ blob: { ...spec.blob, seed: Math.floor(Math.random() * 99999) } })} />
         <div class="grow">
           <Slider label="Wobble" value={Math.round(spec.blob.variance * 100)} min={0} max={100} unit="%" oninput={(v) => update({ blob: { ...spec.blob, variance: v / 100 } })} onchange={(v) => update({ blob: { ...spec.blob, variance: v / 100 } })} />

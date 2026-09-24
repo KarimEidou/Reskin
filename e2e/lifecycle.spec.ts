@@ -5,24 +5,19 @@
 import type { Page } from '@playwright/test';
 import { calls, expect, simulateOpen, test, waitForCall } from './support/fixtures';
 
-type Invoke = (cmd: string, args?: Record<string, unknown>, opts?: unknown) => Promise<unknown>;
-type Win = { __TAURI_INTERNALS__: { invoke: Invoke }; __windowsNow?: Record<string, unknown> };
+interface WindowsState {
+  accent?: string | null;
+  systemReducedMotion?: boolean;
+  hotkeyError?: string | null;
+}
 
-/**
- * Windows changed something: from now on app_boot reports `now` on top of
- * what the fake backend says (as Rust reads it live).
- */
-async function windowsChanges(page: Page, now: Record<string, unknown>): Promise<void> {
-  await page.evaluate((patch) => {
-    const w = window as unknown as Win;
-    if (!w.__windowsNow) {
-      const inner = w.__TAURI_INTERNALS__.invoke;
-      w.__TAURI_INTERNALS__.invoke = async (cmd, args, opts) => {
-        const result = await inner(cmd, args, opts);
-        return cmd === 'app_boot' ? { ...(result as object), ...w.__windowsNow } : result;
-      };
-    }
-    w.__windowsNow = { ...w.__windowsNow, ...patch };
+/** Windows changed something: from now on app_boot reports it (as Rust reads it live). */
+async function windowsChanges(page: Page, now: WindowsState): Promise<void> {
+  await page.evaluate((change) => {
+    const e2e = window.__e2e!;
+    if (change.accent !== undefined) e2e.setAccent(change.accent);
+    if (change.systemReducedMotion !== undefined) e2e.setSystemReducedMotion(change.systemReducedMotion);
+    if (change.hotkeyError !== undefined) e2e.setHotkeyError(change.hotkeyError);
   }, now);
 }
 
@@ -94,17 +89,7 @@ test.describe('Windows changes while a page lives on', () => {
   test('a new shortcut another app holds leaves the old one in place', async ({ openEditor, page }) => {
     await openEditor();
     // Rust refuses it, keeps the old one registered and saved.
-    await page.evaluate(() => {
-      const w = window as unknown as Win;
-      const inner = w.__TAURI_INTERNALS__.invoke;
-      w.__TAURI_INTERNALS__.invoke = async (cmd, args, opts) => {
-        const next = (args as { settings?: { hotkey?: string } } | undefined)?.settings;
-        if (cmd === 'settings_set' && next?.hotkey === 'Ctrl+Alt+K') {
-          throw 'Global shortcut: Ctrl+Alt+K is already in use by another app';
-        }
-        return inner(cmd, args, opts);
-      };
-    });
+    await page.evaluate(() => window.__e2e!.refuseHotkey('Ctrl+Alt+K'));
     await simulateOpen(page, [], 'settings');
     const view = page.getByTestId('settings-view');
     await view.getByRole('button', { name: 'Change', exact: true }).click();

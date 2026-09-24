@@ -9,7 +9,10 @@
  * before the page loads, e.g. with Playwright's `page.addInitScript`.
  *
  * Commands (what the fake does)
- * - app_boot: BootInfo for this page from the fake settings/config.
+ * - app_boot: BootInfo for this page from the fake settings/config and
+ *   what "Windows" says right now (accent colour, animation effects, why
+ *   the saved hotkey doesn't work: `setAccent`, `setSystemReducedMotion`,
+ *   `setHotkeyError`).
  * - box_drag: waits `boxDragMs`, resolves `boxDragResult` ('click').
  * - inspect_paths: after `inspectDelayMs`, maps every path to an ItemInfo:
  *   kind by extension (.lnk shortcut, .url internetShortcut, .exe executable,
@@ -20,6 +23,9 @@
  *   replaces the mapping (e.g. `() => []` for the error path).
  * - inspect_system_icon / item_frames / pick_files / read_project: sample
  *   system items, rescaled frames (16…256), `setPickFiles`, `setProject`.
+ *   Apply modes and notes follow Rust's (a shortcut whose path mentions
+ *   "AppsFolder" or "Store App" is a Store app's: in place, or a classic
+ *   new shortcut).
  * - open_editor: validates that every id was inspected (else rejects).
  * - box_painted: recorded (simulateBoxReturn waits for it).
  * - apply_icon: returns `setApplyOutcome(o)` verbatim when set; otherwise
@@ -28,13 +34,22 @@
  *   close handoff with then = fly (landed) / celebrate, as Rust does (turn
  *   off with `setApplyCollapses(false)`). NeedsElevation tickets are
  *   accepted by apply_icon_elevated.
- * - restore / history_list / library_* / autosave*: in-memory state.
+ * - restore / history_list / library_*: in-memory state.
+ * - autosave / autosave_load: Rust's two slots (`AutosaveSlots`), kept in
+ *   sessionStorage so that a reload of the page is the next launch: each
+ *   page load first turns a live draft left there into the recovery offer.
+ *   `autosave(data)` writes the live slot (`''` empties it), `autosave(null)`
+ *   clears both, `autosave_load` reads the recovery offer.
  * - export_file: `setExportPath` (null = cancelled) or an automatic path.
  * - wallpaper: a generated 1920×1080 JPEG; wallpaper_info, system_fonts and
  *   accent_color return fixed plausible values.
  * - settings_get / settings_set: normalised like Rust; a change is
  *   announced like Rust does — `settings:changed` event on the box page,
- *   a `Settings` mailbox command on the editor page.
+ *   a `Settings` mailbox command on the editor page. A new hotkey another
+ *   app holds (`refuseHotkey`) is taken back like Rust does: the old one
+ *   stays, the rest is saved and announced, and the command fails with
+ *   "Global shortcut: … is already in use by another app". Saving a new
+ *   hotkey that works clears `hotkeyError`.
  * - editor_next: sequence-numbered long poll over the fake mailbox;
  *   resolves as soon as commands with seq > after are queued, else a
  *   heartbeat after `heartbeatMs` (25 s).
@@ -52,19 +67,22 @@
  *   position is PHYSICAL px, as Tauri sends it; `emitted`, listenerCount(e)
  * - pushEditorCmd(cmd), acks, waitForAck(session, stage, timeout?)
  * - simulateOpen(items | paths, view = 'edit', opts): Rust's open FSM —
- *   Prepare → wait 'prepared' (400 ms) → Reveal → wait 'revealed' →
- *   Expand{morph} → wait 'expanded'. A late 'prepared' takes Rust's
- *   fallback: Reveal and Expand{morph: false} (crossfade) back to back,
- *   without waiting for 'revealed'.
+ *   (box page, box shown: `box:handoff` with the first item's icon, and
+ *   wait ≤ 300 ms for its `box_painted`) Prepare → wait 'prepared'
+ *   (400 ms) → Reveal → wait 'revealed' → Expand{morph} → wait
+ *   'expanded'. A late 'prepared' takes Rust's fallback: Reveal and
+ *   Expand{morph: false} (crossfade) back to back, without waiting for
+ *   'revealed'.
  * - simulateClose(then = 'hide', opts): Collapse → wait 'collapsed' →
  *   Clear → wait 'cleared'. `editor` shows the FSM phase.
  * - simulateBoxReturn(then = 'hide', icon) (box page): `box:collapse` to the
  *   hidden box, then `box:shown`, then wait 300 ms for `box_painted`.
  * - knobs: setApplyOutcome, setInspectOverride, setInspectDelay,
  *   setBoxDragResult, failNext(cmd, message), setExportPath, setPickFiles,
- *   setProject, setApplyCollapses, setHeartbeatMs
+ *   setProject, setApplyCollapses, setHeartbeatMs, setAccent,
+ *   setSystemReducedMotion, setHotkeyError, refuseHotkey
  * - state: settings, setSettings(patch), makeItems(paths), history,
- *   library, autosaveData, smokeReports, boxVisible
+ *   library, autosaveSlots, smokeReports, boxVisible
  */
 
 import { emit as tauriEmit } from '@tauri-apps/api/event';
@@ -126,6 +144,8 @@ const ACK_TIMEOUT_MS = 3000;
 /** morph.rs BOX_PAINT_TIMEOUT. */
 const BOX_PAINT_TIMEOUT_MS = 300;
 const FRAME_SIZES = [16, 24, 32, 48, 64, 256];
+/** Where the autosave slots outlive a reload (the next "launch"). */
+const AUTOSAVE_KEY = 'reskin-e2e-autosave';
 const USER_DIR = 'C:\\Users\\e2e';
 const ICON_DIR = `${USER_DIR}\\AppData\\Local\\com.karimeidou.reskin\\icons`;
 
@@ -212,6 +232,36 @@ interface TauriInternals {
   invoke: (cmd: string, args?: Args, options?: unknown) => Promise<unknown>;
 }
 
+interface AutosaveSlots {
+  live: string | null;
+  recovery: string | null;
+}
+
+/**
+ * The slots the previous page load left (sessionStorage outlives a reload),
+ * after this launch's rotation: a draft left live becomes the recovery
+ * offer, an empty live slot is dropped, and without one the offer stays.
+ */
+function launchSlots(): AutosaveSlots {
+  let saved: Partial<AutosaveSlots> = {};
+  try {
+    saved = JSON.parse(sessionStorage.getItem(AUTOSAVE_KEY) ?? '{}') as Partial<AutosaveSlots>;
+  } catch {
+    // No storage (or nothing readable in it): a first launch.
+  }
+  const live = typeof saved.live === 'string' ? saved.live : null;
+  const recovery = typeof saved.recovery === 'string' ? saved.recovery : null;
+  return { live: null, recovery: live !== null && live.trim() !== '' ? live : recovery };
+}
+
+function keepSlots(slots: AutosaveSlots): void {
+  try {
+    sessionStorage.setItem(AUTOSAVE_KEY, JSON.stringify(slots));
+  } catch {
+    // Without storage the slots only last as long as the page.
+  }
+}
+
 let installed: E2EApi | null = null;
 
 export function install(kind: 'box' | 'editor'): E2EApi {
@@ -220,7 +270,12 @@ export function install(kind: 'box' | 'editor'): E2EApi {
 
   // ---- state ----------------------------------------------------------------
   let settings = normalizeSettings({ ...defaultSettings(), ...config.settings });
-  const accent = config.accent === undefined ? DEFAULT_ACCENT : config.accent;
+  let accent = config.accent === undefined ? DEFAULT_ACCENT : config.accent;
+  let systemReducedMotion = config.systemReducedMotion ?? false;
+  /** Why the saved hotkey doesn't work (another app holds it), or null. */
+  let hotkeyError: string | null = config.hotkeyError ?? null;
+  /** Hotkeys another app holds: settings_set refuses to switch to them. */
+  const refusedHotkeys = new Set<string>();
   let heartbeatMs = config.heartbeatMs ?? 25_000;
   let boxDragResult: DragResult = config.boxDragResult ?? 'click';
   let inspectDelayMs = config.inspectDelayMs ?? 40;
@@ -229,7 +284,8 @@ export function install(kind: 'box' | 'editor'): E2EApi {
   let inspectOverride: ((paths: string[]) => ItemInfo[] | Promise<ItemInfo[]>) | null = null;
   let exportPath: string | null | undefined;
   let pickFiles: string[] = [];
-  let autosaveData: string | null = null;
+  const autosave = launchSlots();
+  keepSlots(autosave);
   let boxVisible = true;
 
   const calls: E2ECall[] = [];
@@ -310,6 +366,16 @@ export function install(kind: 'box' | 'editor'): E2EApi {
 
   // ---- handoff FSM (mirrors src-tauri windows/morph.rs) ---------------------
   const fsm: E2EEditorState = { session: 0, phase: 'closed', visible: false, morph: false };
+  /** Pictures handed to the box (`box:handoff`, `box:collapse`), numbered apart from the editor's sessions. */
+  let boxSession = 0;
+
+  /** The picture `box_painted` confirms for box session `session`, within Rust's 300 ms. */
+  function boxPainted(session: number): Promise<boolean> {
+    return api.waitForCall('box_painted', (c) => c.args.session === session, BOX_PAINT_TIMEOUT_MS).then(
+      () => true,
+      () => false,
+    );
+  }
 
   function defaultBoxRect(s: Settings): Rect {
     const m = metricsFor(s.boxSize);
@@ -332,10 +398,18 @@ export function install(kind: 'box' | 'editor'): E2EApi {
       opts.morph ??
       (snapshot.openStyle === 'morph' &&
         snapshot.motion !== 'reduced' &&
-        !(snapshot.motion === 'system' && config.systemReducedMotion));
+        !(snapshot.motion === 'system' && systemReducedMotion));
     const ackTimeout = opts.ackTimeoutMs ?? ACK_TIMEOUT_MS;
     const timedOut: AckStage[] = [];
     const session = ++fsm.session;
+
+    // The visible box takes on the picture the editor's proxy draws first.
+    let painted: Promise<boolean | null> = Promise.resolve(null);
+    if (kind === 'box' && boxVisible) {
+      const picture = ++boxSession;
+      await emitEvent('box:handoff', { session: picture, icon: items[0]?.icon ?? null, count: items.length });
+      painted = boxPainted(picture);
+    }
 
     fsm.phase = 'preparing';
     pushEditorCmd({
@@ -347,7 +421,10 @@ export function install(kind: 'box' | 'editor'): E2EApi {
       settings: snapshot,
       morph: wantMorph,
     });
-    const preparedInTime = await waitForAck(session, 'prepared', opts.prepareTimeoutMs ?? PREPARE_TIMEOUT_MS);
+    const [preparedInTime, boxPaintedInTime] = await Promise.all([
+      waitForAck(session, 'prepared', opts.prepareTimeoutMs ?? PREPARE_TIMEOUT_MS),
+      painted,
+    ]);
     if (!preparedInTime) timedOut.push('prepared');
     const morph = wantMorph && preparedInTime;
 
@@ -365,7 +442,7 @@ export function install(kind: 'box' | 'editor'): E2EApi {
 
     fsm.phase = 'open';
     fsm.morph = morph;
-    return { session, morph, preparedInTime, timedOut };
+    return { session, morph, preparedInTime, boxPainted: boxPaintedInTime, timedOut };
   }
 
   async function simulateClose(
@@ -398,20 +475,12 @@ export function install(kind: 'box' | 'editor'): E2EApi {
     return { session, timedOut };
   }
 
-  let boxSession = 0;
-
   async function simulateBoxReturn(then: CollapseThen = 'hide', icon: string | null = null): Promise<SimulateBoxReturnResult> {
     const session = ++boxSession;
     await emitEvent('box:collapse', { session, then, icon });
     boxVisible = true;
     await emitEvent('box:shown', null);
-    const painted = await api
-      .waitForCall('box_painted', (c) => c.args.session === session, BOX_PAINT_TIMEOUT_MS)
-      .then(
-        () => true,
-        () => false,
-      );
-    return { session, painted };
+    return { session, painted: await boxPainted(session) };
   }
 
   // ---- items ------------------------------------------------------------------
@@ -524,13 +593,14 @@ export function install(kind: 'box' | 'editor'): E2EApi {
       window: kind,
       version: '1.0.0-e2e',
       settings: clone(settings),
-      systemReducedMotion: config.systemReducedMotion ?? false,
+      systemReducedMotion,
       accent,
       build: 'e2e',
       smoke: config.smoke ?? false,
       firstRun: config.firstRun ?? false,
       boxMetrics: metricsFor(settings.boxSize),
       windows11: config.windows11 ?? true,
+      ...(hotkeyError === null ? {} : { hotkeyError }),
     }),
 
     box_drag: async (): Promise<DragResult> => {
@@ -670,10 +740,17 @@ export function install(kind: 'box' | 'editor'): E2EApi {
       return null;
     },
     autosave: (args) => {
-      autosaveData = (args.data as string | null) ?? null;
+      const data = (args.data as string | null) ?? null;
+      if (data === null) {
+        autosave.live = null;
+        autosave.recovery = null;
+      } else {
+        autosave.live = data.trim() === '' ? null : data;
+      }
+      keepSlots(autosave);
       return null;
     },
-    autosave_load: (): string | null => autosaveData,
+    autosave_load: (): string | null => autosave.recovery,
 
     wallpaper: (): Promise<ArrayBuffer> => wallpaperBytes(),
     wallpaper_info: (): WallpaperInfo => ({
@@ -690,8 +767,21 @@ export function install(kind: 'box' | 'editor'): E2EApi {
     accent_color: (): string | null => accent,
     settings_get: (): Settings => clone(settings),
     settings_set: async (args): Promise<Settings> => {
-      settings = normalizeSettings(clone(args.settings as Settings));
+      const old = settings;
+      const next = normalizeSettings(clone(args.settings as Settings));
+      let refused: string | null = null;
+      if (next.hotkey !== old.hotkey) {
+        if (refusedHotkeys.has(next.hotkey)) {
+          // Like Rust: the new one is registered first; refused, the old one stays.
+          refused = `Global shortcut: ${next.hotkey} is already in use by another app`;
+          next.hotkey = old.hotkey;
+        } else {
+          hotkeyError = null;
+        }
+      }
+      settings = next;
       await announceSettings();
+      if (refused !== null) fail(refused);
       return clone(settings);
     },
     open_external: () => null,
@@ -831,6 +921,18 @@ export function install(kind: 'box' | 'editor'): E2EApi {
     setApplyCollapses: (on) => {
       applyCollapses = on;
     },
+    setAccent: (color) => {
+      accent = color;
+    },
+    setSystemReducedMotion: (on) => {
+      systemReducedMotion = on;
+    },
+    setHotkeyError: (message) => {
+      hotkeyError = message;
+    },
+    refuseHotkey: (hotkey) => {
+      refusedHotkeys.add(hotkey);
+    },
 
     get settings() {
       return clone(settings);
@@ -847,8 +949,8 @@ export function install(kind: 'box' | 'editor'): E2EApi {
     get library() {
       return clone([...library.values()].map((l) => l.entry));
     },
-    get autosaveData() {
-      return autosaveData;
+    get autosaveSlots() {
+      return { ...autosave };
     },
     get smokeReports() {
       return smokeReports;

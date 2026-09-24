@@ -3,7 +3,8 @@
 // Freehand: drag to draw the outline; releasing closes it. Polygonal: every
 // click adds a corner (a press can be dragged to place it; Shift snaps the
 // new edge to 45°); a double-click, Enter, or a click on the first corner
-// closes the polygon, Backspace removes the last corner and Escape cancels.
+// closes the polygon, Backspace or Delete removes the last corner and
+// Escape cancels.
 // A polygon being built is pending work: undo or Escape discards it, and
 // switching tools closes it.
 //
@@ -200,7 +201,7 @@ export class LassoTool implements Tool<LassoOptions> {
       this.cancel(ctx);
       return true;
     }
-    if (key === 'Backspace') {
+    if (key === 'Backspace' || key === 'Delete') {
       // During a press this drops the corner being placed; the rest of
       // that press then does nothing (it must not drag an older corner).
       d.pressing = false;

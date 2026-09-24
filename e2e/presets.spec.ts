@@ -119,6 +119,44 @@ test('a look that comes back once another item is being opened is dropped', asyn
   await expect(neon).toHaveAttribute('aria-pressed', 'false');
 });
 
+test('a look asked for half-way through an item switch is dropped', async ({ page }) => {
+  await openPage(page, 'editor');
+  await simulateOpen(page, [SAMPLE_PATHS.steam, SAMPLE_PATHS.notes]);
+  await page.waitForFunction(() => (globalThis as any).__reskinSession?.hasDesign === true);
+  await openTab(page, 'styles');
+  type Held = { __releaseIcon?: () => void; __built?: boolean };
+  // Hold the next item's icon while it loads: the switch has moved to the
+  // new slot, the first item's document is still in the engine. Note when
+  // a look has come back (and the panel had its turn with it).
+  await page.evaluate(() => {
+    const s = (globalThis as any).__reskinSession;
+    const w = window as Held;
+    const loadIcon = s.loadIcon.bind(s);
+    s.loadIcon = (info: unknown) => new Promise<void>((r) => (w.__releaseIcon = r)).then(() => loadIcon(info));
+    const request = s.panels.request.bind(s.panels);
+    s.panels.request = (msg: { op: string }, opts: unknown) => {
+      const job = request(msg, opts);
+      if (msg.op === 'presetBuild') job.finally(() => setTimeout(() => (w.__built = true), 50)).catch(() => {});
+      return job;
+    };
+  });
+  const before = await compositeHash(page);
+  await page.evaluate(() => void (globalThis as any).__reskinSession.select(1));
+  await page.waitForFunction(() => (globalThis as any).__reskinSession.currentIndex === 1 && !!(window as Held).__releaseIcon);
+  // Asked for now, the look comes back before the second item is in.
+  const neon = page.locator('[data-preset="neon"]');
+  await neon.click();
+  await page.waitForFunction(() => (window as Held).__built === true, undefined, BUILT);
+  await expect(neon).toHaveAttribute('aria-busy', 'false');
+  expect(await compositeHash(page)).toBe(before);
+  expect((await history(page)).labels).toEqual([]);
+  await page.evaluate(() => (window as Held).__releaseIcon!());
+  await expect.poll(() => page.evaluate(() => (globalThis as any).__reskinSession.current?.info.name)).toBe('Notes');
+  expect((await history(page)).labels).toEqual([]);
+  expect(await page.evaluate(() => (globalThis as any).__reskinSession.recipe)).toBeNull();
+  await expect(neon).toHaveAttribute('aria-pressed', 'false');
+});
+
 test('the recipe replays on another icon ("Apply style to all")', async ({ page }) => {
   await openEditor(page);
   await openTab(page, 'styles');

@@ -108,7 +108,7 @@
     {#if item}
       <Menu items={queueMenu} label="Queue" placement="bottom-start" onselect={onQueue}>
         {#snippet trigger(props)}
-          <button type="button" class="item" {...props} aria-label="{item.name}{queued > 1 ? `, 1 of ${queued} queued` : ''}">
+          <button type="button" class="item" {...props} aria-label="{item.name}{queued > 1 ? `, ${session.currentIndex + 1} of ${queued} queued` : ''}">
             {#if session.current?.thumb ?? item.icon}
               <img class="thumb" src={session.current?.thumb ?? item.icon} alt="" draggable="false" />
             {/if}

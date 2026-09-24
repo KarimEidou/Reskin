@@ -3,7 +3,8 @@
   outer glow, outline, colour overlay, inner shadow). Add from the menu or
   the quick chips; each card has an enable switch, remove, and its
   parameters. A slider or colour drag is one undo step (its updates merge;
-  a new drag seals the previous step so two drags never merge).
+  a new drag seals the previous step so two drags never merge). The
+  layer's effects are a step of the design's recipe ("Apply style to all").
 -->
 <script lang="ts">
   import { onDestroy } from 'svelte';
@@ -11,7 +12,7 @@
   import Plus from '@lucide/svelte/icons/plus';
   import Sparkles from '@lucide/svelte/icons/sparkles';
   import Trash2 from '@lucide/svelte/icons/trash-2';
-  import { cloneEffects, createEffect, parseColor, type EffectType, type LayerEffect } from '$engine/index';
+  import { cloneEffects, createEffect, parseColor, scaleEffect, type EffectType, type LayerEffect } from '$engine/index';
   import Button from '$lib/ui/Button.svelte';
   import EmptyState from '$lib/ui/EmptyState.svelte';
   import IconButton from '$lib/ui/IconButton.svelte';
@@ -25,6 +26,7 @@
   import { hexOf } from '../common/color';
   import { throttle } from '../common/schedule';
   import { onSliderPress } from '../common/seal';
+  import { chainRecipes, effectsRecipe } from '../styles/recipe';
   import { EFFECTS, effectInfo, pxRange, type EffectField } from './fields';
 
   const session = getSession();
@@ -43,24 +45,15 @@
   function commit(effects: LayerEffect[], merge?: string): void {
     const l = layer;
     if (!l) return;
-    engine.setLayerProps(l.id, { effects }, merge ? { merge } : {});
-  }
-
-  /** Scales a 512-px design value to the document. */
-  function px(v: number): number {
-    return (v * (layer?.size ?? 512)) / 512;
+    if (!engine.setLayerProps(l.id, { effects }, merge ? { merge } : {})) return;
+    session.recipe = chainRecipes(session.recipe, effectsRecipe(l.name, effects, l.size));
   }
 
   function add(type: EffectType): void {
     const l = layer;
     if (!l) return;
     // Defaults are designed for 512 px documents.
-    const base = createEffect(type);
-    const e = { ...base } as LayerEffect & Record<string, unknown>;
-    for (const k of ['distance', 'blur', 'spread', 'size', 'width', 'choke']) {
-      if (typeof e[k] === 'number') e[k] = px(e[k] as number);
-    }
-    commit([...l.effects, e as LayerEffect]);
+    commit([...l.effects, scaleEffect(createEffect(type), l.size / 512)]);
   }
 
   let root: HTMLDivElement | undefined = $state();

@@ -67,7 +67,12 @@
     void refresh();
   });
 
-  /** Saves the open design over its Library design, or as a copy of it with `asNew`. */
+  /**
+   * Saves the open design over its Library design, or with `asNew` as a
+   * copy of it — and as a new design whenever the Library design it would
+   * update is not on the page (still loading, or gone), so a save never
+   * overwrites a design the user cannot see.
+   */
   async function saveCurrent(asNew: boolean): Promise<void> {
     if (saving) return;
     saving = asNew ? 'new' : 'update';
@@ -102,8 +107,8 @@
     try {
       const data = await commands.libraryLoad(entry.id);
       await commands.librarySave({ id: entry.id, name, thumb: entry.thumb, data });
-      // The open design saves over this entry: it keeps the new name.
-      if (session.hasDesign && session.libraryId === entry.id) session.engine.setDocumentName(name);
+      // The designs that save over this entry keep the new name.
+      session.libraryDesignRenamed(entry.id, name);
       toast({ message: `Renamed to "${name}".`, kind: 'success' });
       await refresh();
     } catch (e) {
@@ -205,7 +210,7 @@
         onclick={() => saveCurrent(false)}>Save changes</Button
       >
     {:else if session.hasDesign}
-      <Button variant="primary" icon={Save} loading={saving !== null} onclick={() => saveCurrent(false)}>Save current design</Button>
+      <Button variant="primary" icon={Save} loading={saving !== null} onclick={() => saveCurrent(true)}>Save current design</Button>
     {/if}
   {/snippet}
 
@@ -223,7 +228,7 @@
         {#if failed}
           <Button onclick={refresh}>Try again</Button>
         {:else if session.hasDesign}
-          <Button variant="primary" icon={Save} onclick={() => saveCurrent(false)}>Save current design</Button>
+          <Button variant="primary" icon={Save} onclick={() => saveCurrent(true)}>Save current design</Button>
         {/if}
       </EmptyState>
     </div>

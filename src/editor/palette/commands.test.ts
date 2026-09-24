@@ -26,9 +26,11 @@ interface FakeSession {
   view: string;
   hasDesign: boolean;
   busy: null | { label: string; progress: number | null };
+  queueLocked: boolean;
   canApply: boolean;
   modes: string[];
   queue: Array<{ status: string }>;
+  styleTargets: Array<{ status: string }>;
   recipe: unknown;
   original: unknown;
   compare: 'off' | 'hold' | 'split';
@@ -61,9 +63,11 @@ function fakeSession(): FakeSession {
     view: 'edit',
     hasDesign: true,
     busy: null,
+    queueLocked: false,
     canApply: true,
     modes: ['inPlace', 'personalCopy'],
     queue: [{ status: 'editing' }],
+    styleTargets: [],
     recipe: null,
     original: null,
     compare: 'off',
@@ -172,6 +176,21 @@ describe('registry', () => {
     expect(ids).not.toContain('apply.newShortcut');
     byId('apply.personalCopy').run(ctx);
     expect(session.apply).toHaveBeenCalledWith({ mode: 'personalCopy' });
+  });
+
+  it('offers "Apply style to all" only with a style, another target waiting and the queue unlocked', () => {
+    const offered = () => availableCommands(commands, ctx).some((c) => c.id === 'apply.styleToAll');
+    expect(offered()).toBe(false);
+    session.recipe = { label: 'Neon' };
+    expect(offered()).toBe(false);
+    session.styleTargets = [{ status: 'pending' }];
+    expect(offered()).toBe(true);
+    // An item still loading locks the queue as a running job does.
+    session.queueLocked = true;
+    expect(offered()).toBe(false);
+    session.queueLocked = false;
+    byId('apply.styleToAll').run(ctx);
+    expect(session.applyStyleToAll).toHaveBeenCalledTimes(1);
   });
 
   it('runs undo / redo on the engine', () => {

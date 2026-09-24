@@ -52,7 +52,10 @@ export interface E2EConfig {
   accent?: string | null;
   firstRun?: boolean;
   smoke?: boolean;
+  /** Windows has client-area animations turned off (default false). */
   systemReducedMotion?: boolean;
+  /** Why the saved hotkey doesn't work (another app holds it), as `BootInfo.hotkeyError` says. */
+  hotkeyError?: string;
   windows11?: boolean;
   /** Mailbox heartbeat after this many ms of silence (default 25 000). */
   heartbeatMs?: number;
@@ -94,6 +97,12 @@ export interface SimulateOpenResult {
   morph: boolean;
   /** `prepared` arrived within the prepare timeout. */
   preparedInTime: boolean;
+  /**
+   * Box page: the box confirmed the `box:handoff` picture (`box_painted`)
+   * within Rust's 300 ms; null when no box took one (the editor page, or
+   * the box was hidden).
+   */
+  boxPainted: boolean | null;
   /** Stages whose ack never came (the FSM went on without them). */
   timedOut: AckStage[];
 }
@@ -158,9 +167,11 @@ export interface E2EApi {
   waitForAck(session: number, stage: AckStage, timeoutMs?: number): Promise<boolean>;
   readonly editor: E2EEditorState;
   /**
-   * Runs Rust's open handoff: Prepare → prepared (400 ms) → Reveal →
-   * revealed → Expand → expanded. After a late `prepared`, Reveal and
-   * Expand{morph: false} follow at once (no wait for `revealed`).
+   * Runs Rust's open handoff: (box page, box shown: `box:handoff` with the
+   * first item's icon and count) Prepare → prepared (400 ms; and the box's
+   * `box_painted`, 300 ms) → Reveal → revealed → Expand → expanded. After a
+   * late `prepared`, Reveal and Expand{morph: false} follow at once (no wait
+   * for `revealed`).
    */
   simulateOpen(
     items: ItemInfo[] | string[],
@@ -193,6 +204,14 @@ export interface E2EApi {
   /** Content `read_project` returns for an item id or path. */
   setProject(itemIdOrPath: string, json: string): void;
   setApplyCollapses(on: boolean): void;
+  /** What Windows reports as the accent colour from now on (app_boot, accent_color, wallpaper_info). */
+  setAccent(color: string | null): void;
+  /** Whether Windows' client-area animations are off, from now on (app_boot, and a simulated open's morph). */
+  setSystemReducedMotion(on: boolean): void;
+  /** Why the saved hotkey doesn't work (`BootInfo.hotkeyError`); null: it works. */
+  setHotkeyError(message: string | null): void;
+  /** Another app holds `hotkey` from now on: `settings_set` refuses to switch to it, like Rust. */
+  refuseHotkey(hotkey: string): void;
 
   // ---- state -------------------------------------------------------------------
   /** Current backend settings (a copy). */
@@ -203,7 +222,8 @@ export interface E2EApi {
   makeItems(paths: string[]): Promise<ItemInfo[]>;
   readonly history: readonly HistoryEntry[];
   readonly library: readonly LibraryEntry[];
-  readonly autosaveData: string | null;
+  /** The autosave slots: `live` (this launch's unsaved design) and `recovery` (the offer from an earlier one). */
+  readonly autosaveSlots: { readonly live: string | null; readonly recovery: string | null };
   readonly smokeReports: readonly SmokeReport[];
   readonly boxVisible: boolean;
 }

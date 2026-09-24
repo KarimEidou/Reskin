@@ -1,16 +1,24 @@
-// Re-playable styles for "Apply style to all": what the Styles, Backdrop
-// and Adjust panels did, as steps that rebuild the look on another icon.
-// A preset starts a new recipe (it replaces the whole design); a backdrop
-// or an adjustment applied afterwards is appended to it.
+// Re-playable styles for "Apply style to all": what the Styles, Backdrop,
+// Adjust and Effects panels did, as steps that rebuild the look on another
+// icon. A preset starts a new recipe (it replaces the whole design); a
+// backdrop, an adjustment or a layer's effects applied afterwards are
+// appended to it.
+//
+// A look must come out the same on a document of any size (the 512 px
+// master, a 16–64 px pixel-art grid): presets and backdrops are measured
+// in fractions of the document already, and the steps with pixel settings
+// (adjustments, icon helpers, effects) remember the size of the document
+// they were chosen on and scale those settings to the one they replay on.
 
-import type { Engine } from '$engine/index';
+import { cloneEffects, scaleEffect, type Engine, type LayerEffect } from '$engine/index';
 import type { BackdropSpec } from '$engine/backdrop';
 import { renderBackdrop } from '$engine/backdrop';
-import { applyFilter, type FilterId } from '$engine/filters';
+import { applyFilter, getFilter, type FilterId } from '$engine/filters';
 import { createCanvasTextRasterizer } from '$engine/helpers';
 import { applyPresetResult, insertLayer, layerImage, makeRasterLayer, type PresetId, type PresetOptions, type PresetResult } from '$engine/presets';
 import type { StyleRecipe } from '../../state/session.svelte';
-import { runHelper, type HelperId } from '../adjust/helper-defs';
+import { getHelper, runHelper, type HelperId } from '../adjust/helper-defs';
+import { scalePxValues } from '../adjust/scale';
 
 /** Recipe steps keep their own label so chains can describe themselves. */
 export interface RecipeStep extends StyleRecipe {
@@ -45,13 +53,15 @@ function targetLayer(engine: Engine, iconLayerId: string): string | null {
   return engine.getLayer(iconLayerId) ? iconLayerId : null;
 }
 
-export function filterRecipe(id: FilterId, label: string, params: Record<string, unknown>): RecipeStep {
-  const p = structuredClone(params);
+/** An adjustment with `params` chosen on a `size` px document. */
+export function filterRecipe(id: FilterId, label: string, params: Record<string, unknown>, size: number): RecipeStep {
+  const chosen = structuredClone(params);
   return {
     label,
     apply(engine: Engine, iconLayerId: string) {
       const target = targetLayer(engine, iconLayerId);
       if (!target) return;
+      const p = scalePxValues(getFilter(id).params, chosen, size, engine.doc.width);
       engine.editLayerPixels(target, label, (s) => {
         applyFilter(id, s, p, null, s);
       });
@@ -59,17 +69,40 @@ export function filterRecipe(id: FilterId, label: string, params: Record<string,
   };
 }
 
-export function helperRecipe(id: HelperId, label: string, values: Record<string, unknown>): RecipeStep {
-  const v = structuredClone(values);
+/** An icon helper with `values` chosen on a `size` px document. */
+export function helperRecipe(id: HelperId, label: string, values: Record<string, unknown>, size: number): RecipeStep {
+  const chosen = structuredClone(values);
   return {
     label,
     apply(engine: Engine, iconLayerId: string) {
       const target = targetLayer(engine, iconLayerId);
       if (!target) return;
+      const v = scalePxValues(getHelper(id).params, chosen, size, engine.doc.width);
       const rasterizer = createCanvasTextRasterizer();
       engine.editLayerPixels(target, label, (s) => {
         s.data.set(runHelper(id, s, v, null, rasterizer).data);
       });
+    },
+  };
+}
+
+/**
+ * The effects the layer `layerName` got on a `size` px document (the
+ * Effects panel): given again to the layer of that name — a preset's
+ * layers have the same names on every icon — or else to the layer
+ * adjustments replay on. Later changes to the same layer's effects
+ * replace this step.
+ */
+export function effectsRecipe(layerName: string, effects: readonly LayerEffect[], size: number): RecipeStep {
+  const chosen = cloneEffects(effects);
+  return {
+    label: 'Effects',
+    replaces: `effects:${layerName}`,
+    apply(engine: Engine, iconLayerId: string) {
+      const target = engine.doc.layers.find((l) => l.name === layerName)?.id ?? targetLayer(engine, iconLayerId);
+      if (!target) return;
+      const k = engine.doc.width / size;
+      engine.setLayerProps(target, { effects: chosen.map((e) => scaleEffect(e, k)) });
     },
   };
 }

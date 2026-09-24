@@ -4,12 +4,10 @@
   (which drives MorphFrame: the box proxy ⇄ the panel), the rest to the
   session / shell. Mounts the chrome, the views, the dialogs, the command
   palette and the global keyboard handling (Escape closes the editor, an
-  image pasted outside the canvas becomes part of the design).
+  image pasted outside the canvas is imported through the import popover).
 -->
 <script lang="ts">
   import { onMount, tick, type Component } from 'svelte';
-  import { decodeImage } from '$engine/dom';
-  import type { Surface } from '$engine/index';
   import { boot } from '$lib/boot';
   import { commands } from '$lib/ipc/commands';
   import { startMailbox } from '$lib/ipc/mailbox';
@@ -44,7 +42,7 @@
   import { errorText } from './state/session.svelte';
   import { preloadViews } from './views/lazy.svelte';
   import ViewHost from './views/ViewHost.svelte';
-  import { announcePaste } from './workspace/pasted';
+  import { imageFile, importImageFile } from './workspace/pasted';
   import { stage } from './workspace/stage.svelte';
 
   const session = setSession(createSession());
@@ -174,8 +172,15 @@
     else frame?.clear();
   }
 
+  /** The autosave the last collapse started (see collapse). */
+  let closingSave: Promise<void> = Promise.resolve();
+
   async function collapse(cmd: CollapseCmd): Promise<void> {
     closeTransient();
+    // A close Rust started (the hotkey, the tray, an apply) did not come
+    // through requestClose: keep the last edit now, as it is — the next
+    // open's Prepare resets the session and would cancel a save still due.
+    closingSave = session.flushAutosave();
     // Plain close: the box comes back empty; after an apply it carries the
     // new icon. The box takes this very picture over (box:collapse).
     const items = collapseItems(cmd.then, cmd.icon);
@@ -183,10 +188,13 @@
     await frame?.collapse(cmd.boxRect, props, cmd.morph && !motion.reduced);
   }
 
-  function clear(): void {
+  async function clear(): Promise<void> {
     closeTransient();
     frame?.clear();
     clearToasts();
+    // Rust may destroy the hidden editor once it is cleared (low-memory
+    // mode): the close's autosave goes out first (the step is time-boxed).
+    await closingSave;
   }
 
   /** How long Expand waits for the opened item to reach the canvas. */
@@ -252,7 +260,7 @@
   // Both are decided after every other listener (./chrome/last-listener.ts):
   // whatever uses the key or the paste calls preventDefault (or stops it) —
   // dialogs, popovers and menus, the canvas (a drag, a pending transform, a
-  // text edit, a lasso polygon, an image pasted as a layer) and the
+  // text edit, a lasso polygon, an image pasted on it) and the
   // sidebar's panel editors — and many of them listen on the window, where
   // they come after the App's own listeners.
 
@@ -301,53 +309,17 @@
     void session.requestClose().catch((err: unknown) => console.error('[editor] close failed', err));
   }
 
-  function pastedImage(data: DataTransfer | null): File | null {
-    if (!data) return null;
-    for (const item of data.items) {
-      if (item.kind === 'file' && item.type.startsWith('image/')) return item.getAsFile();
-    }
-    return null;
-  }
-
   /**
-   * An image pasted where nothing took it (the canvas adds pasted images
-   * itself): it joins the open design as a layer, or starts a design.
+   * An image pasted where nothing took it (the canvas takes the pastes it
+   * gets): imported like a drop — it starts a design, or the import
+   * popover asks what it becomes.
    */
   function pasteImage(e: ClipboardEvent): void {
     if (e.defaultPrevented || !shell.interactive || modalOpen() || keptByTarget(e)) return;
-    const file = pastedImage(e.clipboardData);
+    const file = imageFile(e.clipboardData);
     if (!file) return;
     e.preventDefault();
-    void importPasted(file);
-  }
-
-  /** The design an image joins (null: it starts one). */
-  const openDesign = () => (session.hasDesign ? session.engine.doc : null);
-
-  async function importPasted(file: File): Promise<void> {
-    const design = openDesign();
-    let surface: Surface;
-    try {
-      surface = await decodeImage(file);
-    } catch (e) {
-      toast({ message: `Couldn't read the pasted image: ${errorText(e)}`, kind: 'error' });
-      return;
-    }
-    // The editor closed, or another design opened, while decoding.
-    if (!shell.interactive || openDesign() !== design) return;
-    const fresh = design === null;
-    if (fresh) session.newBlank();
-    const starter = fresh ? session.engine.doc.layers[0] : undefined;
-    const added = session.importSurface(surface) !== null;
-    if (fresh) {
-      // Like an opened image: the design is the picture, with nothing to undo.
-      if (starter && session.engine.doc.layers.length > 1) session.engine.deleteLayer(starter.id);
-      session.engine.clearHistory();
-    }
-    shell.navigate('edit');
-    // Joining a design went in without asking: say so, with an Undo (the
-    // engine said why when it could not add the layer).
-    if (!fresh && added) announcePaste(session.engine);
+    void importImageFile(shell, file, 'Pasted image');
   }
 
   // ---- smoke test -----------------------------------------------------------------
