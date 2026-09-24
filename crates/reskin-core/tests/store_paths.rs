@@ -688,7 +688,9 @@ fn parse_hotkey_accepts() {
             "Control+Alt+Shift+KeyR",
         ),
         ("Super+ArrowLeft", "Win+Left", "Super+ArrowLeft"),
-        ("Shift+Digit0", "Shift+0", "Shift+Digit0"),
+        ("Alt+Shift+Digit0", "Alt+Shift+0", "Alt+Shift+Digit0"),
+        // Function keys type nothing, so Shift alone is enough for them.
+        ("Shift+F9", "Shift+F9", "Shift+F9"),
     ];
     for (input, display, accelerator) in cases {
         let parsed = hk(input);
@@ -735,6 +737,11 @@ fn parse_hotkey_disabled_and_rejected() {
         "Ctrl+-",
     ] {
         assert!(parse_hotkey(bad).is_err(), "{bad:?} was accepted");
+    }
+    // Shift alone would swallow a typeable character system-wide.
+    for bad in ["Shift+A", "Shift+Digit0", "Shift+Space", "Shift+Enter"] {
+        let err = parse_hotkey(bad).unwrap_err().to_string();
+        assert!(err.contains("Shift alone"), "{bad:?}: {err}");
     }
     let err = parse_hotkey("Ctrl+Nope").unwrap_err().to_string();
     assert!(err.contains("Nope"), "{err}");

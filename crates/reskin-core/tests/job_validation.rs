@@ -480,6 +480,25 @@ fn bad_restore_locations_are_rejected() {
     assert_rejected(restore_lnk(target, Some("x.dll"), 65536), "out of range");
     assert_rejected(restore_lnk(target, Some("x.dll"), -65536), "out of range");
     assert_rejected(restore_lnk(target, None, i32::MIN), "out of range");
+    for location in [
+        r"\\evil\share\x.ico",
+        "//evil/share/x.ico",
+        r"\\?\UNC\evil\share\x.ico",
+        r"\\.\pipe\x",
+        "\"\\\\evil\\share\\x.ico\"",
+    ] {
+        assert_rejected(
+            restore_lnk(target, Some(location), 0),
+            "network icon locations",
+        );
+    }
+    // Ordinary local originals still pass.
+    let ok = validate(vec![restore_lnk(
+        target,
+        Some(r"%SystemRoot%\System32\imageres.dll"),
+        -109,
+    )]);
+    assert!(ok.is_ok(), "{ok:?}");
 }
 
 #[test]

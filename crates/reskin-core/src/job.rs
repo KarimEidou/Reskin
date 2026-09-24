@@ -393,6 +393,14 @@ fn check_location(
     if location.chars().any(char::is_control) {
         return Err("the icon location contains control characters".into());
     }
+    // A network icon on an all-users shortcut would make every user's
+    // Explorer authenticate to that host (leaking NTLM hashes). Originals on
+    // the Public Desktop are local in practice, so refuse UNC and device
+    // paths (`\\server\…`, `//server/…`, `\\?\UNC\…`, `\\.\…`) outright.
+    let trimmed = location.trim_start_matches('"').trim_start();
+    if paths::is_unc(trimmed) || trimmed.starts_with(r"\\") || trimmed.starts_with("//") {
+        return Err("network icon locations are not allowed".into());
+    }
     Ok((!location.trim().is_empty()).then(|| location.to_owned()))
 }
 

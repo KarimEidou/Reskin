@@ -86,8 +86,13 @@ export function parseHotkey(input: string): HotkeyParse {
     }
   }
   if (!hk.key) return { ok: false, error: 'A key is missing' };
+  // Mirrors Rust: Shift alone would swallow that character system-wide, so
+  // a global hotkey needs Ctrl, Alt or Win — except for F1–F24.
   if (!(hk.ctrl || hk.alt || hk.shift || hk.win)) {
     return { ok: false, error: 'Add at least one of Ctrl, Alt, Shift or Win' };
+  }
+  if (!(hk.ctrl || hk.alt || hk.win) && !/^F\d{1,2}$/.test(hk.key)) {
+    return { ok: false, error: "Add Ctrl, Alt or Win (Shift alone isn't enough)" };
   }
   return { ok: true, hotkey: hk };
 }

@@ -385,8 +385,14 @@ pub fn parse_hotkey(s: &str) -> Result<Option<Hotkey>> {
     let Some(key) = key else {
         return Err(invalid("a key is missing"));
     };
+    // Shift alone would swallow that character system-wide (Shift+A types
+    // "A"), so a global hotkey needs Ctrl, Alt or Win — except for the
+    // function keys, which type nothing.
     if !(ctrl || alt || shift || win) {
         return Err(invalid("add at least one of Ctrl, Alt, Shift or Win"));
+    }
+    if !(ctrl || alt || win || matches!(key, Key::F(_))) {
+        return Err(invalid("add Ctrl, Alt or Win (Shift alone isn't enough)"));
     }
     Ok(Some(Hotkey {
         ctrl,

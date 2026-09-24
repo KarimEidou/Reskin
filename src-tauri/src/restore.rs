@@ -283,7 +283,8 @@ fn current_location(e: &HistoryEntry) -> reskin_core::Result<Option<String>> {
     })
 }
 
-fn probe(e: &HistoryEntry) -> Probe {
+/// What a pending entry's target points at now (for `reconcile`).
+pub fn probe(e: &HistoryEntry) -> Probe {
     match current_location(e) {
         Ok(Some(loc))
             if Path::new(&loc) == Path::new(&e.icon_path)

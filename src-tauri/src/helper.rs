@@ -23,11 +23,25 @@ struct WinJobExec;
 impl JobExec for WinJobExec {
     fn write_icon(&mut self, dest: &str, bytes: &[u8]) -> Result<()> {
         let dest = Path::new(dest);
-        if std::fs::read(dest).is_ok_and(|existing| existing == bytes) {
-            return Ok(());
-        }
         if let Some(dir) = dest.parent() {
             std::fs::create_dir_all(dir)?;
+            // %ProgramData% lets any user create folders, so `Reskin\icons`
+            // (or `Reskin`) could be a junction planted to redirect this
+            // elevated write. Refuse to write through reparse points.
+            for d in dir.ancestors().take(2) {
+                if is_reparse_point(d) {
+                    return Err(Error::AccessDenied(format!(
+                        "{} is a link; refusing to write through it",
+                        d.display()
+                    )));
+                }
+            }
+        }
+        if is_reparse_point(dest) {
+            return Err(Error::AccessDenied(format!("{} is a link", dest.display())));
+        }
+        if std::fs::read(dest).is_ok_and(|existing| existing == bytes) {
+            return Ok(());
         }
         reskin_core::store::write_atomic(dest, bytes)
     }
@@ -43,6 +57,13 @@ impl JobExec for WinJobExec {
     fn notify(&mut self, target: &str) {
         notify::item_updated(Path::new(target));
     }
+}
+
+fn is_reparse_point(p: &Path) -> bool {
+    use std::os::windows::fs::MetadataExt;
+    const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x400;
+    std::fs::symlink_metadata(p)
+        .is_ok_and(|m| m.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0)
 }
 
 fn com_init() {
@@ -119,6 +140,12 @@ pub fn restore_all(quiet: bool) -> i32 {
             return EXIT_FAILED;
         }
     };
+    // Settle changes interrupted by a crash first, or restore-all would
+    // skip them.
+    if !journal.pending().is_empty() {
+        let report = journal.reconcile(restore::probe);
+        log::line(&format!("restore-all: reconcile {report:?}"));
+    }
     let plans = journal.plan_restore_all();
     if plans.is_empty() {
         if !quiet {
