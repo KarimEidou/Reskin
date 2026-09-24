@@ -10,7 +10,11 @@
 //   absorbing → idle (handoff)   the editor was asked to open
 //   * → flying → celebrate → flying → idle     box:flight legs
 //   * → busy → idle              box:progress
+//   idle|hover|… → celebrate     undone: the Undo chip restored the icon
 //   celebrate|error → idle|hover settled (after their one-shot animation)
+//   * → idle (handoff)           box:handoff: the editor opens over the box
+//                                (an open from the tray, the menu, Explorer…
+//                                too): the picture its proxy draws
 //   * → idle (handoff)           box:collapse: the editor collapsed onto its
 //                                proxy; the hidden box takes that picture
 //                                over (see collapseItems) before it is shown
@@ -26,7 +30,7 @@
 // ignores pointer/drag input until it is shown again (a plain close) or,
 // after an apply, until its flight takes over (depart / celebrate).
 
-import type { CollapseThen, FlightPhase } from '$lib/ipc/types';
+import type { CollapseThen, FlightPhase, RestoreReport } from '$lib/ipc/types';
 import { collapseItems, type BoxVisualState } from '$lib/ui/box-geometry';
 
 export type BoxStateName = BoxVisualState;
@@ -68,6 +72,7 @@ export type BoxEvent =
   | { type: 'hidden' }
   | { type: 'unfreeze' }
   | { type: 'error'; message?: string }
+  | { type: 'undone' }
   | { type: 'settled'; epoch: number };
 
 export const initialBoxState: BoxState = Object.freeze({
@@ -89,6 +94,9 @@ const carried = (s: BoxState): string | null => (s.collapsed ? s.icon : null);
 
 /** States from which a new drag may arm the box. */
 const ARMABLE: ReadonlySet<BoxStateName> = new Set(['idle', 'hover', 'armed', 'error', 'celebrate']);
+
+/** States with nothing in progress: a finished undo may celebrate. */
+const AT_REST: ReadonlySet<BoxStateName> = new Set(['idle', 'hover', 'error', 'celebrate']);
 
 function toError(s: BoxState, message: string | null | undefined): BoxState {
   return {
@@ -222,10 +230,24 @@ export function boxReducer(s: BoxState, e: BoxEvent): BoxState {
     case 'error':
       return toError(s, e.message);
 
+    case 'undone':
+      if (s.handoff || !AT_REST.has(s.name)) return s;
+      return { ...s, name: 'celebrate', icon: null, count: 0, message: null, progress: null, epoch: s.epoch + 1 };
+
     case 'settled':
       if (e.epoch !== s.epoch || (s.name !== 'celebrate' && s.name !== 'error')) return s;
       return { ...s, name: rest(s), icon: null, message: null, count: 0 };
   }
+}
+
+/**
+ * What the box shows once the restore behind its Undo chip came back: a
+ * short celebration, or a shake saying why the icon is not back.
+ */
+export function undoOutcome(report: RestoreReport): BoxEvent {
+  if (report.failed.length > 0) return { type: 'error', message: `Couldn't undo: ${report.failed[0]}` };
+  if (report.needsElevation > 0) return { type: 'error', message: 'Undo needs administrator approval' };
+  return { type: 'undone' };
 }
 
 /** Progress 0..1 for the ring, or null (indeterminate / not busy). */

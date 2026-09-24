@@ -3,15 +3,21 @@
 // The workspace owns the keys that act on the canvas itself (STAGE_KEYS):
 // hold Space for the hand tool, hold `\` for before/after, and it forwards
 // Enter / Escape / arrows / Delete / Backspace to the active tool while the
-// canvas has focus. Everything else, view and colour keys included (K, X,
-// D, Ctrl+0 / Ctrl+1 / Ctrl +/-), belongs to the app-wide command registry
-// (palette/commands.ts): every key has exactly one owner.
+// canvas has focus; Delete / Backspace the tool does not use clear the
+// selected pixels (the whole layer without a selection). Everything else,
+// view and colour keys included (K, X, D, Ctrl+0 / Ctrl+1 / Ctrl +/-),
+// belongs to the app-wide command registry (palette/commands.ts): every key
+// has exactly one owner.
 
 export type StageKeyAction =
   | { type: 'hand'; on: boolean }
   | { type: 'compare'; on: boolean }
-  /** Forward to `engine.keyDown(key, mods)` (Enter, Escape, arrows, Delete, Backspace). */
-  | { type: 'tool'; key: string }
+  /**
+   * Forward to `engine.keyDown(key, mods)` (Enter, Escape, arrows, Delete,
+   * Backspace). `clear`: when the tool does not use the key, clear the
+   * selected pixels instead (`engine.clearPixels`).
+   */
+  | { type: 'tool'; key: string; clear?: true }
   /** Modifier keys changed during a drag: `engine.updateModifiers`. */
   | { type: 'modifiers' };
 
@@ -53,6 +59,8 @@ export interface KeyContext {
 }
 
 const TOOL_KEYS = new Set(['Enter', 'Escape', 'ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight', 'Delete', 'Backspace']);
+/** Tool keys that clear the selected pixels when the tool leaves them. */
+const CLEAR_KEYS = new Set(['Delete', 'Backspace']);
 const MODIFIER_KEYS = new Set(['Shift', 'Alt', 'Control', 'Meta']);
 
 /**
@@ -79,6 +87,7 @@ export const STAGE_SHORTCUTS: ReadonlyArray<{ label: string; keys: readonly stri
   { label: 'Compare with the original', keys: ['\\'], note: 'hold' },
   { label: 'Commit a transform, text or lasso polygon', keys: ['Enter'] },
   { label: 'Cancel the current operation', keys: ['Esc'] },
+  { label: 'Clear the selection (the layer without one)', keys: ['Delete', 'Backspace'] },
   { label: 'Remove the last lasso corner', keys: ['Backspace'] },
   { label: 'Nudge the layer or selection', keys: ['↑ ↓ ← →'], note: 'Shift: 10 px' },
 ];
@@ -122,7 +131,8 @@ export function stageKeyAction(e: KeyLike, c: KeyContext): StageKeyAction | null
   // Keys for the active tool: Escape also cancels a drag from anywhere.
   if (TOOL_KEYS.has(e.key)) {
     if (e.key === 'Escape' && (c.interacting || c.toolBusy)) return { type: 'tool', key: e.key };
-    return c.canvasFocus ? { type: 'tool', key: e.key } : null;
+    if (!c.canvasFocus) return null;
+    return CLEAR_KEYS.has(e.key) && !c.interacting ? { type: 'tool', key: e.key, clear: true } : { type: 'tool', key: e.key };
   }
   return null;
 }

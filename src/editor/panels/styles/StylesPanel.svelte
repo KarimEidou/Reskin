@@ -4,7 +4,10 @@
   replaces the design with that look as ONE undo step and records it as the
   recipe "Apply style to all" replays. Accent, intensity and shape re-style
   the grid, and the applied look while it is still the latest change (the
-  engine merges the new stack into that same step).
+  engine merges the new stack into that same step). A look (or the design
+  read back for styling) that comes back after another design was opened
+  is dropped. The command palette applies a preset through
+  `panelRequests.style`.
 -->
 <script module lang="ts">
   import type { Pixels } from '$engine/filters/types';
@@ -58,9 +61,11 @@
   import { toast } from '$lib/ui/toasts.svelte';
   import { getSession } from '../../state/context';
   import { watchDpr } from '../common/canvas';
+  import { designRef, isCurrentDesign } from '../common/design';
   import PixelThumb from '../common/PixelThumb.svelte';
   import Section from '../common/Section.svelte';
   import { debounce } from '../common/schedule';
+  import { panelRequests } from '../requests.svelte';
   import { isCancelled } from '../worker/client';
   import { snapshotDoc, snapshotTransfer } from '../worker/snapshot';
   import { presetRecipe, type PresetBuilder } from './recipe';
@@ -92,6 +97,8 @@
   }
 
   let designSource = $state.raw<Pixels | null>(null);
+  /** Whether there is an icon to style is known (reading the design back takes a moment). */
+  let sourceKnown = $state(false);
   const icon = $derived<Pixels | null>(session.original ? { width: session.original.width, height: session.original.height, data: session.original.data } : designSource);
   const iconKey = $derived(icon ? hashPixels(icon) : '');
 
@@ -99,18 +106,24 @@
     const kept = designSources.get(engine.doc);
     if (!session.original && kept && kept.entry === engine.currentEntryId) {
       designSource = kept.source;
+      sourceKnown = true;
     } else if (!session.original) {
       // No original icon (a blank design or an image): style the current
       // design, composited in the worker through the export path.
+      const asked = designRef(session);
       const snap = snapshotDoc(engine.doc);
       session.panels
         .request({ op: 'renderSizes', doc: snap, sizes: [256] }, { transfer: snapshotTransfer(snap) })
         .then(([r]) => {
+          if (!isCurrentDesign(session, asked)) return;
           const px = r?.pixels;
           const empty = !px || !px.data.some((v, i) => i % 4 === 3 && v > 0);
           designSource = empty ? null : px;
         })
-        .catch((e: unknown) => console.warn('could not read the design for presets', e));
+        .catch((e: unknown) => console.warn('could not read the design for presets', e))
+        .finally(() => (sourceKnown = true));
+    } else {
+      sourceKnown = true;
     }
     return watchDpr((d) => (dpr = d));
   });
@@ -205,6 +218,7 @@
     applying = id;
     const opts = $state.snapshot(options) as Partial<PresetOptions>;
     const label = getPreset(id).label;
+    const asked = designRef(session);
     const doc = engine.doc;
     try {
       const copy = { width: src.width, height: src.height, data: src.data.slice() };
@@ -212,8 +226,9 @@
         { op: 'presetBuild', iconKey, icon: copy, id, size: doc.width, options: opts },
         { channel: 'preset-apply', transfer: [copy.data.buffer] },
       );
-      // Another design was opened meanwhile: this look was not meant for it.
-      if (engine.doc !== doc) return;
+      // Another design was opened meanwhile (or is being opened): this look
+      // was not meant for it.
+      if (!isCurrentDesign(session, asked)) return;
       // Re-styling only while the look is still the latest change (the user
       // may have edited meanwhile); the same merge key then replaces it in
       // place instead of stacking another step.
@@ -239,6 +254,17 @@
   const restyle = debounce(() => {
     if (applied && lookIsCurrent()) void apply(applied, true);
   }, 280);
+
+  // The command palette asked for a preset (it may have loaded this panel
+  // for it): apply it once the icon to style is known.
+  $effect(() => {
+    const asked = panelRequests.style;
+    if (!asked || !sourceKnown) return;
+    untrack(() => {
+      panelRequests.style = null;
+      if (icon) void apply(asked);
+    });
+  });
 
   let destroyed = false;
   onDestroy(() => {

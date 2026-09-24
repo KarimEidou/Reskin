@@ -11,9 +11,9 @@
   import Trash2 from '@lucide/svelte/icons/trash-2';
   import FileImage from '@lucide/svelte/icons/file-image';
   import Button from '$lib/ui/Button.svelte';
+  import IconButton from '$lib/ui/IconButton.svelte';
   import Dialog from '$lib/ui/Dialog.svelte';
   import EmptyState from '$lib/ui/EmptyState.svelte';
-  import ToolButton from '../common/ToolButton.svelte';
   import { getSession } from '../../state/context';
 
   const session = getSession();
@@ -96,10 +96,10 @@
 
 <div class="history" data-testid="history-panel">
   <div class="toolbar">
-    <ToolButton label="Undo" shortcut="Ctrl+Z" icon={Undo2} size="sm" disabled={!hist.canUndo} onclick={() => engine.undo()} />
-    <ToolButton label="Redo" shortcut="Ctrl+Y" icon={Redo2} size="sm" disabled={!hist.canRedo} onclick={() => engine.redo()} />
+    <IconButton label="Undo" shortcut="Ctrl+Z" icon={Undo2} size="sm" focusableWhenDisabled disabled={!hist.canUndo} onclick={() => engine.undo()} />
+    <IconButton label="Redo" shortcut="Ctrl+Y" icon={Redo2} size="sm" focusableWhenDisabled disabled={!hist.canRedo} onclick={() => engine.redo()} />
     <span class="meta">{hist.rows.length - 1} step{hist.rows.length === 2 ? '' : 's'} · {size(hist.bytes)}</span>
-    <ToolButton label="Clear history" icon={Trash2} size="sm" disabled={hist.rows.length <= 1} onclick={() => (confirmClear = true)} />
+    <IconButton label="Clear history" icon={Trash2} size="sm" focusableWhenDisabled disabled={hist.rows.length <= 1} onclick={() => (confirmClear = true)} />
   </div>
 
   {#if hist.rows.length <= 1}

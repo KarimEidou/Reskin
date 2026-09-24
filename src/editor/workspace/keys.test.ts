@@ -108,8 +108,17 @@ describe('stageKeyAction — keys owned by the command registry', () => {
 
 describe('stageKeyAction — tool keys', () => {
   it('forwards Enter / arrows / Delete when the canvas has focus', () => {
-    for (const k of ['Enter', 'ArrowLeft', 'ArrowDown', 'Delete', 'Escape']) {
+    for (const k of ['Enter', 'ArrowLeft', 'ArrowDown', 'Escape']) {
       expect(stageKeyAction(key(k), ctx())).toEqual({ type: 'tool', key: k });
+    }
+    // Delete / Backspace go to the tool first (Backspace removes a lasso
+    // corner); when it leaves them, they clear the selected pixels.
+    for (const k of ['Delete', 'Backspace']) {
+      expect(stageKeyAction(key(k), ctx())).toEqual({ type: 'tool', key: k, clear: true });
+      expect(stageKeyAction(key(k, { shiftKey: true }), ctx())).toEqual({ type: 'tool', key: k, clear: true });
+      // Never in the middle of a stroke, nor for another focused control.
+      expect(stageKeyAction(key(k), ctx({ interacting: true }))).toEqual({ type: 'tool', key: k });
+      expect(stageKeyAction(key(k), ctx({ canvasFocus: false }))).toBeNull();
     }
     expect(stageKeyAction(key('ArrowLeft', { shiftKey: true }), ctx())).toEqual({ type: 'tool', key: 'ArrowLeft' });
   });

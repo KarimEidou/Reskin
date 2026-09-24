@@ -35,7 +35,7 @@ src-tauri/                      the Tauri app (windows, animator, mailbox, comma
 * Errors: commands return `Result<T, String>`; JS sees a rejected promise with
   the message string.
 * Rust → box: events in `src/lib/ipc/events.ts` (`box:flight`, `box:progress`,
-  `box:collapse`, `box:shown`, `settings:changed`, `box:undo`).
+  `box:handoff`, `box:collapse`, `box:shown`, `settings:changed`, `box:undo`).
 * Rust → editor: **mailbox only** (`editor_next(after)` long-poll, returns
   `Envelope[]` with increasing `seq`; returns `[{seq, cmd:{type:'heartbeat'}}]`
   after 25 s of silence). The editor processes envelopes strictly in order and
@@ -47,6 +47,9 @@ src-tauri/                      the Tauri app (windows, animator, mailbox, comma
   500 ms, `startMailbox` sends keep-alive polls every 500 ms. They poll from
   the last *handled* envelope, so they acknowledge nothing (Rust answers at
   once with the envelope still being handled) and their answers are dropped.
+  A destroyed page's poll can outlive it by up to 25 s: `Mailbox::reset`
+  (called whenever the editor window is destroyed) starts a new generation,
+  sends the old polls back empty and stops them counting as a live page.
 * Windows state that changes behind a page's back (accent colour, animation
   effects, a hotkey another app took): `app_boot` reads it live
   (`BootInfo.accent`, `systemReducedMotion`, `hotkeyError`), and
@@ -65,11 +68,20 @@ src-tauri/                      the Tauri app (windows, animator, mailbox, comma
 ### Morph / handoff protocol (session numbers increase per open)
 
 ```
-open_editor(items, view)                     [box → Rust]
+open_editor(items, view)                     [box → Rust; or tray, menu, Explorer…]
 Rust: place_editor(), move hidden editor     (editor never resizes while visible)
-Prepare{session, boxRect(css px, editor-relative), items, view, settings, morph}
+Rust: box:handoff{session: box session, icon: items[0].icon, count} to the
+      visible box, which freezes on that picture — the one the proxy draws
+      (already its picture when the box asked for the open) — and answers
+      box_painted once it is on screen (decoded + double rAF); a drop it was
+      still absorbing asks open_editor for its items all the same (handed
+      over once the editor is open)
+Prepare{session, boxRect(css px, editor-relative; null: box hidden), items,
+        view, settings, morph}
    editor: render BoxVisual proxy at boxRect (same skin/size/state as the box),
-           await img.decode() + double rAF → editor_ack(session,'prepared')
+           await img.decode() + double rAF → editor_ack(session,'prepared');
+           no boxRect: no proxy (morph is false)
+Rust: waits for prepared (400 ms) and box_painted (300 ms from box:handoff)
 Rust: show editor (topmost), Reveal{session}
    editor: double rAF → editor_ack(session,'revealed')
 Rust: hide box; Expand{session, morph}
@@ -86,7 +98,7 @@ editor_close(reason)                          [editor → Rust]
 Rust: editor topmost; Collapse{session, boxRect, then, icon, morph}
    editor: panel → proxy at boxRect (or fade out when morph=false), showing
            handoffProps(collapseItems(then, icon)) → editor_ack(session,'collapsed')
-Rust: box:collapse{session, then, icon} to the still hidden box
+Rust: box:collapse{session: box session, then, icon} to the still hidden box
    box: takes over that picture (the same collapseItems → BoxVisual props:
         empty after `hide`, the new icon after `fly`/`celebrate`)
 Rust: show box right under the (topmost) editor — it may show its last
@@ -99,6 +111,28 @@ Rust: Clear{session}
 Rust: hide editor, box back to the top of the topmost band (+ low-memory:
       destroy the editor); glide box home if needed.
 ```
+Box sessions number the pictures handed to the box (`box:handoff`,
+`box:collapse`), apart from the editor's sessions: an open's picture and the
+close's of the same editor session never stand for each other.
+
+One handoff runs at a time (`morph.rs` holds `busy` through it; outside it
+the editor is open or closed). An open or a close that comes during a
+handoff waits for it. An open that then finds the editor open hands its
+items over (`AddItems`, or `Navigate` without items) — never earlier, when
+they could reach an opening editor before its `Prepare` or a closing one on
+its way out — else it opens the editor. A close handoff that fails (a
+window went missing) still ends in the closed state (`morph::close`): the
+editor hidden, not topmost, without a taskbar button, memory low; the box on
+the empty picture (`box:collapse` hide + `box:shown`) when it may show.
+
+The box at rest is shown exactly when it may be (`rules::box_allowed`): the
+user has not hidden it (tray / menu / hotkey / Settings) and no fullscreen
+app runs. Outside a handoff `settle_box` enforces that (on each toggle and
+every 1.5 s from the fullscreen watcher); while the editor is open a wish is
+only recorded, and the close asks the same question — a box that stays hidden
+is not moved. The hotkey / tray click closes an open editor, toggles the
+box, or — while a fullscreen app hides it — opens the editor. The tray's
+Hide / Show label follows the box's actual visibility.
 Invariant: a window hides only when its content is transparent and shows only
 over an identical picture (the editor over the box at open; the box under
 the editor's proxy at close, which goes only once the box has painted it).
@@ -122,12 +156,16 @@ and more); the report is its only answer.
 
 `box:flight` (`BoxFlight{phase, icon, durationMs, message}`) — depart/land/
 return/home legs of the fly-to-icon, `celebrate`, and `error` (shake, with
-message). `box:progress` (batch ring), `box:collapse` (`BoxCollapse{session,
-then, icon}`, see the close handoff; answered with `box_painted(session)`),
-`box:shown` (keeps a picture taken over with `box:collapse`, else resets the
-box), `settings:changed`, and `box:undo` (payload: history entry id) — after
-a successful apply the box shows an **Undo** chip for 6 s; clicking it calls
-`restore({type:'entry', id})`.
+message: shown inside the box, which stays in the error state long enough to
+read it). `box:progress` (batch ring), `box:handoff` (`BoxHandoff{session,
+icon, count}`, see the open handoff) and `box:collapse` (`BoxCollapse{session,
+then, icon}`, see the close handoff), both answered with
+`box_painted(session)`, `box:shown` (keeps a picture taken over with
+`box:collapse`, else resets the box), `settings:changed`, and `box:undo`
+(payload: history entry id) — after a successful apply the box shows an
+**Undo** chip for 6 s; clicking it calls `restore({type:'entry', id})`, then
+celebrates, or shakes saying why the icon is not back (a failed entry, or
+the administrator prompt was cancelled).
 
 ### Editor keyboard and paste
 
@@ -141,7 +179,18 @@ transform or a text edit when the key went down. The App decides in a
 window listener added while the event is on its way
 (`chrome/last-listener.ts`), so it runs after every other listener — the
 workspace's window listeners are added long after the App's. Files dropped
-from Explorer (Tauri drag-drop events) stay the App's (import popover).
+from Explorer (Tauri drag-drop events) stay the App's (import popover). An
+image pasted into an open design (on the canvas or elsewhere) becomes a
+layer at once and says so in a toast with **Undo** (`workspace/pasted.ts`).
+
+The canvas stage owns Enter, Escape, the arrows, Delete and Backspace
+(`workspace/keys.ts` `STAGE_KEYS`): they go to the active tool, and Delete /
+Backspace the tool does not use clear the selected pixels (the whole layer
+without a selection). Palette commands may show such a key (`stageKey`)
+but never bind it. The palette also lists every adjustment, icon helper and
+style preset (`palette/panel-commands.ts`, loaded with the palette); running
+one switches the sidebar tab and asks the panel through
+`panels/requests.svelte.ts`.
 
 ### Editor session (`src/editor/state/session.svelte.ts`)
 
@@ -339,9 +388,11 @@ Windows (`win/`, `#[cfg(windows)]`, type-checked on Linux with
   `first_run()` clears once the welcome sets `onboarded`.
 * `windows/{box_window,editor_window}.rs` build windows `from_config` + WebView2
   tuning (compatibility mode: the box's clip region is rebuilt on
-  `ScaleFactorChanged`); `windows/mailbox.rs` (seq queue + long-poll);
-  `windows/morph.rs` (handoff FSM with acks/timeouts/fallback);
-  `windows/animator.rs` (box motion, drag loop, fling/snap, flights).
+  `ScaleFactorChanged`); `windows/mailbox.rs` (seq queue + long-poll,
+  generations); `windows/morph.rs` (handoff FSM with acks/timeouts/fallback,
+  the box at rest); `windows/rules.rs` (its decisions, unit tested: who hands
+  over, when the box may show, what the hotkey does); `windows/animator.rs`
+  (box motion, drag loop, fling/snap, flights).
 * `commands/*.rs`: `boot, box_cmds, editor_cmds, items, apply, library, system, settings`.
 * Permissions: `build.rs` lists every command in `AppManifest::commands`;
   `capabilities/box.json` and `capabilities/editor.json` grant per window.

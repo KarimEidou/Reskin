@@ -130,8 +130,11 @@
     const onClick = (e: MouseEvent) => {
       if (e.target === node) close();
     };
+    // The close event is queued, not dispatched by close(): it can arrive
+    // after the palette was opened again (a command run with Enter, then
+    // Ctrl+K at once), when it must not close the new one.
     const onClose = () => {
-      if (open) open = false;
+      if (open && !node.open) open = false;
     };
     node.addEventListener('cancel', onCancel);
     node.addEventListener('click', onClick);
@@ -188,6 +191,7 @@
           {#each section.rows as row, r (row.cmd.id)}
             {@const i = offset + r}
             {@const Icon = commandIcon(row.cmd)}
+            {@const shortcut = row.cmd.keys ?? row.cmd.stageKey}
             <div
               id={optionId(i)}
               class="option"
@@ -208,7 +212,7 @@
                 {/each}
               </span>
               {#if !section.heading}<span class="group">{row.cmd.group}</span>{/if}
-              {#if row.cmd.keys}<Kbd keys={comboKeys(row.cmd.keys)} size="sm" />{/if}
+              {#if shortcut}<Kbd keys={comboKeys(shortcut)} size="sm" />{/if}
             </div>
           {/each}
         </div>

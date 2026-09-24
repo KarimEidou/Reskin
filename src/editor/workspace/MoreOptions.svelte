@@ -6,13 +6,13 @@
 <script lang="ts">
   import SlidersHorizontal from '@lucide/svelte/icons/sliders-horizontal';
   import IconButton from '$lib/ui/IconButton.svelte';
+  import NumberField from '$lib/ui/NumberField.svelte';
   import Popover from '$lib/ui/Popover.svelte';
   import SegmentedControl from '$lib/ui/SegmentedControl.svelte';
   import Select from '$lib/ui/Select.svelte';
   import Slider from '$lib/ui/Slider.svelte';
   import Toggle from '$lib/ui/Toggle.svelte';
   import type { Option } from '$lib/ui/types';
-  import NumberEntry from './NumberEntry.svelte';
   import {
     choiceKey,
     choiceValue,
@@ -86,8 +86,9 @@
                 oninput={(v) => setSlider(spec, v)}
               />
             </div>
-            <NumberEntry
+            <NumberField
               label={spec.label}
+              hideLabel
               unit={spec.unit}
               min={toDisplay(spec, spec.min)}
               max={toDisplay(spec, spec.max)}

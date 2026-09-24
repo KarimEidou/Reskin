@@ -4,7 +4,7 @@ import { mkdirSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type { Page } from '@playwright/test';
-import { expect, SAMPLE_PATHS, simulateOpen, test } from './support/fixtures';
+import { expect, SAMPLE_PATHS, simulateOpen, test, waitForCall } from './support/fixtures';
 
 const SHOTS_DIR = join(dirname(fileURLToPath(import.meta.url)), '__screenshots__');
 
@@ -146,6 +146,37 @@ test.describe('command palette', () => {
     await expect(page.getByTestId('canvas')).toBeFocused();
   });
 
+  test('Ctrl+K right after a command ran opens the palette for good, its search focused', async ({ openEditor, page }) => {
+    await openEditor();
+    await openWithDesign(page);
+    await page.keyboard.press('Control+k');
+    await expect(input(page)).toBeFocused();
+    await page.keyboard.type('layer pixels');
+    await expect(palette(page).getByRole('option').first()).toContainText('Select layer pixels');
+    // Enter runs the command and closes the palette; the dialog's close
+    // event is only queued then. Ctrl+K comes before it is dispatched (input
+    // runs first on a busy page): the late event must not close the new one.
+    await page.evaluate(() => {
+      const dialog = document.querySelector<HTMLDialogElement>('[data-testid="command-palette"]')!;
+      const field = dialog.querySelector('input')!;
+      const reopen = new MutationObserver(() => {
+        if (dialog.open) return;
+        reopen.disconnect();
+        document.activeElement!.dispatchEvent(
+          new KeyboardEvent('keydown', { key: 'k', code: 'KeyK', ctrlKey: true, bubbles: true, cancelable: true }),
+        );
+      });
+      reopen.observe(dialog, { attributes: true, attributeFilter: ['open'] });
+      field.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', code: 'Enter', bubbles: true, cancelable: true }));
+    });
+    await expect(palette(page)).toBeVisible();
+    await expect(input(page)).toBeFocused();
+    await page.waitForTimeout(300);
+    await expect(palette(page)).toBeVisible();
+    await expect(input(page)).toBeFocused();
+    await expect(input(page)).toHaveValue('');
+  });
+
   test('only commands that apply right now are listed', async ({ openEditor, page }) => {
     await openEditor();
     await simulateOpen(page, [], 'start');
@@ -153,6 +184,83 @@ test.describe('command palette', () => {
     await expect(palette(page).getByRole('option', { name: /Brush tool/ })).toHaveCount(0);
     await expect(palette(page).getByRole('option', { name: /Open image or shortcut/ })).toHaveCount(1);
     await expect(palette(page).getByRole('option', { name: /Go to Start page/ })).toHaveCount(0);
+  });
+});
+
+test.describe('every adjustment, style and setting', () => {
+  test('a filter found by name opens in the Adjust panel', async ({ openEditor, page }) => {
+    await openEditor();
+    await openWithDesign(page);
+    await page.keyboard.press('Control+k');
+    await expect(input(page)).toBeFocused();
+    await page.keyboard.type('sepia');
+    await expect(palette(page).getByRole('option').first()).toContainText('Sepia…');
+    await page.keyboard.press('Enter');
+    const editor = page.getByTestId('adjust-editor');
+    await expect(editor).toBeVisible();
+    await expect(editor.getByRole('heading', { name: 'Sepia' })).toBeVisible();
+    expect(await sidebarTab(page)).toBe('adjust');
+  });
+
+  test('a style found by name is applied from the Styles panel', async ({ openEditor, page }) => {
+    await openEditor();
+    await openWithDesign(page);
+    await page.keyboard.press('Control+k');
+    await expect(input(page)).toBeFocused();
+    await page.keyboard.type('clay');
+    await expect(palette(page).getByRole('option').first()).toContainText('Clay style');
+    await page.keyboard.press('Enter');
+    expect(await sidebarTab(page)).toBe('styles');
+    // Built in the panels worker behind the thumbnails: give it time.
+    await expect(page.locator('[data-preset="clay"]')).toHaveAttribute('aria-pressed', 'true', { timeout: 15_000 });
+    const labels = await page.evaluate(() =>
+      ((window as unknown as { __reskinSession: { engine: { historyEntries: Array<{ label: string }> } } }).__reskinSession.engine.historyEntries).map(
+        (e) => e.label,
+      ),
+    );
+    expect(labels).toEqual(['Style: Clay']);
+  });
+
+  test('the switches of Settings are commands too', async ({ openEditor, page }) => {
+    await openEditor();
+    await openWithDesign(page);
+    await page.keyboard.press('Control+k');
+    await expect(input(page)).toBeFocused();
+    await page.keyboard.type('low-memory');
+    await expect(palette(page).getByRole('option').first()).toContainText('Turn on low-memory mode');
+    await page.keyboard.press('Enter');
+    await expect.poll(() => page.evaluate(() => window.__e2e!.settings.lowMemory)).toBe(true);
+    await page.keyboard.press('Control+k');
+    await expect(input(page)).toBeFocused();
+    await page.keyboard.type('low-memory');
+    await expect(palette(page).getByRole('option').first()).toContainText('Turn off low-memory mode');
+  });
+
+  test('Open project… reopens a saved .reskin design', async ({ openEditor, page }) => {
+    await openEditor();
+    await openWithDesign(page);
+    // A project with a layer the opened icon does not have.
+    await page.evaluate(async (path) => {
+      type Engine = { addLayer(o: { name: string }): string | null; serialize(): Promise<string>; undo(): boolean };
+      const engine = (window as unknown as { __reskinSession: { engine: Engine } }).__reskinSession.engine;
+      engine.addLayer({ name: 'From the project' });
+      window.__e2e!.setProject(path, await engine.serialize());
+      window.__e2e!.setPickFiles([path]);
+      engine.undo();
+    }, SAMPLE_PATHS.project);
+    const names = () =>
+      page.evaluate(() =>
+        ((window as unknown as { __reskinSession: { engine: { doc: { layers: Array<{ name: string }> } } } }).__reskinSession.engine.doc.layers).map((l) => l.name),
+      );
+    expect(await names()).not.toContain('From the project');
+
+    await page.keyboard.press('Control+k');
+    await expect(input(page)).toBeFocused();
+    await page.keyboard.type('open project');
+    await expect(palette(page).getByRole('option').first()).toContainText('Open project (.reskin)…');
+    await page.keyboard.press('Enter');
+    await waitForCall(page, 'pick_files', { purpose: 'project' });
+    await expect.poll(names).toContain('From the project');
   });
 });
 
@@ -254,11 +362,27 @@ test.describe('shortcuts overlay', () => {
     await expect(overlay.getByRole('region', { name: 'Edit' })).toContainText('Swap primary and secondary colours');
     await expect(overlay).toContainText('Pan the canvas');
     await expect(overlay).toContainText('Remove the last lasso corner');
+    await expect(overlay.getByRole('region', { name: 'Canvas' })).toContainText('Clear the selection (the layer without one)');
     await shot(page, 'editor-shell-shortcuts.png');
     await page.keyboard.press('Escape');
     await expect(overlay).toBeHidden();
     // Escape went to the overlay, not to closing the editor.
     await page.waitForTimeout(100);
     expect(await page.evaluate(() => window.__e2e!.callsOf('editor_close').length)).toBe(0);
+  });
+
+  test('an overlay whose download failed is no page error, and ? tries again', async ({ openEditor, page }) => {
+    // Its stylesheet fails to download once, while it is preloaded after
+    // the open (as seen under heavy load).
+    let fetches = 0;
+    await page.route('**/ShortcutsOverlay-*.css', (route) => (fetches++ === 0 ? route.abort() : route.continue()));
+    const reported = page.waitForEvent('console', (m) => m.type() === 'error' && m.text().includes('shortcuts overlay could not be loaded'));
+    await openEditor();
+    await openWithDesign(page);
+    await reported;
+    // Logged, not thrown (the fixture fails the test on uncaught errors);
+    // asking for it loads it all the same.
+    await page.keyboard.press('?');
+    await expect(page.getByRole('dialog', { name: 'Keyboard shortcuts' })).toBeVisible();
   });
 });

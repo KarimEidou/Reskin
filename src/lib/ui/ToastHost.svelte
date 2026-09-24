@@ -1,10 +1,12 @@
 <!--
   Renders the toast stack (bottom centre). Mount once per page. Hovering or
-  focusing the stack pauses auto-dismissal. The stack is a persistent polite
-  live region (a live region inserted together with its text is often not
-  announced), so every toast is read as it arrives. Each toast carries its
-  own role: info/success toasts are status messages, warnings and errors
-  are alerts.
+  focusing the stack pauses auto-dismissal. Screen readers hear each toast
+  exactly once: the stack is two persistent live regions (a live region
+  inserted together with its text is often not announced, and one inside
+  another is read twice) — warnings and errors in an alert region on top,
+  info/success toasts in the polite "Notifications" status region below.
+  A toast is announced as it is added to its region; the others are not
+  read again (aria-atomic="false").
 -->
 <script lang="ts">
   import { flip } from 'svelte/animate';
@@ -16,7 +18,7 @@
   import X from '@lucide/svelte/icons/x';
   import { dur } from '$lib/motion/speed.svelte';
   import IconButton from './IconButton.svelte';
-  import { dismissToast, pauseToasts, resumeToasts, runToastAction, toasts, type ToastKind } from './toasts.svelte';
+  import { dismissToast, pauseToasts, resumeToasts, runToastAction, toasts, type Toast, type ToastKind } from './toasts.svelte';
   import { ICON_STROKE, type IconComponent } from './types';
 
   interface Props {
@@ -25,6 +27,10 @@
   }
 
   let { inset = '24px' }: Props = $props();
+
+  const urgent = (kind: ToastKind) => kind === 'error' || kind === 'warning';
+  const polite = $derived(toasts().filter((t) => !urgent(t.kind)));
+  const alerts = $derived(toasts().filter((t) => urgent(t.kind)));
 
   const ICONS: Record<ToastKind, IconComponent> = {
     info: Info,
@@ -50,25 +56,42 @@
   }
 </script>
 
-<section class="host" aria-label="Notifications" aria-live="polite" style:bottom={inset} {@attach pauseWhileEngaged}>
-  {#each toasts() as t (t.id)}
-    {@const Icon = ICONS[t.kind]}
-    <div
-      class="toast kind-{t.kind}"
-      role={t.kind === 'error' || t.kind === 'warning' ? 'alert' : 'status'}
-      animate:flip={{ duration: dur(220) }}
-      in:fly={{ y: 14, duration: dur(260), opacity: 0 }}
-      out:fade={{ duration: dur(160, 'fade') }}
-    >
-      <span class="icon" aria-hidden="true"><Icon size={18} strokeWidth={ICON_STROKE} /></span>
-      <p class="message">{t.message}</p>
-      {#if t.action}
-        <button type="button" class="action" onclick={() => runToastAction(t.id)}>{t.action.label}</button>
-      {/if}
-      <IconButton label="Dismiss notification" icon={X} size="sm" tooltip={false} onclick={() => dismissToast(t.id)} />
-    </div>
-  {/each}
-</section>
+{#snippet body(t: Toast)}
+  {@const Icon = ICONS[t.kind]}
+  <span class="icon" aria-hidden="true"><Icon size={18} strokeWidth={ICON_STROKE} /></span>
+  <p class="message">{t.message}</p>
+  {#if t.action}
+    <button type="button" class="action" onclick={() => runToastAction(t.id)}>{t.action.label}</button>
+  {/if}
+  <IconButton label="Dismiss notification" icon={X} size="sm" tooltip={false} onclick={() => dismissToast(t.id)} />
+{/snippet}
+
+<div class="host" style:bottom={inset} {@attach pauseWhileEngaged}>
+  <div class="stack alerts" role="alert" aria-atomic="false">
+    {#each alerts as t (t.id)}
+      <div
+        class="toast kind-{t.kind}"
+        animate:flip={{ duration: dur(220) }}
+        in:fly={{ y: 14, duration: dur(260), opacity: 0 }}
+        out:fade={{ duration: dur(160, 'fade') }}
+      >
+        {@render body(t)}
+      </div>
+    {/each}
+  </div>
+  <section class="stack" aria-label="Notifications" role="status" aria-atomic="false">
+    {#each polite as t (t.id)}
+      <div
+        class="toast kind-{t.kind}"
+        animate:flip={{ duration: dur(220) }}
+        in:fly={{ y: 14, duration: dur(260), opacity: 0 }}
+        out:fade={{ duration: dur(160, 'fade') }}
+      >
+        {@render body(t)}
+      </div>
+    {/each}
+  </section>
+</div>
 
 <style>
   .host {
@@ -78,11 +101,20 @@
     display: flex;
     flex-direction: column;
     align-items: center;
-    gap: var(--space-2);
     width: max-content;
     max-width: calc(100vw - 32px);
     transform: translateX(-50%);
     pointer-events: none;
+  }
+  .stack {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: var(--space-2);
+  }
+  /* The gap between the regions only when both show toasts. */
+  .alerts:has(> .toast) + .stack:has(> .toast) {
+    margin-top: var(--space-2);
   }
   .toast {
     display: flex;

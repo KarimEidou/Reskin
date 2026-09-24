@@ -6,7 +6,9 @@ import ArrowLeftRight from '@lucide/svelte/icons/arrow-left-right';
 import ClipboardCopy from '@lucide/svelte/icons/clipboard-copy';
 import Columns2 from '@lucide/svelte/icons/columns-2';
 import Command from '@lucide/svelte/icons/command';
+import Eraser from '@lucide/svelte/icons/eraser';
 import Expand from '@lucide/svelte/icons/expand';
+import FileArchive from '@lucide/svelte/icons/file-archive';
 import FileDown from '@lucide/svelte/icons/file-down';
 import FilePlus from '@lucide/svelte/icons/file-plus';
 import Frame from '@lucide/svelte/icons/frame';
@@ -24,10 +26,12 @@ import RotateCcw from '@lucide/svelte/icons/rotate-ccw';
 import Save from '@lucide/svelte/icons/save';
 import Scan from '@lucide/svelte/icons/scan';
 import Settings from '@lucide/svelte/icons/settings';
+import SlidersHorizontal from '@lucide/svelte/icons/sliders-horizontal';
 import Shrink from '@lucide/svelte/icons/shrink';
 import SquareDashed from '@lucide/svelte/icons/square-dashed';
 import SquareDashedMousePointer from '@lucide/svelte/icons/square-dashed-mouse-pointer';
 import Undo2 from '@lucide/svelte/icons/undo-2';
+import Sparkles from '@lucide/svelte/icons/sparkles';
 import Wand from '@lucide/svelte/icons/wand-sparkles';
 import X from '@lucide/svelte/icons/x';
 import ZoomIn from '@lucide/svelte/icons/zoom-in';
@@ -59,6 +63,8 @@ const BY_ID: Record<string, IconComponent> = {
   'edit.growSelection': Expand,
   'edit.shrinkSelection': Shrink,
   'edit.borderSelection': Frame,
+  'edit.clear': Eraser,
+  'edit.clearLayer': Eraser,
   'color.swap': ArrowLeftRight,
   'color.reset': RotateCcw,
   'view.fit': Maximize,
@@ -72,6 +78,7 @@ const BY_ID: Record<string, IconComponent> = {
   'app.palette': Command,
   'app.shortcuts': Keyboard,
   'app.openImage': ImagePlus,
+  'app.openProject': FileArchive,
   'app.newBlank': FilePlus,
   'app.restoreAll': RotateCcw,
   'app.refreshIcons': RefreshCw,
@@ -83,6 +90,8 @@ const BY_GROUP: Record<CommandGroup, IconComponent> = {
   'Apply & export': Wand,
   Tools: Paintbrush,
   Edit: Layers,
+  Adjust: SlidersHorizontal,
+  Styles: Sparkles,
   Canvas: Maximize,
   Panels: PanelsTopLeft,
   'Go to': AppWindow,

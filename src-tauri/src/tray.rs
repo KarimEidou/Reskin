@@ -2,8 +2,9 @@
 //! (or opens the editor when the box is hidden by a fullscreen app).
 
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
-use tauri::{AppHandle, Runtime};
+use tauri::{AppHandle, Manager, Runtime};
 
+use crate::windows::{box_window, raw};
 use crate::{actions, menu};
 
 pub const ID: &str = "reskin-tray";
@@ -31,8 +32,11 @@ pub fn create<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<()> {
     Ok(())
 }
 
-/// Refreshes the "Hide box / Show box" label.
-pub fn refresh<R: Runtime>(app: &AppHandle<R>, box_visible: bool) {
+/// Refreshes the "Hide box / Show box" label from the box's visibility.
+pub fn refresh<R: Runtime>(app: &AppHandle<R>) {
+    let box_visible = app
+        .get_webview_window(box_window::LABEL)
+        .is_some_and(|w| raw::is_visible(raw::hwnd_of(&w)));
     if let Some(tray) = app.tray_by_id(ID)
         && let Ok(menu) = menu::build(app, box_visible)
     {

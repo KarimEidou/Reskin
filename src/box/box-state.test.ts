@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import type { CollapseThen } from '$lib/ipc/types';
 import { defaultSettings } from '$lib/settings/defaults';
 import { collapseItems, handoffProps } from '$lib/ui/box-geometry';
-import { boxReducer, initialBoxState, progressFraction, type BoxEvent, type BoxState } from './box-state';
+import { boxReducer, initialBoxState, progressFraction, undoOutcome, type BoxEvent, type BoxState } from './box-state';
 
 const run = (events: BoxEvent[], from: BoxState = initialBoxState) => events.reduce(boxReducer, from);
 
@@ -60,6 +60,28 @@ describe('boxReducer', () => {
     const shown = boxReducer(frozen, { type: 'shown' });
     expect(shown).toMatchObject({ name: 'idle', handoff: false, icon: null, hovering: false });
     expect(boxReducer(shown, { type: 'pointerEnter' }).name).toBe('hover');
+  });
+
+  it('an open from elsewhere (box:handoff) freezes on the picture the proxy draws', () => {
+    // Tray / menu / Explorer: box:handoff arrives as openRequested with the
+    // first item's icon and the count, whatever the box showed before.
+    const hovering = run([{ type: 'pointerEnter' }]);
+    const frozen = boxReducer(hovering, { type: 'openRequested', icon: 'data:sys', count: 3 });
+    expect(frozen).toMatchObject({ name: 'idle', handoff: true, icon: 'data:sys', count: 3 });
+    const proxy = handoffProps(defaultSettings(), [{ icon: 'data:sys' }, { icon: null }, { icon: null }], false);
+    expect({ icon: frozen.icon, count: frozen.count, state: frozen.name }).toEqual({
+      icon: proxy.icon,
+      count: proxy.count,
+      state: proxy.state,
+    });
+    // It interrupts an absorb in progress (that drop never opens).
+    const absorbing = run([{ type: 'drop', count: 1 }]);
+    expect(boxReducer(absorbing, { type: 'openRequested', icon: null, count: 0 })).toMatchObject({
+      name: 'idle',
+      handoff: true,
+      icon: null,
+      count: 0,
+    });
   });
 
   it('reports a failed open as an error', () => {
@@ -167,6 +189,41 @@ describe('boxReducer', () => {
 
     it('a flight without an icon does not bring back an icon that was not handed over', () => {
       expect(boxReducer(handedOver, { type: 'flight', phase: 'depart', icon: null }).icon).toBeNull();
+    });
+  });
+
+  describe('the Undo chip', () => {
+    it('celebrates when the icon is back', () => {
+      expect(undoOutcome({ restored: 1, failed: [], needsElevation: 0 })).toEqual({ type: 'undone' });
+      // Already restored elsewhere: the icon is back all the same.
+      expect(undoOutcome({ restored: 0, failed: [], needsElevation: 0 })).toEqual({ type: 'undone' });
+      const s = run([{ type: 'pointerEnter' }, { type: 'undone' }]);
+      expect(s).toMatchObject({ name: 'celebrate', icon: null, count: 0, handoff: false });
+      expect(s.epoch).toBe(1);
+      expect(boxReducer(s, { type: 'settled', epoch: s.epoch })).toMatchObject({ name: 'hover' });
+    });
+
+    it('shakes with the reason when the icon is not back', () => {
+      expect(undoOutcome({ restored: 0, failed: ['Firefox — access denied'], needsElevation: 0 })).toEqual({
+        type: 'error',
+        message: "Couldn't undo: Firefox — access denied",
+      });
+      // The administrator prompt was cancelled.
+      expect(undoOutcome({ restored: 0, failed: [], needsElevation: 1 })).toEqual({
+        type: 'error',
+        message: 'Undo needs administrator approval',
+      });
+      const s = run([undoOutcome({ restored: 0, failed: [], needsElevation: 1 })]);
+      expect(s).toMatchObject({ name: 'error', message: 'Undo needs administrator approval' });
+    });
+
+    it('never interrupts something in progress to celebrate', () => {
+      const armed = run([{ type: 'dragEnter', count: 1 }]);
+      expect(boxReducer(armed, { type: 'undone' })).toBe(armed);
+      const frozen = run([{ type: 'openRequested', icon: null, count: 0 }]);
+      expect(boxReducer(frozen, { type: 'undone' })).toBe(frozen);
+      const busy = run([{ type: 'progress', done: 1, total: 3 }]);
+      expect(boxReducer(busy, { type: 'undone' })).toBe(busy);
     });
   });
 

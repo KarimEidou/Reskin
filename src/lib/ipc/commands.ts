@@ -45,7 +45,7 @@ export const commands = {
   /** Opens the editor out of the box with the given items / view. */
   openEditor: (items: ItemId[], view: EditorView) =>
     invoke<void>('open_editor', { items, view }),
-  /** The picture taken over with `box:collapse` is on screen (close handoff). */
+  /** The picture of box session `session` (`box:handoff` / `box:collapse`) is on screen. */
   boxPainted: (session: number) => invoke<void>('box_painted', { session }),
 
   // --- morph mailbox (editor) --------------------------------------------

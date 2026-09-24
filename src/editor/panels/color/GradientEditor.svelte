@@ -20,10 +20,9 @@
   import Trash2 from '@lucide/svelte/icons/trash-2';
   import ArrowLeftRight from '@lucide/svelte/icons/arrow-left-right';
   import IconButton from '$lib/ui/IconButton.svelte';
-  import NumField from '../common/NumField.svelte';
+  import NumberField from '$lib/ui/NumberField.svelte';
   import Select from '$lib/ui/Select.svelte';
   import Slider from '$lib/ui/Slider.svelte';
-  import ToolButton from '../common/ToolButton.svelte';
   import ColorField from './ColorField.svelte';
   import { colorAt, cssGradient, reverseStops, sortStops } from './gradient-model';
 
@@ -238,7 +237,7 @@
           onchange={(h) => setColor(h, true)}
         />
       </div>
-      <NumField
+      <NumberField
         label="Stop position"
         hideLabel
         value={Math.round(current.offset * 100)}
@@ -249,10 +248,11 @@
         width="64px"
         onchange={setOffset}
       />
-      <ToolButton
+      <IconButton
         label="Add stop"
         icon={Plus}
         size="sm"
+        focusableWhenDisabled
         disabled={local.length >= maxStops}
         onclick={() => {
           const s = sortStops(local);
@@ -269,7 +269,7 @@
           addAt(best);
         }}
       />
-      <ToolButton label="Remove stop" icon={Trash2} size="sm" disabled={local.length <= minStops} onclick={() => remove(selected)} />
+      <IconButton label="Remove stop" icon={Trash2} size="sm" focusableWhenDisabled disabled={local.length <= minStops} onclick={() => remove(selected)} />
     </div>
   {/if}
 

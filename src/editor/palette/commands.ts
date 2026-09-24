@@ -1,7 +1,9 @@
 // The editor's command registry: everything the command palette lists and
 // every global keyboard shortcut. Commands are plain data + functions over a
 // `CommandContext` (the session plus a few shell actions), so the registry
-// and the key dispatcher are unit tested without a DOM.
+// and the key dispatcher are unit tested without a DOM. The commands of
+// every adjustment and style preset come with the palette
+// (./panel-commands.ts).
 
 import type { EditorView, Settings } from '$lib/ipc/types';
 import type { PixelGrid } from '$engine/doc/types';
@@ -15,6 +17,8 @@ import { isBareKey, isTypingTarget, isWidgetTarget, matchesCombo, parseCombo, ty
 export type CommandGroup =
   | 'Tools'
   | 'Edit'
+  | 'Adjust'
+  | 'Styles'
   | 'Canvas'
   | 'Apply & export'
   | 'Go to'
@@ -27,6 +31,8 @@ export const GROUP_ORDER: readonly CommandGroup[] = [
   'Apply & export',
   'Tools',
   'Edit',
+  'Adjust',
+  'Styles',
   'Canvas',
   'Panels',
   'Go to',
@@ -45,6 +51,8 @@ export interface CommandContext {
   openShortcuts(): void;
   /** File picker → open or add the picked images/shortcuts. */
   openImage(): Promise<void>;
+  /** File picker for a saved `.reskin` project → open it. */
+  openProject(): Promise<void>;
   /** A blank design (asks first when the open one has unsaved edits). */
   newBlank(): Promise<void>;
   /** Asks for confirmation, then restores every icon Reskin changed. */
@@ -61,6 +69,11 @@ export interface Command {
   group: CommandGroup;
   /** Primary shortcut (shown in the palette and tooltips). */
   keys?: string;
+  /**
+   * The canvas stage's key for it: shown in the palette, but the stage
+   * owns the key (workspace/keys.ts STAGE_KEYS), so it is not bound here.
+   */
+  stageKey?: string;
   /** Extra shortcuts that run the same command. */
   altKeys?: readonly string[];
   /** Synonyms the palette search also matches. */
@@ -110,15 +123,93 @@ const VIEWS: ReadonlyArray<readonly [EditorView, string, string | undefined, rea
 
 // ---- predicates ---------------------------------------------------------------
 
-const editing = (c: CommandContext) => c.session.hasDesign;
+/** A design is open. */
+export const editing = (c: CommandContext) => c.session.hasDesign;
 const inEditView = (c: CommandContext) => c.session.hasDesign && c.session.view === 'edit';
 const idle = (c: CommandContext) => c.session.busy === null;
 const canvas = (c: CommandContext) => inEditView(c) && stage.ready;
 const hasSelection = (c: CommandContext) => editing(c) && c.session.engine.doc.selection !== null;
 
-function toEdit(c: CommandContext): void {
+/** The active layer is an image layer that can be changed. */
+export function editableLayer(c: CommandContext): boolean {
+  const layer = c.session.engine.activeLayer;
+  return editing(c) && layer !== null && layer.kind === 'raster' && !layer.locked;
+}
+
+/** Shows the Edit view (where a command's effect is visible). */
+export function toEdit(c: CommandContext): void {
   if (c.session.view !== 'edit') c.session.navigate('edit');
 }
+
+/**
+ * On / off commands of the boolean settings: the setting, the id stem of
+ * its commands (`settings.<stem>On` / `…Off`), their labels and synonyms.
+ */
+const SETTING_TOGGLES: ReadonlyArray<{
+  key: 'sounds' | 'useAccent' | 'compatibilityMode' | 'lowMemory' | 'flourish' | 'updatePins' | 'autostart' | 'contextMenu' | 'autoHideFullscreen';
+  stem: string;
+  on: string;
+  off: string;
+  keywords: readonly string[];
+}> = [
+  { key: 'sounds', stem: 'sounds', on: 'Turn sounds on', off: 'Turn sounds off', keywords: ['audio', 'sfx', 'mute', 'silent'] },
+  {
+    key: 'useAccent',
+    stem: 'accent',
+    on: 'Use the Windows accent colour',
+    off: 'Use the Reskin violet accent',
+    keywords: ['color', 'tint', 'brand'],
+  },
+  {
+    key: 'compatibilityMode',
+    stem: 'compatibility',
+    on: 'Turn on compatibility mode (opaque windows)',
+    off: 'Turn off compatibility mode',
+    keywords: ['transparency', 'opaque', 'graphics', 'glitches'],
+  },
+  {
+    key: 'lowMemory',
+    stem: 'lowMemory',
+    on: 'Turn on low-memory mode',
+    off: 'Turn off low-memory mode (keep the editor warm)',
+    keywords: ['ram', 'performance', 'close editor'],
+  },
+  {
+    key: 'flourish',
+    stem: 'flourish',
+    on: 'Fly the box to the icon after applying',
+    off: 'Apply without the flying box',
+    keywords: ['animation', 'flourish', 'celebrate'],
+  },
+  {
+    key: 'updatePins',
+    stem: 'pins',
+    on: 'Also update Start menu and taskbar pins',
+    off: 'Leave Start menu and taskbar pins alone',
+    keywords: ['taskbar', 'start menu', 'shortcuts'],
+  },
+  {
+    key: 'autostart',
+    stem: 'autostart',
+    on: 'Start Reskin with Windows',
+    off: 'Don’t start Reskin with Windows',
+    keywords: ['startup', 'login', 'boot', 'autostart'],
+  },
+  {
+    key: 'contextMenu',
+    stem: 'explorerMenu',
+    on: 'Add “Reskin this icon” to Explorer',
+    off: 'Remove “Reskin this icon” from Explorer',
+    keywords: ['context menu', 'right-click', 'explorer'],
+  },
+  {
+    key: 'autoHideFullscreen',
+    stem: 'fullscreenHide',
+    on: 'Hide the box while a fullscreen app runs',
+    off: 'Keep the box over fullscreen apps',
+    keywords: ['games', 'presentation', 'auto-hide'],
+  },
+];
 
 /** Synonyms for the tools (their id and label always match). */
 const TOOL_KEYWORDS: Partial<Record<ToolId, readonly string[]>> = {
@@ -420,6 +511,30 @@ export function createCommands(tools: ToolInfo): Command[] {
       run: (c) => c.session.engine.flatten(),
     },
     {
+      id: 'edit.clear',
+      label: 'Clear the selected pixels',
+      group: 'Edit',
+      stageKey: 'Delete',
+      keywords: ['delete', 'erase', 'remove', 'cut out', 'selection'],
+      when: (c) => editableLayer(c) && c.session.engine.doc.selection !== null,
+      run: (c) => {
+        toEdit(c);
+        c.session.engine.clearPixels();
+      },
+    },
+    {
+      id: 'edit.clearLayer',
+      label: 'Clear the layer',
+      group: 'Edit',
+      stageKey: 'Delete',
+      keywords: ['delete', 'erase', 'empty', 'remove pixels'],
+      when: (c) => editableLayer(c) && c.session.engine.doc.selection === null,
+      run: (c) => {
+        toEdit(c);
+        c.session.engine.clearPixels();
+      },
+    },
+    {
       id: 'color.swap',
       label: 'Swap primary and secondary colours',
       group: 'Edit',
@@ -585,22 +700,6 @@ export function createCommands(tools: ToolInfo): Command[] {
       run: (c) => c.updateSettings({ theme: 'system' }),
     },
     {
-      id: 'settings.soundsOn',
-      label: 'Turn sounds on',
-      group: 'Settings',
-      keywords: ['audio', 'sfx'],
-      when: (c) => !c.settings().sounds,
-      run: (c) => c.updateSettings({ sounds: true }),
-    },
-    {
-      id: 'settings.soundsOff',
-      label: 'Turn sounds off',
-      group: 'Settings',
-      keywords: ['audio', 'mute', 'silent'],
-      when: (c) => c.settings().sounds,
-      run: (c) => c.updateSettings({ sounds: false }),
-    },
-    {
       id: 'settings.reduceMotion',
       label: 'Reduce motion',
       group: 'Settings',
@@ -617,22 +716,42 @@ export function createCommands(tools: ToolInfo): Command[] {
       run: (c) => c.updateSettings({ motion: 'system' }),
     },
     {
-      id: 'settings.accentOn',
-      label: 'Use the Windows accent colour',
+      id: 'settings.openMorph',
+      label: 'Open the editor with a morph',
       group: 'Settings',
-      keywords: ['color', 'tint'],
-      when: (c) => !c.settings().useAccent,
-      run: (c) => c.updateSettings({ useAccent: true }),
+      keywords: ['animation', 'open style', 'handoff'],
+      when: (c) => c.settings().openStyle !== 'morph',
+      run: (c) => c.updateSettings({ openStyle: 'morph' }),
     },
     {
-      id: 'settings.accentOff',
-      label: 'Use the Reskin violet accent',
+      id: 'settings.openCrossfade',
+      label: 'Open the editor with a crossfade',
       group: 'Settings',
-      keywords: ['color', 'brand'],
-      when: (c) => c.settings().useAccent,
-      run: (c) => c.updateSettings({ useAccent: false }),
+      keywords: ['animation', 'open style', 'fade'],
+      when: (c) => c.settings().openStyle !== 'crossfade',
+      run: (c) => c.updateSettings({ openStyle: 'crossfade' }),
     },
   );
+  for (const t of SETTING_TOGGLES) {
+    list.push(
+      {
+        id: `settings.${t.stem}On`,
+        label: t.on,
+        group: 'Settings',
+        keywords: t.keywords,
+        when: (c) => !c.settings()[t.key],
+        run: (c) => c.updateSettings({ [t.key]: true }),
+      },
+      {
+        id: `settings.${t.stem}Off`,
+        label: t.off,
+        group: 'Settings',
+        keywords: t.keywords,
+        when: (c) => c.settings()[t.key],
+        run: (c) => c.updateSettings({ [t.key]: false }),
+      },
+    );
+  }
 
   // ---- app ------------------------------------------------------------------------
   list.push(
@@ -662,6 +781,14 @@ export function createCommands(tools: ToolInfo): Command[] {
       keywords: ['import', 'file', 'picture'],
       when: idle,
       run: (c) => c.openImage(),
+    },
+    {
+      id: 'app.openProject',
+      label: 'Open project (.reskin)…',
+      group: 'App',
+      keywords: ['import', 'file', 'saved design', 'load'],
+      when: idle,
+      run: (c) => c.openProject(),
     },
     {
       id: 'app.newBlank',

@@ -4,7 +4,7 @@
 // visual review.
 
 import { canvas, compositeHash, history, layers, openEditor, openTab, shoot, sidebar } from './panels-driver';
-import { expect, test } from './support/fixtures';
+import { expect, openPage, SAMPLE_PATHS, simulateOpen, test } from './support/fixtures';
 
 const tiles = (page: import('@playwright/test').Page) => page.getByTestId('preset-tile');
 
@@ -78,6 +78,45 @@ test('after a tab switch the applied look is still marked and re-styles in place
   await expect.poll(() => compositeHash(page), { timeout: 10_000 }).not.toBe(clay);
   expect((await history(page)).labels).toEqual(['Style: Clay']);
   await expect(page.locator('[data-preset="clay"]')).toHaveAttribute('aria-pressed', 'true');
+});
+
+test('a look that comes back once another item is being opened is dropped', async ({ page }) => {
+  await openPage(page, 'editor');
+  await simulateOpen(page, [SAMPLE_PATHS.steam, SAMPLE_PATHS.notes]);
+  await page.waitForFunction(() => (globalThis as any).__reskinSession?.hasDesign === true);
+  await openTab(page, 'styles');
+  type Held = { __releaseBuild?: () => void; __releaseIcon?: () => void };
+  // Hold the look in the worker, and the next item's icon while it loads:
+  // switching items moves to the new slot first, the document comes later.
+  await page.evaluate(() => {
+    const s = (globalThis as any).__reskinSession;
+    const w = window as Held;
+    const request = s.panels.request.bind(s.panels);
+    s.panels.request = (msg: { op: string }, opts: unknown) => {
+      const job = request(msg, opts);
+      if (msg.op !== 'presetBuild') return job;
+      return new Promise((resolve, reject) => (w.__releaseBuild = () => job.then(resolve, reject)));
+    };
+    const loadIcon = s.loadIcon.bind(s);
+    s.loadIcon = (info: unknown) => new Promise<void>((r) => (w.__releaseIcon = r)).then(() => loadIcon(info));
+  });
+  const neon = page.locator('[data-preset="neon"]');
+  await neon.click();
+  await page.waitForFunction(() => !!(window as Held).__releaseBuild);
+  const before = await compositeHash(page);
+  await page.evaluate(() => void (globalThis as any).__reskinSession.select(1));
+  await page.waitForFunction(() => (globalThis as any).__reskinSession.currentIndex === 1 && !!(window as Held).__releaseIcon);
+  // The look arrives while the first item's design is on its way out.
+  await page.evaluate(() => (window as Held).__releaseBuild!());
+  await expect(neon).toHaveAttribute('aria-busy', 'false', BUILT);
+  expect(await compositeHash(page)).toBe(before);
+  expect((await history(page)).labels).toEqual([]);
+  // The second item opens without it either.
+  await page.evaluate(() => (window as Held).__releaseIcon!());
+  await expect.poll(() => page.evaluate(() => (globalThis as any).__reskinSession.current?.info.name)).toBe('Notes');
+  expect((await history(page)).labels).toEqual([]);
+  expect(await page.evaluate(() => (globalThis as any).__reskinSession.recipe)).toBeNull();
+  await expect(neon).toHaveAttribute('aria-pressed', 'false');
 });
 
 test('the recipe replays on another icon ("Apply style to all")', async ({ page }) => {

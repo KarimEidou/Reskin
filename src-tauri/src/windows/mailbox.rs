@@ -5,6 +5,10 @@
 //! command gets a monotonically increasing sequence number. Commands stay
 //! queued until a later poll proves they were received (`after >= seq`), so
 //! a reloaded page — whose in-flight poll was orphaned — still gets them.
+//!
+//! A destroyed page's poll can outlive it (it waits up to `HEARTBEAT`), so
+//! `reset` starts a new generation: polls started before it no longer count
+//! as a live page and return at once.
 
 use std::collections::VecDeque;
 use std::sync::{Arc, Condvar, Mutex};
@@ -29,8 +33,12 @@ struct Shared {
 struct Inner {
     seq: u32,
     queue: VecDeque<Envelope>,
+    /// When a poll of the current generation last started or finished.
     last_poll: Option<Instant>,
+    /// Polls of the current generation waiting right now.
     waiting: u32,
+    /// Bumped by `reset` (the editor page was destroyed).
+    generation: u64,
 }
 
 impl Mailbox {
@@ -49,15 +57,21 @@ impl Mailbox {
     }
 
     /// Blocks until there are commands with `seq > after` or `timeout`
-    /// elapses (then returns a single heartbeat envelope).
+    /// elapses (then returns a single heartbeat envelope). A poll orphaned
+    /// by `reset` returns nothing at once.
     pub fn next(&self, after: u32, timeout: Duration) -> Vec<Envelope> {
         let deadline = Instant::now() + timeout;
         let mut g = self.0.inner.lock().unwrap_or_else(|e| e.into_inner());
+        let generation = g.generation;
         // Everything up to `after` has been received by the page.
         g.queue.retain(|e| e.seq > after);
         g.last_poll = Some(Instant::now());
         g.waiting += 1;
         let out = loop {
+            if g.generation != generation {
+                // The page was destroyed while this poll waited.
+                return Vec::new();
+            }
             let ready: Vec<Envelope> = g.queue.iter().filter(|e| e.seq > after).cloned().collect();
             if !ready.is_empty() {
                 break ready;
@@ -89,11 +103,17 @@ impl Mailbox {
         g.waiting > 0 || g.last_poll.is_some_and(|t| t.elapsed() <= grace)
     }
 
-    /// Drops queued commands (used when the editor is recreated).
+    /// Forgets the destroyed editor page: drops queued commands and its
+    /// liveness, and sends its waiting polls away empty-handed (used when
+    /// the editor window is destroyed or recreated).
     pub fn reset(&self) {
         let mut g = self.0.inner.lock().unwrap_or_else(|e| e.into_inner());
         g.queue.clear();
         g.last_poll = None;
+        g.waiting = 0;
+        g.generation += 1;
+        drop(g);
+        self.0.cv.notify_all();
     }
 }
 
@@ -129,5 +149,40 @@ mod tests {
         mb.push(EditorCmd::Clear { session: 2 });
         let got = t.join().unwrap();
         assert!(matches!(got[0].cmd, EditorCmd::Clear { session: 2 }));
+    }
+
+    /// Waits until `n` polls are parked in `next`.
+    fn wait_for_polls(mb: &Mailbox, n: u32) {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while mb.0.inner.lock().unwrap().waiting != n {
+            assert!(Instant::now() < deadline, "no poll arrived");
+            std::thread::sleep(Duration::from_millis(2));
+        }
+    }
+
+    #[test]
+    fn reset_forgets_the_destroyed_pages_poll() {
+        let mb = Mailbox::default();
+        let old = mb.clone();
+        let orphan = std::thread::spawn(move || old.next(0, Duration::from_secs(20)));
+        wait_for_polls(&mb, 1);
+        assert!(mb.is_alive(Duration::ZERO));
+
+        // The page is destroyed: its poll stops counting and returns at once.
+        mb.reset();
+        assert!(!mb.is_alive(Duration::from_secs(1)));
+        assert!(orphan.join().unwrap().is_empty());
+        assert!(!mb.is_alive(Duration::from_secs(1)));
+
+        // Only the new page's polls count, and they get what is queued now.
+        let fresh = mb.clone();
+        let poll = std::thread::spawn(move || fresh.next(0, Duration::from_secs(5)));
+        wait_for_polls(&mb, 1);
+        assert!(mb.is_alive(Duration::ZERO));
+        mb.push(EditorCmd::Reveal { session: 7 });
+        let got = poll.join().unwrap();
+        assert!(matches!(got[0].cmd, EditorCmd::Reveal { session: 7 }));
+        assert_eq!(mb.0.inner.lock().unwrap().waiting, 0);
+        assert!(mb.is_alive(Duration::from_secs(1)));
     }
 }

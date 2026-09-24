@@ -3,7 +3,7 @@
   zoom/pan (wheel at cursor, Space / middle-drag), coalesced pointer input
   with capture, the tool overlay, marching ants, keyline guides,
   before/after (hold \ or the split view), the inline text editor, image
-  paste and a drop highlight. Redraws are coalesced to one per animation
+  paste (a new layer, announced with an Undo) and a drop highlight. Redraws are coalesced to one per animation
   frame; the view state and controls are shared through `stage` (the
   command registry's view keys — Ctrl+0 / Ctrl+1 / Ctrl ±, K — use them).
 -->
@@ -40,6 +40,7 @@
     wheelZoom,
   } from './geometry';
   import { FocusOrigin, isInOverlay, isSpaceControl, isTypingTarget, stageKeyAction, type ElementLike } from './keys';
+  import { announcePaste } from './pasted';
 
   const session = getSession();
   const engine = session.engine;
@@ -440,7 +441,8 @@
         engine.updateModifiers(modifiersOf(e));
         return; // never swallow modifier keys
       case 'tool':
-        if (!engine.keyDown(action.key, modifiersOf(e))) return;
+        // Delete / Backspace the tool does not use clear the selected pixels.
+        if (!engine.keyDown(action.key, modifiersOf(e)) && !(action.clear && engine.clearPixels())) return;
         break;
     }
     e.preventDefault();
@@ -588,13 +590,15 @@
     return stem && !/^image$/i.test(stem) ? stem : fallback;
   }
 
-  async function importFile(file: File, fallback: string): Promise<void> {
+  async function importFile(file: File, fallback: string, pasted = false): Promise<void> {
     const doc = engine.doc;
     try {
       const surface = await decodeImage(file);
       // The design changed while decoding (another queue item, closed): drop it.
       if (!session.hasDesign || engine.doc !== doc) return;
-      if (session.importSurface(surface, importName(file, fallback))) stage.focusCanvas();
+      if (!session.importSurface(surface, importName(file, fallback))) return;
+      stage.focusCanvas();
+      if (pasted) announcePaste(engine);
     } catch (error) {
       console.warn('image import failed', error);
       toast({ message: "Couldn't read that image.", kind: 'error' });
@@ -608,7 +612,7 @@
     const file = imageFile(e.clipboardData);
     if (!file) return;
     e.preventDefault();
-    void importFile(file, 'Pasted image');
+    void importFile(file, 'Pasted image', true);
   }
 
   const hasFiles = (e: DragEvent) => !!e.dataTransfer && [...e.dataTransfer.types].includes('Files');

@@ -59,7 +59,9 @@ The visual and interaction contract for the box and the editor. Tokens live in
   with 24 px breathing room; wheel = zoom at cursor, Space-drag / middle-drag
   = pan, Ctrl+0 fit, Ctrl+1 100 %, Ctrl+ +/−. Pixel grid appears ≥ 8×. Windows
   keyline guides toggle (K). Before/after: hold `\` shows the original icon;
-  split view toggle in the bottom bar.
+  split view toggle in the bottom bar. Delete / Backspace clear the selected
+  pixels, or the whole layer without a selection (Backspace first removes
+  the last corner of a lasso polygon being drawn).
 * **Sidebar tabs** (panels are independent components in `src/editor/panels/`):
   Layers, Color, Adjust (filters), Effects (layer effects), Styles (presets),
   Backdrop, Stickers, History. The **Previews** block is always visible at the
@@ -132,10 +134,15 @@ The visual and interaction contract for the box and the editor. Tokens live in
   exists. Only unsaved work is ever offered — a design opened and closed
   without changes, or applied / saved / exported, leaves nothing behind.
 * **Command palette** (Ctrl+K): fuzzy search over every command (tools,
-  filters, presets, views, settings toggles, export/apply), shows shortcuts.
+  filters and icon helpers — opened in the Adjust panel —, style presets —
+  applied from the Styles panel —, views, every settings switch,
+  export/apply, open project), shows shortcuts (also the canvas's own keys,
+  e.g. Delete for "Clear the selected pixels").
 * **Shortcuts overlay** (`?`): grouped keyboard map.
 * **Toasts**: bottom-centre stack; success/info/error; optional action
-  (e.g. Undo); auto-dismiss 4–6 s; `aria-live="polite"`.
+  (e.g. Undo); auto-dismiss 4–6 s. Screen readers hear each toast once:
+  the stack is two persistent live regions, warnings/errors (an alert
+  region, on top) and info/success (a polite status region below).
 
 ## Box
 
@@ -143,5 +150,9 @@ See `BoxVisual.svelte`. The box is 120 px (M) of glass with a 14 px margin
 for glow and scale; it never animates while idle. States: idle, hover (lift),
 armed (swell, bright rim, inward particles, count badge), absorbing
 (squash & stretch as the icon falls in), busy (progress ring), flying
-(tilt/stretch in flight), celebrate (sparkle ripple), error (shake). After an
-apply it shows an **Undo** chip for 6 s (`box:undo`).
+(tilt/stretch in flight), celebrate (sparkle ripple), error (shake; a short
+message inside the box says why, up to three lines, and stays until it has
+been read). After an apply it shows an **Undo** chip for 6 s (`box:undo`):
+the box celebrates when the icon is back, or shakes saying why not. When the
+editor opens from elsewhere (tray, menu, Explorer, first run), the box first
+takes on the picture the editor's proxy draws — never the other way round.

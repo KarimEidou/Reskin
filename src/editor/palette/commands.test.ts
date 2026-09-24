@@ -103,6 +103,7 @@ beforeEach(() => {
     openPalette: vi.fn(() => {}),
     openShortcuts: vi.fn(() => {}),
     openImage: vi.fn(async () => {}),
+    openProject: vi.fn(async () => {}),
     newBlank: vi.fn(async () => {}),
     restoreAll: vi.fn(async () => {}),
     refreshIcons: vi.fn(async () => {}),
@@ -246,6 +247,82 @@ describe('registry', () => {
       expect(refinePrompt.kind).toBe(kind);
     }
     refinePrompt.close();
+  });
+
+  it('clears the selected pixels, or the whole layer without a selection (the stage owns Delete)', () => {
+    const e = session.engine;
+    const layer = e.activeLayer!;
+    const opaque = () => {
+      const l = e.getLayer(layer.id);
+      if (l?.kind !== 'raster') throw new Error('not an image layer');
+      let n = 0;
+      for (let i = 3; i < l.surface.data.length; i += 4) if (l.surface.data[i]! > 0) n++;
+      return n;
+    };
+    e.editLayerPixels(layer.id, 'Paint', (surface) => surface.data.fill(255));
+    const all = opaque();
+    // Delete is shown, not bound: the canvas stage owns the key.
+    expect(byId('edit.clear').stageKey).toBe('Delete');
+    expect(commandKeys(byId('edit.clear'))).toEqual([]);
+    expect(commandKeys(byId('edit.clearLayer'))).toEqual([]);
+
+    let ids = availableCommands(commands, ctx).map((c) => c.id);
+    expect(ids).toContain('edit.clearLayer');
+    expect(ids).not.toContain('edit.clear');
+    e.selectShape('rect', { x: 0, y: 0, w: 10, h: 10 });
+    ids = availableCommands(commands, ctx).map((c) => c.id);
+    expect(ids).toContain('edit.clear');
+    expect(ids).not.toContain('edit.clearLayer');
+    session.view = 'library';
+    byId('edit.clear').run(ctx);
+    expect(session.view).toBe('edit');
+    expect(opaque()).toBe(all - 100);
+    e.deselect();
+    byId('edit.clearLayer').run(ctx);
+    expect(opaque()).toBe(0);
+
+    // Nothing to clear on a locked layer.
+    e.setLayerProps(layer.id, { locked: true });
+    ids = availableCommands(commands, ctx).map((c) => c.id);
+    expect(ids).not.toContain('edit.clear');
+    expect(ids).not.toContain('edit.clearLayer');
+  });
+
+  it('opens a saved project through its own picker', async () => {
+    await byId('app.openProject').run(ctx);
+    expect(ctx.openProject).toHaveBeenCalledTimes(1);
+    session.busy = { label: 'Applying', progress: null };
+    expect(availableCommands(commands, ctx).map((c) => c.id)).not.toContain('app.openProject');
+  });
+
+  it('switches every boolean setting on and off', async () => {
+    const toggles: Array<[string, keyof Settings]> = [
+      ['sounds', 'sounds'],
+      ['accent', 'useAccent'],
+      ['compatibility', 'compatibilityMode'],
+      ['lowMemory', 'lowMemory'],
+      ['flourish', 'flourish'],
+      ['pins', 'updatePins'],
+      ['autostart', 'autostart'],
+      ['explorerMenu', 'contextMenu'],
+      ['fullscreenHide', 'autoHideFullscreen'],
+    ];
+    for (const [stem, key] of toggles) {
+      for (const on of [true, false]) {
+        current = { ...current, [key]: !on };
+        const ids = availableCommands(commands, ctx).map((c) => c.id);
+        const id = `settings.${stem}${on ? 'On' : 'Off'}`;
+        const other = `settings.${stem}${on ? 'Off' : 'On'}`;
+        expect(ids, id).toContain(id);
+        expect(ids, other).not.toContain(other);
+        await byId(id).run(ctx);
+        expect(current[key], id).toBe(on);
+      }
+    }
+    current = { ...current, openStyle: 'morph' };
+    expect(availableCommands(commands, ctx).map((c) => c.id)).not.toContain('settings.openMorph');
+    await byId('settings.openCrossfade').run(ctx);
+    expect(current.openStyle).toBe('crossfade');
   });
 
   it('toggles settings through updateSettings', async () => {

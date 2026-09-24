@@ -41,6 +41,8 @@
   // Without a step grid, show up to 6 decimals.
   const decimals = $derived(step > 0 ? rangeDecimals({ min, step }) : 6);
   const shown = $derived(editing ? draft : formatNumber(value, decimals));
+  /** Read with its unit ("12 px"); without one the plain value says it all. */
+  const valueText = $derived(unit ? `${formatNumber(value, decimals)} ${unit}` : undefined);
 
   /** The typed draft as a number (a decimal comma is accepted); NaN if unusable. */
   function parseDraft(): number {
@@ -118,6 +120,7 @@
       aria-valuenow={value}
       aria-valuemin={Number.isFinite(min) ? min : undefined}
       aria-valuemax={Number.isFinite(max) ? max : undefined}
+      aria-valuetext={valueText}
       value={shown}
       {disabled}
       oninput={(e) => {

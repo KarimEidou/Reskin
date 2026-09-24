@@ -13,7 +13,7 @@
   import { boot } from '$lib/boot';
   import { commands } from '$lib/ipc/commands';
   import { startMailbox } from '$lib/ipc/mailbox';
-  import type { EditorCmd, ItemId, Rect, Settings } from '$lib/ipc/types';
+  import type { EditorCmd, ItemId, ItemInfo, Rect, Settings } from '$lib/ipc/types';
   import { doubleRaf, nextFrame } from '$lib/motion/raf';
   import { motion } from '$lib/motion/speed.svelte';
   import { applySettingsFromMailbox, settings, updateSettings } from '$lib/settings/store.svelte';
@@ -44,6 +44,7 @@
   import { errorText } from './state/session.svelte';
   import { preloadViews } from './views/lazy.svelte';
   import ViewHost from './views/ViewHost.svelte';
+  import { announcePaste } from './workspace/pasted';
   import { stage } from './workspace/stage.svelte';
 
   const session = setSession(createSession());
@@ -65,11 +66,32 @@
   let Palette = $state<Component<{ open?: boolean; commands: typeof registry; ctx: CommandContext }> | null>(null);
   let Shortcuts = $state<Component<{ open?: boolean; commands: typeof registry }> | null>(null);
 
+  let paletteLoad: Promise<void> | null = null;
+
+  /** The palette and the commands of every adjustment and style preset (./palette/panel-commands.ts). */
   function loadPalette(): void {
-    if (!Palette) void import('./palette/CommandPalette.svelte').then((m) => (Palette = m.default));
+    paletteLoad ??= Promise.all([import('./palette/CommandPalette.svelte'), import('./palette/panel-commands')])
+      .then(([palette, panel]) => {
+        registry.push(...panel.panelCommands());
+        Palette = palette.default;
+      })
+      .catch((e: unknown) => {
+        paletteLoad = null;
+        console.error('[editor] the command palette could not be loaded', e);
+      });
   }
+
+  let shortcutsLoad: Promise<void> | null = null;
+
   function loadShortcuts(): void {
-    if (!Shortcuts) void import('./palette/ShortcutsOverlay.svelte').then((m) => (Shortcuts = m.default));
+    shortcutsLoad ??= import('./palette/ShortcutsOverlay.svelte')
+      .then((m) => {
+        Shortcuts = m.default;
+      })
+      .catch((e: unknown) => {
+        shortcutsLoad = null;
+        console.error('[editor] the shortcuts overlay could not be loaded', e);
+      });
   }
   $effect(() => {
     if (shell.paletteOpen) loadPalette();
@@ -96,6 +118,16 @@
       shell.shortcutsOpen = true;
     },
     openImage: () => shell.openImage(),
+    openProject: async () => {
+      let picked: ItemInfo[];
+      try {
+        picked = await commands.pickFiles('project');
+      } catch (e) {
+        toast({ message: `Could not open the file picker: ${errorText(e)}`, kind: 'error' });
+        return;
+      }
+      if (picked.length > 0) await shell.openItems(picked);
+    },
     newBlank: () => shell.newBlank(),
     restoreAll: async () => {
       await shell.restoreAll();
@@ -133,7 +165,9 @@
       recoveryChecked = true;
       recoveryPending = session.recoverable();
     }
-    await frame?.showProxy(cmd.boxRect, handoffProps(cmd.settings, cmd.items, motion.reduced));
+    // A hidden box leaves nothing to morph from: no proxy, the panel fades in.
+    if (cmd.boxRect) await frame?.showProxy(cmd.boxRect, handoffProps(cmd.settings, cmd.items, motion.reduced));
+    else frame?.clear();
   }
 
   async function collapse(cmd: CollapseCmd): Promise<void> {
@@ -300,13 +334,16 @@
     const fresh = design === null;
     if (fresh) session.newBlank();
     const starter = fresh ? session.engine.doc.layers[0] : undefined;
-    session.importSurface(surface);
+    const added = session.importSurface(surface) !== null;
     if (fresh) {
       // Like an opened image: the design is the picture, with nothing to undo.
       if (starter && session.engine.doc.layers.length > 1) session.engine.deleteLayer(starter.id);
       session.engine.clearHistory();
     }
     shell.navigate('edit');
+    // Joining a design went in without asking: say so, with an Undo (the
+    // engine said why when it could not add the layer).
+    if (!fresh && added) announcePaste(session.engine);
   }
 
   // ---- smoke test -----------------------------------------------------------------

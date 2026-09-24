@@ -1,12 +1,14 @@
 //! Hides the box while a fullscreen app, game or presentation runs
-//! (`SHQueryUserNotificationState`), and brings it back afterwards.
+//! (`SHQueryUserNotificationState`), and brings it back afterwards. Each
+//! tick also puts a box at rest back in line with the user's wish
+//! (`morph::settle_box`), should anything have left it otherwise.
 
 use std::time::Duration;
 
-use tauri::{AppHandle, Emitter, Manager, Runtime};
+use tauri::{AppHandle, Manager, Runtime};
 
 use crate::state::AppState;
-use crate::windows::{box_window, morph, raw};
+use crate::windows::morph;
 
 const POLL: Duration = Duration::from_millis(1500);
 
@@ -24,22 +26,10 @@ pub fn start_watcher<R: Runtime>(app: &AppHandle<R>) {
 
 fn tick<R: Runtime>(app: &AppHandle<R>) {
     let state = app.state::<AppState>();
-    let enabled = state.settings().auto_hide_fullscreen;
-    let busy = enabled && reskin_core::win::fullscreen::is_fullscreen_busy();
-    let was = state.hidden_for_fullscreen();
-    if busy == was || state.morph.phase() != morph::Phase::Closed {
-        return;
-    }
+    let busy =
+        state.settings().auto_hide_fullscreen && reskin_core::win::fullscreen::is_fullscreen_busy();
     state.set_hidden_for_fullscreen(busy);
-    let Some(w) = app.get_webview_window(box_window::LABEL) else {
-        return;
-    };
-    let h = raw::hwnd_of(&w);
-    if busy {
-        raw::hide(h);
-    } else if !state.box_hidden_by_user() {
-        raw::show_no_activate(h);
-        raw::set_topmost(h, true);
-        let _ = app.emit_to(box_window::LABEL, "box:shown", ());
-    }
+    // A box at rest follows at once; while the editor is open (or a
+    // handoff runs) the close asks the same flag.
+    morph::settle_box(app);
 }

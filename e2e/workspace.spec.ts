@@ -528,6 +528,52 @@ test.describe('new tools', () => {
     expect(await withSession(page, (s) => s.engine.getToolOptions('lasso').antialias)).toBe(false);
   });
 
+  test('Delete clears the selection, Backspace the layer without one; a lasso corner comes first', async ({ page }) => {
+    await openWorkspace(page);
+    const alpha = (p: Point) =>
+      page.evaluate(({ x, y }) => {
+        const c = (globalThis as unknown as Handle).__reskinSession.engine.composite();
+        return c.data[(y * c.width + x) * 4 + 3];
+      }, p);
+    const labels = () => withSession(page, (s) => s.engine.historyEntries.map((e) => e.label));
+    // The icon's tile is opaque around the middle.
+    expect([await alpha({ x: 250, y: 250 }), await alpha({ x: 150, y: 150 })]).toEqual([255, 255]);
+
+    await page.keyboard.press('m');
+    await stroke(page, { x: 200, y: 200 }, { x: 300, y: 300 });
+    await expect(page.getByTestId('canvas')).toBeFocused();
+    await page.keyboard.press('Delete');
+    expect([await alpha({ x: 250, y: 250 }), await alpha({ x: 150, y: 150 })]).toEqual([0, 255]);
+    expect((await labels()).at(-1)).toBe('Clear');
+
+    // Building a polygon, Backspace takes back its last corner: nothing is cleared.
+    await page.keyboard.press('l');
+    await withSession(page, (s) => s.engine.setToolOptions('lasso', { kind: 'polygon' }));
+    for (const p of [
+      { x: 60, y: 380 },
+      { x: 160, y: 380 },
+      { x: 110, y: 470 },
+    ]) {
+      const c = await toClient(page, p);
+      await page.mouse.click(c.x, c.y);
+    }
+    const corners = () => withSession(page, (s) => s.engine.tools.lasso.polygon?.length ?? 0);
+    expect(await corners()).toBe(6);
+    const before = await labels();
+    await page.keyboard.press('Backspace');
+    expect(await corners()).toBe(4);
+    expect(await labels()).toEqual(before);
+    await page.keyboard.press('Escape');
+    expect(await corners()).toBe(0);
+
+    // Without a selection, the whole layer.
+    await page.keyboard.press('Control+d');
+    await page.keyboard.press('Backspace');
+    expect([await alpha({ x: 150, y: 150 }), await alpha({ x: 400, y: 400 })]).toEqual([0, 0]);
+    await page.keyboard.press('Control+z');
+    expect(await alpha({ x: 150, y: 150 })).toBe(255);
+  });
+
   test('magic wand selects similar colour; its options come from the bar', async ({ page }) => {
     await openWorkspace(page);
     await page.keyboard.press('w');
@@ -910,6 +956,55 @@ test.describe('view', () => {
       return [c.data[i], c.data[i + 1], c.data[i + 2], c.data[i + 3]];
     });
     expect([r, g, b, a]).toEqual([255, 51, 102, 255]);
+  });
+
+  test('a pasted image says so, and Undo takes it back', async ({ page }) => {
+    await openWorkspace(page);
+    const layersBefore = await withSession(page, (s) => s.engine.doc.layers.length);
+    await page.evaluate(async () => {
+      const canvas = new OffscreenCanvas(32, 32);
+      const ctx = canvas.getContext('2d')!;
+      ctx.fillStyle = '#33aaff';
+      ctx.fillRect(0, 0, 32, 32);
+      const blob = await canvas.convertToBlob({ type: 'image/png' });
+      const data = new DataTransfer();
+      data.items.add(new File([blob], 'image.png', { type: 'image/png' }));
+      document.body.dispatchEvent(new ClipboardEvent('paste', { clipboardData: data, bubbles: true, cancelable: true }));
+    });
+    await expect.poll(() => withSession(page, (s) => s.engine.doc.layers.length)).toBe(layersBefore + 1);
+    const toast = page.locator('section[aria-label="Notifications"] > *').filter({ hasText: 'Pasted the image as a new layer.' });
+    await expect(toast).toBeVisible();
+    await toast.getByRole('button', { name: 'Undo' }).click();
+    await expect.poll(() => withSession(page, (s) => s.engine.doc.layers.length)).toBe(layersBefore);
+    await expect(toast).toHaveCount(0);
+  });
+
+  test('every toast is announced once, from the live region of its urgency', async ({ page }) => {
+    await openWorkspace(page);
+    /** The live regions whose text holds `text`, with what they are and whether one sits in another. */
+    const regions = (text: string) =>
+      page.evaluate((t) => {
+        const live = (el: Element) => el.hasAttribute('aria-live') || ['status', 'alert', 'log'].includes(el.getAttribute('role') ?? '');
+        const all = [...document.querySelectorAll('*')].filter(live);
+        const saying = all.filter((el) => el.textContent?.includes(t));
+        return {
+          roles: saying.map((el) => el.getAttribute('role') ?? el.getAttribute('aria-live')),
+          // A live region around or inside another is read twice.
+          nested: saying.filter((el) => all.some((other) => other !== el && (other.contains(el) || el.contains(other)))).length,
+          atomic: saying.map((el) => el.getAttribute('aria-atomic')),
+        };
+      }, text);
+
+    await page.evaluate(() => void (globalThis as unknown as Handle).__reskinSession.saveToLibrary());
+    await expect(page.getByRole('status').filter({ hasText: 'Saved' })).toBeVisible();
+    expect(await regions('Saved')).toEqual({ roles: ['status'], nested: 0, atomic: ['false'] });
+
+    await page.evaluate(() => window.__e2e!.failNext('export_file', 'the disk is full'));
+    await page.evaluate(() => void (globalThis as unknown as Handle).__reskinSession.exportAs('png'));
+    await expect(page.getByRole('alert').filter({ hasText: 'the disk is full' })).toBeVisible();
+    expect(await regions('the disk is full')).toEqual({ roles: ['alert'], nested: 0, atomic: ['false'] });
+    // The earlier toast is not in the alert region (it is not read again).
+    expect(await regions('Saved')).toEqual({ roles: ['status'], nested: 0, atomic: ['false'] });
   });
 
   test('the canvas stage is where the open morph lands the icon', async ({ page }) => {
