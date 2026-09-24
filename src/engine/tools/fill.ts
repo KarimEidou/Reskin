@@ -25,6 +25,7 @@ export class FillTool implements Tool<FillOptions> {
   readonly id = 'fill' as const;
   readonly label = 'Fill';
   readonly shortcut = 'G';
+  readonly icon = 'paint-bucket';
   readonly usesSymmetry = false;
 
   defaultOptions(): FillOptions {

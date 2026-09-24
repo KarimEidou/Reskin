@@ -7,6 +7,7 @@
 
 import type { Rgba } from '../color/color';
 import type { Doc, Layer, RasterLayer, TextLayer } from '../doc/types';
+import type { Rect } from '../util/rect';
 import type { Point } from '../geometry/affine';
 import type { Change, PushOptions } from '../history/history';
 import type { DocCommand } from '../history/commands';
@@ -23,7 +24,10 @@ export type ToolId =
   | 'move'
   | 'selectRect'
   | 'selectEllipse'
+  | 'lasso'
+  | 'magicWand'
   | 'brush'
+  | 'spray'
   | 'pencil'
   | 'eraser'
   | 'fill'
@@ -31,8 +35,18 @@ export type ToolId =
   | 'shape'
   | 'text'
   | 'eyedropper'
+  | 'stamp'
+  | 'smudge'
+  | 'blurSharpen'
+  | 'dodgeBurn'
   | 'hand'
   | 'zoom';
+
+/**
+ * Tools that can share one rail slot with a flyout (docs/UI.md "Tool
+ * rail"): the two marquees, brush + spray, and the retouching tools.
+ */
+export type ToolGroup = 'marquee' | 'brush' | 'retouch';
 
 export interface CursorHint {
   /** CSS `cursor` value for the canvas element. */
@@ -104,6 +118,12 @@ export interface ToolContext {
   requestTextEdit(layerId: string | null): void;
   /** Emits changes (used by tools that edit layers directly). */
   emitChanges(changes: Change[]): void;
+  /**
+   * Bounds of the pixels the move tool would lift from a raster layer
+   * (alpha > 0 and inside the selection), cached until the layer's pixels,
+   * the layer list or the selection change. Null when there are none.
+   */
+  contentBounds(layer: RasterLayer): Rect | null;
 }
 
 export interface Tool<O extends object = object> {
@@ -111,6 +131,10 @@ export interface Tool<O extends object = object> {
   readonly label: string;
   /** Keyboard shortcut shown in tooltips. */
   readonly shortcut: string;
+  /** Lucide icon name hint (kebab-case, e.g. 'lasso'); see TOOL_META. */
+  readonly icon?: string;
+  /** Rail group hint (see ToolGroup). */
+  readonly group?: ToolGroup;
   /** Painting tools replicate strokes through the symmetry settings. */
   readonly usesSymmetry: boolean;
 
@@ -128,8 +152,8 @@ export interface Tool<O extends object = object> {
    * is in progress, and discard the pending state when called without one.
    */
   cancel(ctx: ToolContext): void;
-  /** Finishes state kept across gestures (e.g. a pending transform). */
-  commit?(ctx: ToolContext): void;
+  /** Finishes state kept across gestures (e.g. a pending transform); receives the current options. */
+  commit?(ctx: ToolContext, options?: O): void;
   /** True while there is uncommitted state across gestures. */
   hasPending?(): boolean;
   /** Keyboard input while the tool is active; true when handled. */

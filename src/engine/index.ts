@@ -21,6 +21,7 @@ export * from './raster/blur';
 export * from './raster/distance';
 export * from './raster/unsharp';
 export * from './raster/flood';
+export * from './raster/tone';
 
 export * from './render/blend';
 export * from './render/effects';
@@ -45,6 +46,7 @@ export * from './geometry/shapes';
 
 export * from './selection/mask';
 export * from './selection/outline';
+export * from './selection/refine';
 
 export * from './text/text';
 
@@ -61,6 +63,14 @@ export * from './tools/eyedropper';
 export * from './tools/select';
 export * from './tools/view-tools';
 export * from './tools/transform';
+export * from './tools/dab-tool';
+export * from './tools/lasso';
+export * from './tools/wand';
+export * from './tools/spray';
+export * from './tools/smudge';
+export * from './tools/blur-sharpen';
+export * from './tools/dodge-burn';
+export * from './tools/stamp';
 
 export * from './viewport/viewport';
 

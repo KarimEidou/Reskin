@@ -2,7 +2,7 @@
 // pointer path at a spacing relative to the brush size, with pressure
 // driving size and/or flow, replicated through the symmetry transforms.
 
-import type { CursorHint, Tool, ToolContext, ToolId } from './types';
+import type { CursorHint, Tool, ToolContext, ToolGroup, ToolId } from './types';
 import type { DabShape, StrokeMode } from './paint';
 import { compositeStroke, stampDab } from './paint';
 import type { PointerInput } from '../input/pointer';
@@ -78,6 +78,8 @@ export function brushRadius(o: BrushOptions, pressure: number): number {
 
 export class BrushTool implements Tool<BrushOptions> {
   readonly usesSymmetry = true;
+  readonly icon: string;
+  readonly group?: ToolGroup;
   private stroke: Stroke | null = null;
 
   constructor(
@@ -85,7 +87,10 @@ export class BrushTool implements Tool<BrushOptions> {
     readonly label: string,
     readonly shortcut: string,
     private readonly mode: StrokeMode,
-  ) {}
+  ) {
+    this.icon = mode === 'erase' ? 'eraser' : 'paintbrush';
+    if (mode === 'paint') this.group = 'brush';
+  }
 
   defaultOptions(): BrushOptions {
     return this.mode === 'erase' ? { ...defaultBrushOptions(), hardness: 0.9 } : defaultBrushOptions();

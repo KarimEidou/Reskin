@@ -52,6 +52,7 @@ export class TextTool implements Tool<TextToolOptions> {
   readonly id = 'text' as const;
   readonly label = 'Text';
   readonly shortcut = 'T';
+  readonly icon = 'type';
   readonly usesSymmetry = false;
   private drag: MoveDrag | null = null;
 

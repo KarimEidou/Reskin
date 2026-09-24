@@ -42,6 +42,7 @@ export class EyedropperTool implements Tool<EyedropperOptions> {
   readonly id = 'eyedropper' as const;
   readonly label = 'Eyedropper';
   readonly shortcut = 'I';
+  readonly icon = 'pipette';
   readonly usesSymmetry = false;
   private target: 'primary' | 'secondary' | null = null;
 

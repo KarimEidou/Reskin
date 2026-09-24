@@ -8,6 +8,7 @@ export class HandTool implements Tool<object> {
   readonly id = 'hand' as const;
   readonly label = 'Hand';
   readonly shortcut = 'H';
+  readonly icon = 'hand';
   readonly usesSymmetry = false;
   private last: { x: number; y: number } | null = null;
 
@@ -51,6 +52,7 @@ export class ZoomTool implements Tool<ZoomOptions> {
   readonly id = 'zoom' as const;
   readonly label = 'Zoom';
   readonly shortcut = 'Z';
+  readonly icon = 'zoom-in';
   readonly usesSymmetry = false;
   private start: { x: number; y: number; zoom: number; scrubbed: boolean } | null = null;
 

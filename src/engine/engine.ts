@@ -11,7 +11,7 @@ import type { Rgba } from './color/color';
 import { BLACK, WHITE, clampRgba } from './color/color';
 import type { Doc, Layer, LayerProps, PixelGrid, RasterLayer, TextLayer, TextProps } from './doc/types';
 import type { NewDocumentOptions } from './doc/document';
-import { createDocument, createRasterLayer, createTextLayer, getLayer } from './doc/document';
+import { createDocument, createRasterLayer, createTextLayer, getLayer, layerPixels } from './doc/document';
 import {
   OpError,
   addLayerOp,
@@ -43,9 +43,11 @@ import {
   featherMask,
   invertMask,
   masksEqual,
+  polygonMask,
   rectMask,
   selectAllMask,
 } from './selection/mask';
+import { alphaMask, borderMask, growMask, shrinkMask } from './selection/refine';
 import type { SymmetrySettings } from './symmetry/symmetry';
 import { NO_SYMMETRY, symmetryCenter } from './symmetry/symmetry';
 import type { TextLayout, TextMeasurer, TextRasterizer } from './text/text';
@@ -54,6 +56,7 @@ import type { CursorHint, MessageLevel, Tool, ToolContext, ToolId } from './tool
 import { Scratch } from './tools/types';
 import type { ToolOptionsMap, ToolOptionsState, ToolSet } from './tools/registry';
 import { createTools, defaultToolOptions } from './tools/registry';
+import type { TransformParams } from './tools/transform';
 import type { FitOptions } from './io/import';
 import { importLayer } from './io/import';
 import { deserializeProject, serializeProject } from './io/project';
@@ -127,6 +130,8 @@ export class Engine {
   private readonly events = new Emitter<EngineEvent>();
   private readonly scratch = new Scratch();
   private compositeCache: Surface | null = null;
+  /** Move-tool content bounds per raster layer id (see ToolContext.contentBounds). */
+  private readonly boundsCache = new Map<string, Rect | null>();
   private gesture: { toolId: ToolId; last: PointerInput } | null = null;
   private hoverPoint: Point | null = null;
   private textEdit: TextEditSession | null = null;
@@ -160,6 +165,8 @@ export class Engine {
   private emit(e: EngineEvent): void {
     if (this.disposed) return;
     if (e.kind === 'pixels' || e.kind === 'layers' || e.kind === 'document') this.compositeCache = null;
+    if (e.kind === 'pixels') this.boundsCache.delete(e.layerId);
+    else if (e.kind === 'layers' || e.kind === 'document' || e.kind === 'selection') this.boundsCache.clear();
     this.events.emit(e);
   }
 
@@ -224,6 +231,7 @@ export class Engine {
     this._doc = doc;
     this.history.clear();
     this.compositeCache = null;
+    this.boundsCache.clear();
     this.syncTextCaches(false);
     if (this._viewport) {
       this._viewport.setDocSize(doc.width, doc.height);
@@ -413,6 +421,15 @@ export class Engine {
     return this.tool(this._toolId).hasPending?.() ?? false;
   }
 
+  /**
+   * The move tool's box: the pending transform, else the active layer's
+   * content bounds or text block (what the move tool draws handles around,
+   * whichever tool is selected). Null when there is nothing to move.
+   */
+  get transformBox(): TransformParams | null {
+    return this.tools.move.previewParams(this.ctx);
+  }
+
   /** Commits pending tool work (Enter). */
   commitPending(): void {
     this.settle('commit');
@@ -427,7 +444,7 @@ export class Engine {
     if (this.gesture) this.pointerCancel();
     const t = this.tool(this._toolId);
     if (t.hasPending?.()) {
-      if (mode === 'commit') t.commit?.(this.ctx);
+      if (mode === 'commit') t.commit?.(this.ctx, this.options[this._toolId]);
       else t.cancel(this.ctx);
     }
   }
@@ -520,10 +537,18 @@ export class Engine {
     return handled;
   }
 
-  /** Draws the current tool's overlay and symmetry guides. */
+  /**
+   * Draws the current tool's overlay and symmetry guides. While an override
+   * (Space → hand…) is active, pending work of the selected tool (a
+   * transform box, a lasso polygon) stays visible underneath.
+   */
   drawOverlay(painter: OverlayPainter): void {
     const id = this.gesture?.toolId ?? this.toolId;
     const t = this.tool(id);
+    if (id !== this._toolId) {
+      const selected = this.tool(this._toolId);
+      if (selected.hasPending?.()) selected.drawOverlay?.(painter, this.ctx, this.options[this._toolId], null);
+    }
     if (t.usesSymmetry && this._symmetry.mode !== 'off') this.drawSymmetryGuides(painter);
     t.drawOverlay?.(painter, this.ctx, this.options[id], this.hoverPoint);
   }
@@ -849,6 +874,76 @@ export class Engine {
     this.setSelection(featherMask(this._doc.selection, radius), 'Feather');
   }
 
+  /**
+   * Selects a closed polygon (flat document points [x0, y0, x1, y1, …],
+   * nonzero rule) combined with `op`. Anti-aliased by default; pixel-art
+   * documents always select whole pixels. Returns false for fewer than
+   * three points.
+   */
+  selectPolygon(points: readonly number[], op: SelectionOp = 'replace', antialias = true): boolean {
+    if (points.length < 6 || points.some((v) => !Number.isFinite(v))) return false;
+    const { width: w, height: h } = this._doc;
+    const shape = polygonMask(w, h, [points], antialias && this._doc.pixelArt === null);
+    this.setSelection(combineMasks(this._doc.selection, shape, op), 'Polygon select');
+    return true;
+  }
+
+  /** Expands the selection by `px` document px (one undo step). False when there is nothing to grow. */
+  growSelection(px: number): boolean {
+    return this.refineSelection(px, 'Grow selection', growMask);
+  }
+
+  /** Contracts the selection by `px` document px (one undo step). Canvas edges are not selection edges. */
+  shrinkSelection(px: number): boolean {
+    return this.refineSelection(px, 'Shrink selection', shrinkMask);
+  }
+
+  /** Replaces the selection with a band `px` wide centred on its edge (one undo step). */
+  borderSelection(px: number): boolean {
+    return this.refineSelection(px, 'Border selection', borderMask);
+  }
+
+  private refineSelection(
+    px: number,
+    label: string,
+    refine: (m: SelectionMask, px: number, opts: { binary: boolean }) => SelectionMask | null,
+  ): boolean {
+    if (this.disposed || !this._doc.selection || !Number.isFinite(px) || px <= 0) return false;
+    this.settle('commit');
+    const current = this._doc.selection;
+    if (!current) return false;
+    const next = refine(current, Math.min(px, Math.max(this._doc.width, this._doc.height)), {
+      binary: this._doc.pixelArt !== null,
+    });
+    if (!next) {
+      this.message('Nothing would be left selected', 'warning');
+      return false;
+    }
+    if (masksEqual(current, next)) return false;
+    this.setSelection(next, label);
+    return true;
+  }
+
+  /**
+   * Selects a layer's pixels by their opacity ("select layer pixels"),
+   * combined with `op`. Text layers use their rendered text. False (with a
+   * message) when the layer shows nothing.
+   */
+  selectByAlpha(layerId: string | null = this._doc.activeLayerId, op: SelectionOp = 'replace'): boolean {
+    if (this.disposed || layerId === null) return false;
+    const layer = getLayer(this._doc, layerId);
+    if (!layer) return false;
+    this.settle('commit');
+    const pixels = layerPixels(layer);
+    const shape = pixels ? alphaMask(pixels, { binary: this._doc.pixelArt !== null }) : null;
+    if (!shape) {
+      this.message(`${layer.name} is empty`, 'warning');
+      return false;
+    }
+    this.setSelection(combineMasks(this._doc.selection, shape, op), 'Select layer pixels');
+    return true;
+  }
+
   // -------------------------------------------------------------------------
   // History
   // -------------------------------------------------------------------------
@@ -996,7 +1091,36 @@ export class Engine {
         else this.endTextEdit();
       },
       emitChanges: (changes) => this.emitChanges(changes),
+      contentBounds: (layer) => this.contentBounds(layer),
     };
+  }
+
+  /** Bounds of a raster layer's pixels inside the selection (cached; see ToolContext). */
+  private contentBounds(layer: RasterLayer): Rect | null {
+    const cached = this.boundsCache.get(layer.id);
+    if (cached !== undefined) return cached ? { ...cached } : null;
+    const sel = this._doc.selection;
+    const s = layer.surface;
+    let r: Rect | null;
+    if (!sel || sel.width !== s.width || sel.height !== s.height) {
+      r = s.alphaBounds();
+    } else {
+      const { width: w, height: h, data } = s;
+      const m = sel.data;
+      let minX = w, minY = h, maxX = -1, maxY = -1;
+      for (let y = 0; y < h; y++) {
+        for (let x = 0, i = y * w; x < w; x++, i++) {
+          if (m[i] === 0 || data[i * 4 + 3] === 0) continue;
+          if (x < minX) minX = x;
+          if (x > maxX) maxX = x;
+          if (y < minY) minY = y;
+          maxY = y;
+        }
+      }
+      r = maxX < 0 ? null : { x: minX, y: minY, w: maxX - minX + 1, h: maxY - minY + 1 };
+    }
+    this.boundsCache.set(layer.id, r);
+    return r ? { ...r } : null;
   }
 
   private paintableLayer(): RasterLayer | null {
