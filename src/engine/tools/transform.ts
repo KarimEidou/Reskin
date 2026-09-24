@@ -5,10 +5,10 @@
 // the opposite handle, or from the centre with Alt; Shift keeps the aspect
 // ratio on corners), rotate (outside a corner or the top handle; Shift
 // snaps to 15°) or move (inside; Shift locks an axis). Arrow keys nudge by 1
-// px (10 with Shift). The session commits as ONE history entry on Enter,
-// when another tool/command runs, or before undo; Esc cancels it. Previews
-// and the commit resample bilinearly (nearest in pixel-art documents), and
-// pure translations stay pixel-exact.
+// px (10 with Shift). The session commits as ONE history entry on Enter or
+// when another tool/command runs; Esc and undo cancel it (Esc during a drag
+// reverts just that drag). Previews and the commit resample bilinearly
+// (nearest in pixel-art documents), and pure translations stay pixel-exact.
 
 import type { CursorHint, Tool, ToolContext } from './types';
 import type { Modifiers, PointerInput } from '../input/pointer';
@@ -381,11 +381,24 @@ export class TransformTool implements Tool<TransformOptions> {
     ctx.overlayChanged();
   }
 
+  /**
+   * During a drag (pointercancel, Esc while dragging, a command that has to
+   * settle first) only that drag is reverted, so earlier drags of the session
+   * survive and can still be committed. Without a drag the whole session is
+   * discarded (Esc, undo).
+   */
   cancel(ctx: ToolContext): void {
     const s = this.session;
+    const g = this.gesture;
     this.gesture = null;
     if (!s) return;
+    if (g) {
+      s.params = g.start;
+      this.render(ctx, s);
+      return;
+    }
     this.session = null;
+    this.hoverHandle = null;
     ctx.cancelPixels(s.tx);
     ctx.overlayChanged();
   }

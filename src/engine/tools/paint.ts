@@ -1,12 +1,15 @@
 // Shared painting primitives.
 //
 // Strokes accumulate into a per-pixel "stroke alpha" plane:
-//   a ← a + dab·flow·(1 − a)
+//   a ← min(a + dab·flow·(1 − a), max(a, ceiling))
 // and the layer is then recomputed FROM THE TRANSACTION BASE as
 //   pixel = base  over  colour × (a · opacity · selection)
 // so overlapping dabs build up smoothly with flow but never exceed the
 // stroke opacity (like Photoshop's opacity/flow), and the result is exactly
-// reproducible for the same input.
+// reproducible for the same input. The per-dab `ceiling` (pen pressure →
+// opacity) caps how far a dab can raise the stroke alpha without ever
+// lowering what earlier dabs laid down, so a light touch stays light however
+// many dabs overlap.
 
 import type { Rect } from '../util/rect';
 import { clipRect } from '../util/rect';
@@ -45,7 +48,8 @@ export function dabCoverage(d: number, shape: DabShape): number {
 
 /**
  * Accumulates one dab centred at (x, y) into `alpha` (w×h plane) with
- * strength `flow`. Returns the affected pixel rect (clipped) or null.
+ * strength `flow`, raising no pixel above `ceiling` (0..1). Returns the
+ * affected pixel rect (clipped) or null.
  */
 export function stampDab(
   alpha: Float32Array,
@@ -55,8 +59,9 @@ export function stampDab(
   y: number,
   shape: DabShape,
   flow: number,
+  ceiling = 1,
 ): Rect | null {
-  if (flow <= 0) return null;
+  if (flow <= 0 || ceiling <= 0) return null;
   const reach = Math.max(shape.radius, 0.5) + 1;
   const area = clipRect(
     {
@@ -82,7 +87,9 @@ export function stampDab(
       if (c <= 0) continue;
       const i = py * w + px;
       const a = alpha[i];
-      alpha[i] = a + c * flow * (1 - a);
+      if (a >= ceiling) continue;
+      const next = a + c * flow * (1 - a);
+      alpha[i] = next > ceiling ? ceiling : next;
       touched = true;
     }
   }

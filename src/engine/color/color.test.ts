@@ -114,7 +114,21 @@ describe('parseColor', () => {
   });
 
   it('rejects non-colours', () => {
-    for (const bad of ['', 'nope', '#12', '#12345', 'rgb(1,2)', 'rgb(1 2 3 4 5)', 'hsl(10 20 30 / 1 / 2)', 'rgb(a,b,c)']) {
+    for (const bad of [
+      '',
+      'nope',
+      '#12',
+      '#12345',
+      'rgb(1,2)',
+      'rgb(1 2 3 4 5)',
+      'hsl(10 20 30 / 1 / 2)',
+      'rgb(a,b,c)',
+      // Object.prototype members are not named colours.
+      'constructor',
+      '__proto__',
+      'toString',
+      'valueOf',
+    ]) {
       expect(parseColor(bad), bad).toBeNull();
     }
   });

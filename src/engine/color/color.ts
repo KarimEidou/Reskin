@@ -61,6 +61,12 @@ export function fromRgba8(r: number, g: number, b: number, a8: number): Rgba {
   return { r, g, b, a: a8 / 255 };
 }
 
+/** Clamps channels into range (r/g/b 0..255, a 0..1); non-finite values become 0. */
+export function clampRgba(c: Rgba): Rgba {
+  const ch = (v: number, hi: number) => (Number.isFinite(v) ? clamp(v, 0, hi) : 0);
+  return { r: ch(c.r, 255), g: ch(c.g, 255), b: ch(c.b, 255), a: ch(c.a, 1) };
+}
+
 /** Rounds r/g/b to integers and alpha to the nearest 8-bit step. */
 export function roundRgba(c: Rgba): Rgba {
   const [r, g, b, a] = toRgba8(c);
@@ -328,7 +334,8 @@ export function parseColor(text: string): Rgba | null {
   const s = text.trim().toLowerCase();
   if (s === '') return null;
   if (s === 'transparent') return { r: 0, g: 0, b: 0, a: 0 };
-  const named = NAMED_COLORS[s];
+  // Own keys only: "constructor", "__proto__"… are not colours.
+  const named = Object.hasOwn(NAMED_COLORS, s) ? NAMED_COLORS[s] : undefined;
   if (named !== undefined) {
     return { r: (named >> 16) & 255, g: (named >> 8) & 255, b: named & 255, a: 1 };
   }

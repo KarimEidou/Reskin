@@ -4,7 +4,16 @@
 // with a user-facing message.
 
 import type { Doc, Layer, LayerProps, PixelGrid, RasterLayer, TextLayer, TextProps } from './types';
-import { LAYER_PROP_KEYS, MASTER_SIZE, TEXT_PROP_KEYS, isBlendMode } from './types';
+import {
+  EFFECT_TYPES,
+  LAYER_PROP_KEYS,
+  MASTER_SIZE,
+  MAX_PARAM_PX,
+  PIXEL_GRIDS,
+  TEXT_PROP_KEYS,
+  isBlendMode,
+  isPixelGrid,
+} from './types';
 import {
   cloneLayer,
   createRasterLayer,
@@ -12,8 +21,9 @@ import {
   layerIndex,
   layerNameForText,
   newLayerId,
+  normalizeTextProps,
 } from './document';
-import { scaleEffect } from './effects';
+import { normalizeEffect, normalizeEffects, scaleEffect } from './effects';
 import type { PropPatch } from '../history/commands';
 import {
   DocShapeCommand,
@@ -27,7 +37,7 @@ import { compositeDocument } from '../render/compositor';
 import { floatToSurface, surfaceToFloat } from '../raster/float-image';
 import { downsampleStepwise, padCentered, upscaleInteger } from '../raster/resample';
 import type { Surface } from '../raster/surface';
-import { clamp01 } from '../util/math';
+import { clamp, clamp01, isFiniteNumber } from '../util/math';
 
 export class OpError extends Error {
   constructor(message: string) {
@@ -87,15 +97,29 @@ export function moveLayerOp(doc: Doc, id: string, toIndex: number): StackCommand
   return new StackCommand(`Move ${layer.name}`, captureStack(doc), { layers, activeLayerId: doc.activeLayerId });
 }
 
+/**
+ * Validates and clamps a props patch into the ranges the engine (and the
+ * .reskin loader) support; unusable values are dropped or rejected.
+ */
 function normalizeProps(patch: Partial<LayerProps>): Partial<LayerProps> {
   const out: Partial<LayerProps> = {};
   for (const k of LAYER_PROP_KEYS) {
     if (patch[k] === undefined) continue;
     (out as Record<string, unknown>)[k] = patch[k];
   }
-  if (out.opacity !== undefined) out.opacity = clamp01(out.opacity);
+  if (out.opacity !== undefined) {
+    if (isFiniteNumber(out.opacity)) out.opacity = clamp01(out.opacity);
+    else delete out.opacity;
+  }
   if (out.blend !== undefined && !isBlendMode(out.blend)) throw new OpError(`Unknown blend mode ${out.blend}`);
-  if (out.name !== undefined) out.name = out.name.trim() || 'Layer';
+  if (out.name !== undefined) out.name = String(out.name).trim() || 'Layer';
+  if (out.visible !== undefined) out.visible = Boolean(out.visible);
+  if (out.locked !== undefined) out.locked = Boolean(out.locked);
+  if (out.effects !== undefined) {
+    const bad = out.effects.find((e) => !(EFFECT_TYPES as readonly string[]).includes(e?.type));
+    if (bad) throw new OpError(`Unknown effect ${String(bad?.type)}`);
+    out.effects = normalizeEffects(out.effects);
+  }
   return out;
 }
 
@@ -141,16 +165,14 @@ export function setLayerPropsOp(doc: Doc, id: string, patch: Partial<LayerProps>
 export function setTextPropsOp(doc: Doc, id: string, patch: Partial<TextProps>): PropsCommand | null {
   const layer = requireLayer(doc, id);
   if (layer.kind !== 'text') throw new OpError('Not a text layer');
+  const clean = normalizeTextProps(patch);
   const norm: PropPatch = {};
   const src = layer as unknown as Record<string, unknown>;
   for (const k of TEXT_PROP_KEYS) {
-    const v = patch[k];
+    const v = clean[k];
     if (v === undefined || sameValue(src[k], v)) continue;
-    (norm as Record<string, unknown>)[k] = k === 'color' ? { ...(v as TextProps['color']) } : v;
+    (norm as Record<string, unknown>)[k] = v;
   }
-  if (norm.fontSize !== undefined) norm.fontSize = Math.max(1, norm.fontSize);
-  if (norm.weight !== undefined) norm.weight = Math.min(900, Math.max(100, Math.round(norm.weight)));
-  if (norm.lineHeight !== undefined) norm.lineHeight = Math.max(0.5, norm.lineHeight);
   if (norm.text !== undefined && layer.name === layerNameForText(layer.text)) {
     norm.name = layerNameForText(norm.text);
   }
@@ -255,6 +277,7 @@ function axisMapFor(from: number, to: number): AxisMap {
  * cleared. Null when nothing changes.
  */
 export function resizeDocumentOp(doc: Doc, pixelArt: PixelGrid | null): DocShapeCommand | null {
+  if (pixelArt !== null && !isPixelGrid(pixelArt)) throw new OpError(`Pixel-art grids are ${PIXEL_GRIDS.join(', ')} px`);
   const size = pixelArt ?? MASTER_SIZE;
   if (size === doc.width && (doc.pixelArt?.grid ?? null) === pixelArt) return null;
   const before = captureShape(doc);
@@ -271,10 +294,10 @@ export function resizeDocumentOp(doc: Doc, pixelArt: PixelGrid | null): DocShape
       l.text = {
         x: t.x * map.scale + map.offset,
         y: t.y * map.scale + map.offset,
-        fontSize: Math.max(1, t.fontSize * map.scale),
+        fontSize: clamp(t.fontSize * map.scale, 1, MAX_PARAM_PX),
       };
     }
-    l.effects = l.effects.map((e) => scaleEffect(e, map.scale));
+    l.effects = l.effects.map((e) => normalizeEffect(scaleEffect(e, map.scale)));
   }
   const label = pixelArt === null ? 'Exit pixel-art mode' : `Pixel-art ${pixelArt}×${pixelArt}`;
   return new DocShapeCommand(label, before, after);

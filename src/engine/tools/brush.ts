@@ -32,7 +32,7 @@ export interface BrushOptions {
   opacity: number;
   /** Pen pressure scales the size (down to `minSize`). */
   pressureSize: boolean;
-  /** Pen pressure scales the flow. */
+  /** Pen pressure caps the opacity each dab can build up to (light touch = light paint). */
   pressureOpacity: boolean;
   /** Size at zero pressure, as a fraction of `size` (0..1). */
   minSize: number;
@@ -160,10 +160,11 @@ export class BrushTool implements Tool<BrushOptions> {
     const rects: (Rect | null)[] = s.transforms.map(() => null);
     for (const d of dabs) {
       const shape: DabShape = { radius: brushRadius(o, d.pressure), hardness: o.hardness, aliased: s.aliased };
-      const flow = Math.min(1, Math.max(0, o.flow)) * (o.pressureOpacity ? d.pressure : 1);
+      const flow = Math.min(1, Math.max(0, o.flow));
+      const ceiling = o.pressureOpacity ? d.pressure : 1;
       for (let t = 0; t < s.transforms.length; t++) {
         const q = apply(s.transforms[t], d.x, d.y);
-        rects[t] = unionRect(rects[t], stampDab(s.alpha, w, h, q.x, q.y, shape, flow));
+        rects[t] = unionRect(rects[t], stampDab(s.alpha, w, h, q.x, q.y, shape, flow, ceiling));
       }
     }
     for (const r of rects) {

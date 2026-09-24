@@ -13,12 +13,22 @@ import type {
   TextLayer,
   TextProps,
 } from './types';
-import { MASTER_SIZE, TEXT_PROP_KEYS, isPixelGrid } from './types';
-import { cloneEffects } from './effects';
+import {
+  MASTER_SIZE,
+  MAX_FONT_WEIGHT,
+  MAX_LINE_HEIGHT,
+  MAX_PARAM_PX,
+  MIN_FONT_WEIGHT,
+  MIN_LINE_HEIGHT,
+  isBlendMode,
+  isPixelGrid,
+} from './types';
+import { cloneEffects, normalizeEffects } from './effects';
 import { Surface } from '../raster/surface';
 import { defaultTextProps, pickTextProps } from '../text/text';
 import type { Rgba } from '../color/color';
-import { toRgba8 } from '../color/color';
+import { clampRgba, toRgba8 } from '../color/color';
+import { clamp, clamp01, isFiniteNumber } from '../util/math';
 import { cloneMask } from '../selection/mask';
 
 export interface NewDocumentOptions {
@@ -84,9 +94,9 @@ export function createRasterLayer(doc: Doc, opts: NewRasterLayerOptions = {}): R
     throw new RangeError('Layer surface must match the document size');
   }
   return {
-    ...defaultLayerProps(opts.name ?? nextLayerName(doc)),
-    ...stripUndefined(opts),
-    effects: cloneEffects(opts.effects ?? []),
+    ...defaultLayerProps(nextLayerName(doc)),
+    ...validLayerProps(opts),
+    effects: normalizeEffects(opts.effects ?? []),
     kind: 'raster',
     id: opts.id ?? newLayerId(doc),
     surface,
@@ -99,14 +109,12 @@ export interface NewTextLayerOptions extends Partial<LayerProps>, Partial<TextPr
 
 /** A new text layer (cache empty until a rasterizer renders it). */
 export function createTextLayer(doc: Doc, opts: NewTextLayerOptions = {}): TextLayer {
-  const text = defaultTextProps(doc.width);
-  const target = text as unknown as Record<string, unknown>;
-  for (const k of TEXT_PROP_KEYS) if (opts[k] !== undefined) target[k] = opts[k];
+  const text: TextProps = { ...defaultTextProps(doc.width), ...normalizeTextProps(opts) };
   text.color = { ...text.color };
   return {
-    ...defaultLayerProps(opts.name ?? layerNameForText(text.text)),
-    ...pickLayerProps(opts),
-    effects: cloneEffects(opts.effects ?? []),
+    ...defaultLayerProps(layerNameForText(text.text)),
+    ...validLayerProps(opts),
+    effects: normalizeEffects(opts.effects ?? []),
     ...text,
     kind: 'text',
     id: opts.id ?? newLayerId(doc),
@@ -115,19 +123,35 @@ export function createTextLayer(doc: Doc, opts: NewTextLayerOptions = {}): TextL
   };
 }
 
-function stripUndefined<T extends object>(o: T): Partial<T> {
-  const out: Partial<T> = {};
-  for (const [k, v] of Object.entries(o)) if (v !== undefined) (out as Record<string, unknown>)[k] = v;
+/** The usable common props of `o` (wrong types and non-finite numbers dropped, opacity clamped). */
+function validLayerProps(o: Partial<LayerProps>): Partial<Omit<LayerProps, 'effects'>> {
+  const out: Partial<Omit<LayerProps, 'effects'>> = {};
+  if (typeof o.name === 'string') out.name = o.name;
+  if (typeof o.visible === 'boolean') out.visible = o.visible;
+  if (typeof o.locked === 'boolean') out.locked = o.locked;
+  if (isFiniteNumber(o.opacity)) out.opacity = clamp01(o.opacity);
+  if (isBlendMode(o.blend)) out.blend = o.blend;
   return out;
 }
 
-function pickLayerProps(o: Partial<LayerProps>): Partial<LayerProps> {
-  const out: Partial<LayerProps> = {};
-  if (o.name !== undefined) out.name = o.name;
-  if (o.visible !== undefined) out.visible = o.visible;
-  if (o.locked !== undefined) out.locked = o.locked;
-  if (o.opacity !== undefined) out.opacity = o.opacity;
-  if (o.blend !== undefined) out.blend = o.blend;
+/**
+ * The usable text props of `p`, clamped into the supported ranges (font
+ * size 1..MAX_PARAM_PX, weight 100..900, line height 0.5..10, colour);
+ * wrong types and non-finite numbers are dropped.
+ */
+export function normalizeTextProps(p: Partial<TextProps>): Partial<TextProps> {
+  const out: Partial<TextProps> = {};
+  if (typeof p.text === 'string') out.text = p.text;
+  if (typeof p.fontFamily === 'string') out.fontFamily = p.fontFamily;
+  if (isFiniteNumber(p.fontSize)) out.fontSize = clamp(p.fontSize, 1, MAX_PARAM_PX);
+  if (isFiniteNumber(p.weight)) out.weight = clamp(Math.round(p.weight), MIN_FONT_WEIGHT, MAX_FONT_WEIGHT);
+  if (typeof p.italic === 'boolean') out.italic = p.italic;
+  if (p.align === 'left' || p.align === 'center' || p.align === 'right') out.align = p.align;
+  if (p.color && typeof p.color === 'object') out.color = clampRgba(p.color);
+  if (isFiniteNumber(p.x)) out.x = p.x;
+  if (isFiniteNumber(p.y)) out.y = p.y;
+  if (isFiniteNumber(p.rotation)) out.rotation = p.rotation;
+  if (isFiniteNumber(p.lineHeight)) out.lineHeight = clamp(p.lineHeight, MIN_LINE_HEIGHT, MAX_LINE_HEIGHT);
   return out;
 }
 

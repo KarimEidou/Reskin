@@ -12,6 +12,19 @@ import type { ItemKind } from '$lib/ipc/types';
 
 export const MASTER_SIZE = 512;
 
+// Value ranges shared by the editing API (which clamps into them) and the
+// .reskin loader (which rejects anything outside), so every document the
+// engine produces can be saved and loaded again.
+
+/** Largest pixel-valued layer parameter: effect sizes/distances, font size. */
+export const MAX_PARAM_PX = 4096;
+/** Text line height range, as multiples of the font size. */
+export const MIN_LINE_HEIGHT = 0.5;
+export const MAX_LINE_HEIGHT = 10;
+/** Font weight range (CSS). */
+export const MIN_FONT_WEIGHT = 100;
+export const MAX_FONT_WEIGHT = 900;
+
 export const PIXEL_GRIDS = [16, 24, 32, 48, 64] as const;
 export type PixelGrid = (typeof PIXEL_GRIDS)[number];
 

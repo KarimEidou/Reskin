@@ -13,8 +13,11 @@
 //   ]
 // }
 //
-// Older files go through `migrateProject` first; every field is validated
-// on load (`ProjectError` names the offending path).
+// width = height = 512, or the grid size in pixel-art mode; at most
+// MAX_PROJECT_LAYERS layers. Older files go through `migrateProject` first;
+// every field is validated on load (`ProjectError` names the offending
+// path), and pixel blobs are inflated with a hard output limit, so a
+// malformed or hostile file cannot exhaust memory.
 
 import type {
   BlendMode,
@@ -27,19 +30,30 @@ import type {
   TextLayer,
   TextProps,
 } from '../doc/types';
-import { BLEND_MODES, EFFECT_TYPES, isBlendMode, isPixelGrid } from '../doc/types';
+import {
+  BLEND_MODES,
+  EFFECT_TYPES,
+  MASTER_SIZE,
+  MAX_FONT_WEIGHT,
+  MAX_LINE_HEIGHT,
+  MAX_PARAM_PX,
+  MIN_FONT_WEIGHT,
+  MIN_LINE_HEIGHT,
+  isBlendMode,
+  isPixelGrid,
+} from '../doc/types';
 import { createEffect } from '../doc/effects';
 import { Surface } from '../raster/surface';
 import type { Rgba } from '../color/color';
 import { decodeBase64, encodeBase64 } from '../util/base64';
-import { deflate, inflate } from '../util/compress';
+import { OutputLimitError, deflate, inflate } from '../util/compress';
 import { isFiniteNumber } from '../util/math';
 import { pickTextProps } from '../text/text';
 
 export const PROJECT_FORMAT = 'reskin';
 export const PROJECT_VERSION = 1;
-/** Largest document side a project may declare. */
-export const MAX_PROJECT_SIZE = 4096;
+/** Most layers a project may contain (each raster layer is ~1 MB decoded). */
+export const MAX_PROJECT_LAYERS = 256;
 
 export class ProjectError extends Error {
   constructor(message: string) {
@@ -86,9 +100,9 @@ export interface ProjectJson {
 
 /**
  * Version 0 (pre-release) files, kept as the example migration:
- * `{ format: 'reskin', version: 0, size, name?, createdAt?, layers: [{ name,
- * visible, opacity: 0..100, blend?, pixels }] }` — raster layers only, no
- * ids, locks or effects, integer percentage opacity.
+ * `{ format: 'reskin', version: 0, size (512 or a pixel-art grid), name?,
+ * createdAt?, layers: [{ name, visible, opacity: 0..100, blend?, pixels }] }`
+ * — raster layers only, no ids, locks or effects, percentage opacity.
  */
 interface ProjectV0Json {
   format: 'reskin';
@@ -165,7 +179,7 @@ function effect(v: unknown, path: string): LayerEffect {
     else if (k === 'blend') e[k] = oneOf(o[k], BLEND_MODES, p);
     else if (k === 'position') e[k] = oneOf(o[k], ['outside', 'center', 'inside'], p);
     else if (typeof def === 'number') {
-      e[k] = k === 'angle' ? num(o[k], p) : num(o[k], p, 0, MAX_PROJECT_SIZE);
+      e[k] = k === 'angle' ? num(o[k], p) : num(o[k], p, 0, MAX_PARAM_PX);
     }
   }
   return e as unknown as LayerEffect;
@@ -199,15 +213,15 @@ function layerJson(v: unknown, path: string): LayerJson {
     kind,
     text: str(o.text, `${path}.text`),
     fontFamily: str(o.fontFamily, `${path}.fontFamily`),
-    fontSize: num(o.fontSize, `${path}.fontSize`, 0.1, MAX_PROJECT_SIZE * 4),
-    weight: num(o.weight, `${path}.weight`, 1, 1000),
+    fontSize: num(o.fontSize, `${path}.fontSize`, 1, MAX_PARAM_PX),
+    weight: num(o.weight, `${path}.weight`, MIN_FONT_WEIGHT, MAX_FONT_WEIGHT),
     italic: bool(o.italic, `${path}.italic`),
     align: oneOf(o.align, ['left', 'center', 'right'] as const, `${path}.align`),
     color: color(o.color, `${path}.color`),
     x: num(o.x, `${path}.x`),
     y: num(o.y, `${path}.y`),
     rotation: num(o.rotation, `${path}.rotation`),
-    lineHeight: num(o.lineHeight, `${path}.lineHeight`, 0.1, 10),
+    lineHeight: num(o.lineHeight, `${path}.lineHeight`, MIN_LINE_HEIGHT, MAX_LINE_HEIGHT),
   };
 }
 
@@ -226,8 +240,8 @@ export function validateProject(v: unknown): ProjectJson {
   const o = obj(v, 'project');
   if (o.format !== PROJECT_FORMAT) fail('format', 'not a Reskin project');
   if (o.version !== PROJECT_VERSION) fail('version', `expected ${PROJECT_VERSION}`);
-  const width = num(o.width, 'width', 1, MAX_PROJECT_SIZE);
-  const height = num(o.height, 'height', 1, MAX_PROJECT_SIZE);
+  const width = num(o.width, 'width', 1, MASTER_SIZE);
+  const height = num(o.height, 'height', 1, MASTER_SIZE);
   if (!Number.isInteger(width) || !Number.isInteger(height)) fail('width', 'expected whole pixels');
   if (width !== height) fail('height', 'designs must be square');
   let pixelArt: ProjectJson['pixelArt'] = null;
@@ -236,9 +250,13 @@ export function validateProject(v: unknown): ProjectJson {
     if (!isPixelGrid(grid)) fail('pixelArt.grid', 'expected 16, 24, 32, 48 or 64');
     if (grid !== width) fail('pixelArt.grid', 'must equal the document size');
     pixelArt = { grid };
+  } else if (width !== MASTER_SIZE) {
+    // The document model is the 512 master or a pixel-art grid, nothing else.
+    fail('width', `expected ${MASTER_SIZE} (or the pixel-art grid size)`);
   }
   const meta = obj(o.meta, 'meta');
   if (!Array.isArray(o.layers) || o.layers.length === 0) fail('layers', 'expected at least one layer');
+  if (o.layers.length > MAX_PROJECT_LAYERS) fail('layers', `at most ${MAX_PROJECT_LAYERS} layers are supported`);
   const layers = o.layers.map((l, i) => layerJson(l, `layers[${i}]`));
   const ids = new Set<string>();
   for (const [i, l] of layers.entries()) {
@@ -269,8 +287,10 @@ export function validateProject(v: unknown): ProjectJson {
 
 function migrateV0(o: Obj): Obj {
   const v0 = o as unknown as ProjectV0Json;
-  const size = num(v0.size, 'size', 1, MAX_PROJECT_SIZE);
+  const size = num(v0.size, 'size', 1, MASTER_SIZE);
+  if (size !== MASTER_SIZE && !isPixelGrid(size)) fail('size', `expected ${MASTER_SIZE} or a pixel-art grid size`);
   if (!Array.isArray(v0.layers)) fail('layers', 'expected an array');
+  if (v0.layers.length > MAX_PROJECT_LAYERS) fail('layers', `at most ${MAX_PROJECT_LAYERS} layers are supported`);
   const layers = v0.layers.map((l, i) => {
     const lo = obj(l, `layers[${i}]`);
     return {
@@ -330,17 +350,24 @@ export function migrateProject(input: unknown): ProjectJson {
 // ---------------------------------------------------------------------------
 
 async function encodePixels(s: Surface): Promise<string> {
-  return encodeBase64(await deflate(new Uint8Array(s.data.buffer, s.data.byteOffset, s.data.byteLength)));
+  // Snapshot synchronously: the compressor may read its input later, and an
+  // edit landing meanwhile (autosave runs while the user paints) must not
+  // tear the saved image.
+  return encodeBase64(await deflate(new Uint8Array(s.data)));
 }
 
 async function decodePixels(b64: string, width: number, height: number, path: string): Promise<Surface> {
+  const expected = width * height * 4;
+  // zlib never expands data by more than a few bytes per 16 KB block, so
+  // anything far longer than the raw size (base64: 4/3) is not ours.
+  if (b64.length > 2 * expected + 1024) fail(path, 'pixel data is too long');
   let raw: Uint8Array;
   try {
-    raw = await inflate(decodeBase64(b64));
-  } catch {
-    fail(path, 'corrupt pixel data');
+    raw = await inflate(decodeBase64(b64), expected);
+  } catch (e) {
+    fail(path, e instanceof OutputLimitError ? `more than ${expected} bytes of pixel data` : 'corrupt pixel data');
   }
-  if (raw.length !== width * height * 4) fail(path, `expected ${width * height * 4} bytes, got ${raw.length}`);
+  if (raw.length !== expected) fail(path, `expected ${expected} bytes, got ${raw.length}`);
   return Surface.fromRgba(width, height, raw);
 }
 

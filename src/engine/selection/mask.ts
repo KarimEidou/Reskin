@@ -165,10 +165,11 @@ export function transformMask(m: SelectionMask, forward: Affine): SelectionMask 
   if (!inv) return null;
   const { width: w, height: h, data } = m;
   for (let y = 0; y < h; y++) {
+    // Walk the row incrementally in source space (no per-pixel allocation).
+    const start = apply(inv, 0.5, y + 0.5);
     for (let x = 0; x < w; x++) {
-      const p = apply(inv, x + 0.5, y + 0.5);
-      const fx = p.x - 0.5;
-      const fy = p.y - 0.5;
+      const fx = start.x + inv[0] * x - 0.5;
+      const fy = start.y + inv[1] * x - 0.5;
       const x0 = Math.floor(fx);
       const y0 = Math.floor(fy);
       const tx = fx - x0;

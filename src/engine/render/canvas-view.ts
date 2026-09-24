@@ -273,7 +273,10 @@ export class CanvasView {
 
   private layerKey(layer: Layer): string {
     const e = this.layers.get(layer.id);
-    return `${layer.id}:${e?.version ?? -1}:${layer.opacity}:${layer.blend}:${JSON.stringify(layer.effects)}`;
+    // `styledKey` says which pixels the styled canvas currently shows: a
+    // restyle throttled during a gesture must still refresh cached groups
+    // once it happens.
+    return `${layer.id}:${e?.version ?? -1}:${layer.opacity}:${layer.blend}:${JSON.stringify(layer.effects)}:${e?.styledKey ?? ''}`;
   }
 
   /** Composites the whole document into the frame canvas (document px). */

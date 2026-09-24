@@ -54,6 +54,17 @@ describe('dabs', () => {
     expect(plane[4]).toBeGreaterThan(0.99);
     expect(plane[4]).toBeLessThanOrEqual(1);
   });
+
+  it('a dab ceiling limits build-up but never lowers earlier paint', () => {
+    const shape = { radius: 1, hardness: 1, aliased: false };
+    const plane = new Float32Array(9);
+    for (let i = 0; i < 20; i++) stampDab(plane, 3, 3, 1.5, 1.5, shape, 0.5, 0.4);
+    expect(plane[4]).toBeCloseTo(0.4, 6);
+    stampDab(plane, 3, 3, 1.5, 1.5, shape, 1, 0.9);
+    expect(plane[4]).toBeCloseTo(0.9, 6);
+    expect(stampDab(plane, 3, 3, 1.5, 1.5, shape, 1, 0.2)).toBeNull();
+    expect(plane[4]).toBeCloseTo(0.9, 6);
+  });
 });
 
 describe('brush', () => {
@@ -98,6 +109,20 @@ describe('brush', () => {
     };
     expect(width(0.5)).toBeLessThan(width(1));
     expect(width(1)).toBeGreaterThanOrEqual(39);
+  });
+
+  it('pressure caps the opacity however many dabs overlap (pressureOpacity)', () => {
+    const alphaAt = (pressure: number) => {
+      const e = engine();
+      e.setToolOptions('brush', { size: 20, hardness: 1, smoothing: 0, pressureSize: false, pressureOpacity: true });
+      const pts: [number, number][] = [];
+      for (let x = 100; x <= 200; x += 1) pts.push([x, 100]);
+      stroke(e, pts, { pointerType: 'pen', pressure });
+      return pixel(surfaceOf(e), 150, 100)[3];
+    };
+    expect(alphaAt(0.2)).toBe(51);
+    expect(alphaAt(0.5)).toBe(128);
+    expect(alphaAt(1)).toBe(255);
   });
 
   it('eraser removes alpha and right-click paints the secondary colour', () => {

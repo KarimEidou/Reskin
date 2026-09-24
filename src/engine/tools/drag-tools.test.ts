@@ -177,6 +177,20 @@ describe('marquee selection', () => {
     drag(e, [0, 0], [64, 64]);
     expect(e.doc.selection!.data[32 * 64 + 32]).toBe(255);
     expect(e.doc.selection!.data[0]).toBe(0);
+    // Pixel-art documents select whole pixels only.
+    expect(e.doc.selection!.data.every((v) => v === 0 || v === 255)).toBe(true);
+  });
+
+  it('rectangles snap to whole pixels by default; ellipses are anti-aliased', () => {
+    const e = engine();
+    e.setTool('selectRect');
+    drag(e, [10.3, 10.6], [20.2, 30.4]);
+    const rect = e.doc.selection!;
+    expect(maskBounds(rect)).toEqual({ x: 10, y: 11, w: 10, h: 19 });
+    expect(rect.data.every((v) => v === 0 || v === 255)).toBe(true);
+    e.setTool('selectEllipse');
+    drag(e, [100, 100], [200, 160]);
+    expect(e.doc.selection!.data.some((v) => v > 0 && v < 255)).toBe(true);
   });
 });
 
@@ -290,6 +304,49 @@ describe('move / transform tool', () => {
     expect(surfaceOf(e).alphaBounds()).toEqual({ x: 10, y: 10, w: 8, h: 8 });
   });
 
+  it('a command during a drag reverts only that drag and keeps the earlier ones', () => {
+    const e = withSquare();
+    drag(e, [12, 12], [22, 17]);
+    // Second drag, interrupted by a tool switch (e.g. a shortcut) before release.
+    e.pointerDown(pointer(22, 17));
+    e.pointerMove(pointer(40, 40));
+    e.setTool('brush');
+    expect(e.hasPending).toBe(false);
+    expect(surfaceOf(e).alphaBounds()).toEqual({ x: 20, y: 15, w: 8, h: 8 });
+    expect(e.historyEntries.map((h) => h.label)).toEqual(['Move']);
+  });
+
+  it('Escape during a drag reverts that drag; Escape again cancels the session', () => {
+    const e = withSquare();
+    const before = surfaceOf(e).clone();
+    drag(e, [12, 12], [22, 17]);
+    e.pointerDown(pointer(22, 17));
+    e.pointerMove(pointer(40, 40));
+    expect(e.keyDown('Escape', NO_MODIFIERS)).toBe(true);
+    expect(e.isInteracting).toBe(false);
+    expect(e.hasPending).toBe(true);
+    expect(surfaceOf(e).alphaBounds()).toEqual({ x: 20, y: 15, w: 8, h: 8 });
+    expect(e.keyDown('Escape', NO_MODIFIERS)).toBe(true);
+    expect(e.hasPending).toBe(false);
+    expect(surfaceOf(e).equals(before)).toBe(true);
+    expect(e.history.length).toBe(0);
+  });
+
+  it('undo during a drag cancels the pending transform and undoes nothing else', () => {
+    const e = withSquare();
+    const id = e.doc.activeLayerId!;
+    e.setLayerProps(id, { opacity: 0.5 });
+    const before = surfaceOf(e).clone();
+    drag(e, [12, 12], [22, 17]);
+    e.pointerDown(pointer(22, 17));
+    e.pointerMove(pointer(30, 30));
+    expect(e.undo()).toBe(true);
+    expect(e.hasPending).toBe(false);
+    expect(surfaceOf(e).equals(before)).toBe(true);
+    expect(e.getLayer(id)!.opacity).toBe(0.5);
+    expect(e.historyIndex).toBe(1);
+  });
+
   it('reports an empty layer', () => {
     const e = engine(16);
     e.setTool('move');
@@ -347,6 +404,71 @@ describe('text tool', () => {
     expect(e.history.length).toBe(0);
   });
 
+  it('clicking elsewhere while an empty new text is open leaves no trace of it', () => {
+    const e = new Engine({ doc: createDocument({ pixelArt: 64 }), textRasterizer: blockTextRasterizer() });
+    e.setTool('text');
+    e.pointerDown(pointer(10, 10));
+    e.pointerUp(pointer(10, 10));
+    const first = e.textEditLayerId!;
+    e.pointerDown(pointer(50, 50));
+    e.pointerUp(pointer(50, 50));
+    const second = e.textEditLayerId!;
+    expect(second).not.toBe(first);
+    expect(e.getLayer(first)).toBeNull();
+    expect(e.historyEntries.map((h) => h.label)).toEqual(['Add text']);
+    e.endTextEdit();
+    expect(e.doc.layers).toHaveLength(1);
+    expect(e.history.length).toBe(0);
+  });
+
+  it('undo while a new text is still empty removes it and nothing else', () => {
+    const e = new Engine({ doc: createDocument({ pixelArt: 64 }), textRasterizer: blockTextRasterizer() });
+    e.addLayer();
+    e.setTool('text');
+    e.pointerDown(pointer(30, 30));
+    e.pointerUp(pointer(30, 30));
+    expect(e.doc.layers).toHaveLength(3);
+    expect(e.undo()).toBe(true);
+    expect(e.textEditLayerId).toBeNull();
+    expect(e.doc.layers).toHaveLength(2);
+    expect(e.historyEntries.map((h) => h.label)).toEqual(['New layer']);
+    expect(e.historyIndex).toBe(1);
+  });
+
+  it('undo while an existing text is emptied restores the text instead of deleting the layer', () => {
+    const e = new Engine({ doc: createDocument({ pixelArt: 64 }), textRasterizer: blockTextRasterizer() });
+    const id = e.addTextLayer({ text: 'Yo', x: 32, y: 20, fontSize: 10 })!;
+    e.addLayer();
+    e.beginTextEdit(id);
+    e.updateText(id, { text: '' });
+    expect(e.undo()).toBe(true);
+    expect((e.getLayer(id) as TextLayer).text).toBe('Yo');
+    expect(e.historyEntries.map((h) => h.label)).toEqual(['Add text', 'New layer', 'Edit text']);
+    expect(e.historyIndex).toBe(2);
+    // Ending the edit normally deletes an emptied layer as one step.
+    e.beginTextEdit(id);
+    e.updateText(id, { text: '' });
+    e.endTextEdit();
+    expect(e.getLayer(id)).toBeNull();
+    expect(e.historyEntries.at(-1)!.label).toBe('Delete Text');
+  });
+
+  it('closes the inline editor when its layer goes away', () => {
+    const e = new Engine({ doc: createDocument({ pixelArt: 64 }), textRasterizer: blockTextRasterizer() });
+    const id = e.addTextLayer({ text: 'Yo', x: 32, y: 20, fontSize: 10 })!;
+    e.addLayer();
+    const edits: (string | null)[] = [];
+    e.subscribe((ev) => ev.kind === 'textEdit' && edits.push(ev.layerId));
+    e.beginTextEdit(id);
+    e.rasterizeLayer(id);
+    expect(e.textEditLayerId).toBeNull();
+    e.undo();
+    e.beginTextEdit(id);
+    e.deleteLayer(id);
+    expect(e.textEditLayerId).toBeNull();
+    expect(edits).toEqual([id, null, id, null]);
+  });
+
   it('clicking existing text re-opens it; dragging moves it', () => {
     const e = new Engine({ doc: createDocument({ pixelArt: 64 }), textRasterizer: blockTextRasterizer() });
     const id = e.addTextLayer({ text: 'Yo', x: 32, y: 20, fontSize: 10 })!;
@@ -358,6 +480,16 @@ describe('text tool', () => {
     drag(e, [32, 25], [40, 35]);
     const l = e.getLayer(id) as TextLayer;
     expect([l.x, l.y]).toEqual([40, 30]);
-    expect(e.historyEntries.map((h) => h.label)).toEqual(['Add text', 'Edit text']);
+    expect(e.historyEntries.map((h) => h.label)).toEqual(['Add text', 'Move text']);
+    e.undo();
+    expect([l.x, l.y]).toEqual([32, 20]);
+    // Escape during a drag puts the text back and records nothing.
+    e.pointerDown(pointer(32, 25));
+    e.pointerMove(pointer(50, 45));
+    expect([l.x, l.y]).toEqual([50, 40]);
+    e.keyDown('Escape', NO_MODIFIERS);
+    expect([l.x, l.y]).toEqual([32, 20]);
+    expect(e.historyEntries.map((h) => h.label)).toEqual(['Add text', 'Move text']);
+    expect(e.historyIndex).toBe(1);
   });
 });
