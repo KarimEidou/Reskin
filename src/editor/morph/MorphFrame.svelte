@@ -160,8 +160,13 @@
     const my = ++run;
     stopAll();
     resting = false;
+    // Every layout read comes first, while the page is laid out already:
+    // once the mode changes, a read would force the restyle that change
+    // causes into this task instead of leaving it to the next frame.
     const g = geometry();
     const useMorph = morph && g !== null;
+    const geo = g ?? fallbackGeometry();
+    const regions = useMorph && contentEl ? staggerTargets(contentEl, viewEl()) : [];
     transition = useMorph ? 'morph' : 'crossfade';
     // Icon that settles onto the canvas (only when the box carried one).
     if (useMorph && proxy?.props.icon && contentEl) {
@@ -177,10 +182,10 @@
         shell: shellEl,
         shadow: shadowEl,
         content: contentEl,
-        regions: useMorph ? staggerTargets(contentEl, viewEl()) : [],
+        regions,
         flyer: flyer && flyerEl && from ? { el: flyerEl, from, to: flyer.rect } : null,
       },
-      g ?? fallbackGeometry(),
+      geo,
       useMorph,
     );
     await settled(running);
@@ -189,12 +194,14 @@
     flyer = null;
     transition = null;
     setMode('open');
-    await tick();
-    stopAll();
-    // Keyboard focus lands in the panel (Rust focuses the window next).
+    // Keyboard focus lands in the panel (Rust focuses the window next),
+    // before the open mode reaches the page: focusing brings the style up to
+    // date, which would pull the page's restyle for that change into here.
     if (document.activeElement === document.body || !contentEl?.contains(document.activeElement)) {
       contentEl?.focus({ preventScroll: true });
     }
+    await tick();
+    stopAll();
   }
 
   /**
@@ -207,8 +214,10 @@
     flyer = null;
     proxy = props ? { rect, props } : null;
     const wasOpen = mode === 'open' || mode === 'animating';
+    // Layout reads before the mode changes (see expand).
     const g = geometry();
     const useMorph = morph && wasOpen && g !== null;
+    const geo = g ?? fallbackGeometry();
     transition = useMorph ? 'morph' : 'crossfade';
     setMode('animating');
     await tick();
@@ -216,7 +225,7 @@
     if (wasOpen) {
       running = playCollapse(
         { proxy: proxy ? (proxyEl ?? null) : null, shell: shellEl, shadow: shadowEl, content: contentEl, regions: [] },
-        g ?? fallbackGeometry(),
+        geo,
         useMorph,
       );
       await settled(running);

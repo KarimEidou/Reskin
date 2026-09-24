@@ -7,7 +7,7 @@
 
 use std::collections::{HashMap, HashSet};
 
-use windows::Win32::Foundation::{CloseHandle, HANDLE};
+use windows::Win32::Foundation::{CloseHandle, FILETIME, HANDLE};
 use windows::Win32::System::Diagnostics::ToolHelp::{
     CreateToolhelp32Snapshot, PROCESSENTRY32W, Process32FirstW, Process32NextW, TH32CS_SNAPPROCESS,
 };
@@ -15,7 +15,7 @@ use windows::Win32::System::ProcessStatus::{
     GetProcessMemoryInfo, PROCESS_MEMORY_COUNTERS, PROCESS_MEMORY_COUNTERS_EX,
 };
 use windows::Win32::System::Threading::{
-    GetCurrentProcessId, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION,
+    GetCurrentProcessId, GetProcessTimes, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION,
 };
 
 const MB: u64 = 1024 * 1024;
@@ -128,6 +128,22 @@ fn usage(pid: u32) -> Option<Usage> {
     }
 }
 
+/// When a process was created (FILETIME ticks), if it can be opened.
+fn created(pid: u32) -> Option<u64> {
+    unsafe {
+        let h = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid).ok()?;
+        let mut creation = FILETIME::default();
+        let (mut exit, mut kernel, mut user) = (creation, creation, creation);
+        let ok = GetProcessTimes(h, &mut creation, &mut exit, &mut kernel, &mut user).is_ok();
+        let _ = CloseHandle(h);
+        ok.then(|| ticks(creation))
+    }
+}
+
+fn ticks(t: FILETIME) -> u64 {
+    (u64::from(t.dwHighDateTime) << 32) | u64::from(t.dwLowDateTime)
+}
+
 /// Parent pid of every running process.
 fn process_tree() -> HashMap<u32, u32> {
     let mut parents = HashMap::new();
@@ -149,15 +165,32 @@ fn process_tree() -> HashMap<u32, u32> {
     parents
 }
 
-/// Every process below `root` in `parents` (child pid → parent pid).
-fn descendants(parents: &HashMap<u32, u32>, root: u32) -> HashSet<u32> {
+/// Every process below `root` in `parents` (child pid → parent pid), with
+/// `created` telling when a process started (None: it cannot be opened, so
+/// it is not one of ours and its memory cannot be read either). A process
+/// keeps its parent's pid after the parent exits, and Windows reuses pids:
+/// a process older than the one that holds its parent's pid now is an
+/// orphan of an earlier process (explorer.exe, say), not a child.
+fn descendants(
+    parents: &HashMap<u32, u32>,
+    root: u32,
+    created: impl Fn(u32) -> Option<u64>,
+) -> HashSet<u32> {
     let mut found: HashSet<u32> = HashSet::new();
-    let mut frontier = vec![root];
-    while let Some(p) = frontier.pop() {
+    let mut frontier = vec![(root, created(root))];
+    while let Some((p, p_created)) = frontier.pop() {
         for (&child, &parent) in parents {
-            if parent == p && child != root && child != 0 && found.insert(child) {
-                frontier.push(child);
+            if parent != p || child == root || child == 0 || found.contains(&child) {
+                continue;
             }
+            let Some(c_created) = created(child) else {
+                continue;
+            };
+            if p_created.is_some_and(|t| c_created < t) {
+                continue;
+            }
+            found.insert(child);
+            frontier.push((child, Some(c_created)));
         }
     }
     found
@@ -169,7 +202,7 @@ pub fn measure() -> MemoryReport {
         own: usage(me).unwrap_or_default(),
         ..Default::default()
     };
-    for pid in descendants(&process_tree(), me) {
+    for pid in descendants(&process_tree(), me, created) {
         if let Some(u) = usage(pid) {
             report.children += u;
             report.child_count += 1;
@@ -183,19 +216,52 @@ pub fn measure() -> MemoryReport {
 mod tests {
     use super::*;
 
+    /// Creation times: every process in `order` started after the ones before it.
+    fn started(order: &[u32]) -> impl Fn(u32) -> Option<u64> + '_ {
+        |pid| order.iter().position(|&p| p == pid).map(|i| i as u64)
+    }
+
     #[test]
     fn descendants_cover_the_whole_tree_and_nothing_else() {
         // 10 → 11 → 12, 10 → 13; 20 is unrelated, 14's parent 99 is gone.
         let parents = HashMap::from([(10, 1), (11, 10), (12, 11), (13, 10), (20, 1), (14, 99)]);
-        assert_eq!(descendants(&parents, 10), HashSet::from([11, 12, 13]));
-        assert!(descendants(&parents, 12).is_empty());
+        let order = [1, 20, 99, 14, 10, 11, 13, 12];
+        assert_eq!(
+            descendants(&parents, 10, started(&order)),
+            HashSet::from([11, 12, 13])
+        );
+        assert!(descendants(&parents, 12, started(&order)).is_empty());
     }
 
     #[test]
     fn descendants_survive_a_reused_pid_loop() {
         // A reused pid can make a process look like its own ancestor.
         let parents = HashMap::from([(10, 12), (11, 10), (12, 11)]);
-        assert_eq!(descendants(&parents, 10), HashSet::from([11, 12]));
+        assert_eq!(
+            descendants(&parents, 10, started(&[10, 11, 12])),
+            HashSet::from([11, 12])
+        );
+    }
+
+    #[test]
+    fn orphans_of_an_earlier_holder_of_the_pid_are_not_children() {
+        // 30 (and its child 31) were started by an earlier process 10 that
+        // exited; the pid went to reskin, whose own child is 11.
+        let parents = HashMap::from([(30, 10), (31, 30), (11, 10)]);
+        assert_eq!(
+            descendants(&parents, 10, started(&[30, 31, 10, 11])),
+            HashSet::from([11])
+        );
+    }
+
+    #[test]
+    fn processes_that_cannot_be_opened_are_not_children() {
+        let parents = HashMap::from([(11, 10), (12, 10), (13, 12)]);
+        // 12 cannot be opened: neither it nor what it started is counted.
+        assert_eq!(
+            descendants(&parents, 10, started(&[10, 11, 13])),
+            HashSet::from([11])
+        );
     }
 
     #[test]

@@ -13,10 +13,11 @@
 // numbers are printed and attached to the test. Work that only exists in
 // the test — the fake backend's (tauri-mock.ts stands in for Rust on the
 // page's own thread) and Playwright's injected scripts — is done before
-// measuring wherever it can be.
+// measuring wherever it can be, and the timed handoffs are driven from
+// here, one command at a time, as Rust drives them (see `openHandoff`).
 
 import type { Browser, CDPSession, Page } from '@playwright/test';
-import type { ItemInfo } from '../src/lib/ipc/types';
+import type { EditorView, ItemInfo, Rect } from '../src/lib/ipc/types';
 import {
   BoxDriver,
   calls,
@@ -25,7 +26,7 @@ import {
   openPage,
   pushEditorCmd,
   SAMPLE_PATHS,
-  simulateClose,
+  settings,
   simulateOpen,
   test,
   waitForAck,
@@ -200,12 +201,12 @@ async function cdp(page: Page): Promise<CDPSession> {
 }
 
 /** Runs `work` with the CPU throttled; returns what it returns. */
-async function throttled<T>(session: CDPSession, work: () => Promise<T>): Promise<T> {
-  await session.send('Emulation.setCPUThrottlingRate', { rate: CPU_THROTTLE });
+async function throttled<T>(cpu: CDPSession, work: () => Promise<T>): Promise<T> {
+  await cpu.send('Emulation.setCPUThrottlingRate', { rate: CPU_THROTTLE });
   try {
     return await work();
   } finally {
-    await session.send('Emulation.setCPUThrottlingRate', { rate: 1 });
+    await cpu.send('Emulation.setCPUThrottlingRate', { rate: 1 });
   }
 }
 
@@ -252,11 +253,17 @@ async function freshEditor(page: Page, config: Parameters<typeof openPage>[2] = 
 const designLoaded = (page: Page) =>
   page.waitForFunction(() => (window as unknown as { __reskinSession: { hasDesign: boolean } }).__reskinSession.hasDesign);
 
-/** Opens the editor on a real item, unthrottled, and waits until everything settled. */
-async function openedOnItem(page: Page): Promise<void> {
+/** Opens the editor on a real item, unthrottled, and waits until everything settled; returns the session. */
+async function openedOnItem(page: Page): Promise<number> {
   const items = await makeItems(page, [SAMPLE_PATHS.steam]);
-  await simulateOpen(page, items, 'edit', { morph: true });
+  const { session } = await simulateOpen(page, items, 'edit', { morph: true });
   await designLoaded(page);
+  await afterOpen(page);
+  return session;
+}
+
+/** Waits until the open editor is done with what it does after an open. */
+async function afterOpen(page: Page): Promise<void> {
   // The lazy parts load 300 ms after the open (App.svelte).
   await page.waitForTimeout(500);
   await settle(page);
@@ -264,6 +271,74 @@ async function openedOnItem(page: Page): Promise<void> {
 
 function ackTime(page: Page, stage: string): Promise<number> {
   return page.evaluate((s) => window.__e2e!.acks.findLast((a) => a.stage === s)!.t, stage);
+}
+
+// ---- the handoff, driven the way Rust drives it ----------------------------------
+//
+// Rust (windows/morph.rs) runs the handoff from its own process: each
+// command reaches the page in a task of its own, after the ack before it.
+// The fake backend's simulateOpen / simulateClose run Rust's side on the
+// page's thread, where an ack and the next command share one task (the frame
+// that acks `revealed` would also start the expand), so the timed handoffs
+// push every command from here.
+
+/** Where the box is (the default box size, as the fake backend puts it). */
+const BOX_RECT: Rect = { x: 32, y: 32, w: 148, h: 148 };
+/** Rust crossfades when the proxy is not drawn within this long (morph.rs). */
+const PREPARE_TIMEOUT_MS = 400;
+
+/** Rust's open handoff with the morph; returns its session. */
+async function openHandoff(page: Page, items: ItemInfo[], view: EditorView): Promise<number> {
+  const session = await page.evaluate(() => Math.max(window.__e2e!.editor.session, ...window.__e2e!.acks.map((a) => a.session)) + 1);
+  await pushEditorCmd(page, {
+    type: 'prepare',
+    session,
+    boxRect: BOX_RECT,
+    items,
+    view,
+    settings: await settings(page),
+    morph: true,
+  });
+  expect(await waitForAck(page, session, 'prepared', PREPARE_TIMEOUT_MS), 'the proxy is drawn in time').toBe(true);
+  await pushEditorCmd(page, { type: 'reveal', session });
+  expect(await waitForAck(page, session, 'revealed'), 'revealed').toBe(true);
+  await pushEditorCmd(page, { type: 'expand', session, morph: true });
+  expect(await waitForAck(page, session, 'expanded'), 'expanded').toBe(true);
+  return session;
+}
+
+/** Rust's close handoff with the morph, the box coming back empty. */
+async function closeHandoff(page: Page, session: number): Promise<void> {
+  await pushEditorCmd(page, { type: 'collapse', session, boxRect: BOX_RECT, then: 'hide', icon: null, morph: true });
+  expect(await waitForAck(page, session, 'collapsed'), 'collapsed').toBe(true);
+  await pushEditorCmd(page, { type: 'clear', session });
+  expect(await waitForAck(page, session, 'cleared'), 'cleared').toBe(true);
+}
+
+/** Opens `items` in `view` (none: the Start view) with the morph, throttled, and measures it. */
+async function measureOpen(page: Page, cpu: CDPSession, items: ItemInfo[], view: EditorView): Promise<Measurement> {
+  const from = await throttled(cpu, async () => {
+    const from = await startSampling(page);
+    await openHandoff(page, items, view);
+    await stopSampling(page);
+    return from;
+  });
+  const revealed = await ackTime(page, 'revealed');
+  const expanded = await ackTime(page, 'expanded');
+  return measure(page, { from, to: expanded }, { from: revealed, to: expanded });
+}
+
+/** Closes the editor open in `session` with the morph, throttled, and measures it. */
+async function measureClose(page: Page, cpu: CDPSession, session: number): Promise<Measurement> {
+  const from = await throttled(cpu, async () => {
+    const from = await startSampling(page);
+    await closeHandoff(page, session);
+    await stopSampling(page);
+    return from;
+  });
+  const collapsed = await ackTime(page, 'collapsed');
+  const cleared = await ackTime(page, 'cleared');
+  return measure(page, { from, to: cleared }, { from, to: collapsed });
 }
 
 const startSampling = (page: Page) => page.evaluate(() => window.__perf!.startSampling());
@@ -281,52 +356,56 @@ test.describe('under 4× CPU throttling', () => {
     // resample on the page's thread) and mounting the Edit workspace
     // (rail, options bar, canvas, sidebar panels and previews, forced
     // layouts) run as one 400–1000 ms task (at 4×) in the middle of the morph.
-    // docs/ARCHITECTURE.md, "Performance".
+    // docs/ARCHITECTURE.md, "Performance". (The morph itself is held to the
+    // budget by the Start-view handoffs below.)
     test.fail(true, 'the item load and the Edit workspace mount block the open handoff');
-    const session = await cdp(page);
+    const cpu = await cdp(page);
     await bestOf('open morph', async () => {
       await freshEditor(page);
       // A real item: its icon rides the morph onto the canvas.
-      const items: ItemInfo[] = await makeItems(page, [SAMPLE_PATHS.steam]);
-      const { from, open } = await throttled(session, async () => {
-        const from = await startSampling(page);
-        const open = await simulateOpen(page, items, 'edit', { morph: true });
-        await stopSampling(page);
-        return { from, open };
-      });
-      expect(open).toMatchObject({ morph: true, preparedInTime: true, timedOut: [] });
-      const revealed = await ackTime(page, 'revealed');
-      const expanded = await ackTime(page, 'expanded');
-      return measure(page, { from, to: expanded }, { from: revealed, to: expanded });
+      const items = await makeItems(page, [SAMPLE_PATHS.steam]);
+      return measureOpen(page, cpu, items, 'edit');
     });
   });
 
   test('the collapse morphs without long tasks at 55+ fps', async ({ page }) => {
     // Known failure, fixed outside the morph: every `data-stage` change on
     // <html> restyles the whole document (App.svelte's rule for portalled
-    // overlays, `body > :not(#app)`, cannot be keyed), 50–85 ms at 4× as the
-    // collapse starts. With that rule keyed on the overlays the collapse
-    // stays within budget. docs/ARCHITECTURE.md, "Performance".
+    // overlays, `body > :not(#app)`, cannot be keyed), 50–85 ms at 4× for
+    // the Edit view's ~730 elements as the collapse starts. With that rule
+    // keyed on the overlays the collapse stays within budget.
+    // docs/ARCHITECTURE.md, "Performance".
     test.fixme(true, 'App.svelte restyles the whole document as the collapse starts');
-    const session = await cdp(page);
+    const cpu = await cdp(page);
     await bestOf('collapse morph', async () => {
       await freshEditor(page);
-      await openedOnItem(page);
-      const { from, close } = await throttled(session, async () => {
-        const from = await startSampling(page);
-        const close = await simulateClose(page, 'hide', { morph: true });
-        await stopSampling(page);
-        return { from, close };
-      });
-      expect(close.timedOut).toEqual([]);
-      const collapsed = await ackTime(page, 'collapsed');
-      const cleared = await ackTime(page, 'cleared');
-      return measure(page, { from, to: cleared }, { from, to: collapsed });
+      return measureClose(page, cpu, await openedOnItem(page));
+    });
+  });
+
+  // The morph on its own, without an item to load: the Start view is
+  // small enough that the page's whole-document restyles (see above) stay
+  // well within budget, so these hold the morph itself to it.
+  test('the open handoff to the Start view morphs without long tasks at 55+ fps', async ({ page }) => {
+    const cpu = await cdp(page);
+    await bestOf('open morph (Start view)', async () => {
+      await freshEditor(page);
+      return measureOpen(page, cpu, [], 'start');
+    });
+  });
+
+  test('the collapse from the Start view morphs without long tasks at 55+ fps', async ({ page }) => {
+    const cpu = await cdp(page);
+    await bestOf('collapse morph (Start view)', async () => {
+      await freshEditor(page);
+      const session = await openHandoff(page, [], 'start');
+      await afterOpen(page);
+      return measureClose(page, cpu, session);
     });
   });
 
   test('the box hovers, arms and absorbs without long tasks at 55+ fps', async ({ page }) => {
-    const session = await cdp(page);
+    const cpu = await cdp(page);
     const paths = [SAMPLE_PATHS.steam];
     await bestOf('box hover → armed → absorb', async () => {
       const box = await BoxDriver.open(page);
@@ -334,7 +413,7 @@ test.describe('under 4× CPU throttling', () => {
       await makeItems(page, paths);
       await box.expectStatic();
       await settle(page);
-      const span = await throttled(session, async () => {
+      const span = await throttled(cpu, async () => {
         const from = await startSampling(page);
         await box.hit.hover();
         await box.expectState('hover');
@@ -359,10 +438,10 @@ test.describe('idle', () => {
 
   /** Watches the page for IDLE_MS: frame callbacks, running animations and rendering work. */
   async function watchIdle(page: Page) {
-    const session = await cdp(page);
-    await session.send('Performance.enable');
+    const devtools = await cdp(page);
+    await devtools.send('Performance.enable');
     const metrics = async () => {
-      const { metrics: list } = await session.send('Performance.getMetrics');
+      const { metrics: list } = await devtools.send('Performance.getMetrics');
       return (name: string) => list.find((m) => m.name === name)?.value ?? 0;
     };
     // Only one metric read falls between `before` and `after`, and its own
@@ -389,7 +468,7 @@ test.describe('idle', () => {
       }),
       frames,
     );
-    await session.send('Performance.disable');
+    await devtools.send('Performance.disable');
     const idle = {
       ...seen,
       styleRecalcs: after('RecalcStyleCount') - before('RecalcStyleCount'),
