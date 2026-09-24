@@ -227,12 +227,35 @@ fn create_new_file(dir: &Path, dest: &Path, bytes: &[u8]) -> Result<bool> {
     placed
 }
 
+/// Sets a file's modification time to now, best effort.
+///
+/// On Windows the handle asks only for `FILE_WRITE_ATTRIBUTES`: that is
+/// enough to set the time and, unlike write access, is not refused while
+/// Explorer holds the icon open without write sharing.
+fn touch(path: &Path) {
+    let mut options = OpenOptions::new();
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt as _;
+        const FILE_WRITE_ATTRIBUTES: u32 = 0x0100;
+        options.access_mode(FILE_WRITE_ATTRIBUTES);
+    }
+    #[cfg(not(windows))]
+    options.read(true);
+    if let Ok(file) = options.open(path) {
+        let _ = file.set_modified(SystemTime::now());
+    }
+}
+
 /// Stores an `.ico` in `dir` under its content-hashed name
 /// ([`paths::icon_file_name`]) and returns the full path.
 ///
-/// An existing file with identical content is reused. A file is never
-/// overwritten: if the name is taken by different content (a truncated
-/// hash collision or a damaged file), `-2`, `-3`, … are appended.
+/// An existing file with identical content is reused; its modification
+/// time is refreshed so that [`crate::history::Journal::gc_icons`], which
+/// spares young files, does not collect it before the caller records it
+/// with `Journal::begin`. A file is never overwritten: if the name is
+/// taken by different content (a truncated hash collision or a damaged
+/// file), `-2`, `-3`, … are appended.
 pub fn store_icon(dir: &Path, name: &str, ico: &[u8]) -> Result<PathBuf> {
     fs::create_dir_all(dir).map_err(|e| io_error(e, "creating", dir))?;
     let base = paths::icon_file_name(name, ico);
@@ -251,7 +274,10 @@ pub fn store_icon(dir: &Path, name: &str, ico: &[u8]) -> Result<PathBuf> {
         };
         let dest = dir.join(file_name);
         match same_content(&dest, ico)? {
-            Some(true) => return Ok(dest),
+            Some(true) => {
+                touch(&dest);
+                return Ok(dest);
+            }
             Some(false) => variant += 1,
             None => {
                 if create_new_file(dir, &dest, ico)? {
@@ -316,7 +342,8 @@ pub fn is_valid_id(id: &str) -> bool {
 /// Saved designs: one `<id>.reskin` JSON file each in `dir`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Library {
-    dir: PathBuf,
+    /// The library folder (created on the first save).
+    pub dir: PathBuf,
 }
 
 impl Library {

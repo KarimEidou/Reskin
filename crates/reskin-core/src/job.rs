@@ -7,14 +7,16 @@
 //!
 //! The elevated side trusts nothing in the job. [`validate_job`] accepts
 //! only `.lnk` / `.url` files directly on the Public Desktop, icon names
-//! matching `^[a-z0-9-]{1,64}\.ico$` (written into
-//! `%ProgramData%\Reskin\icons`), and icons that parse and are at most
+//! matching `^[a-z0-9-]{1,64}\.ico$` that are not DOS device names
+//! (written into `%ProgramData%\Reskin\icons`; one name never carries two
+//! different icons in a job), and icons that parse and are at most
 //! [`ico::MAX_ICO_BYTES`]. [`execute_job`] then runs the validated ops
 //! through a [`JobExec`] (the real one lives in `win::elevate`).
 //!
 //! Exit codes of the helper: [`EXIT_OK`], [`EXIT_INVALID`] (unreadable or
 //! rejected job), [`EXIT_FAILED`] (at least one op failed).
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use base64::Engine as _;
@@ -348,6 +350,13 @@ fn check_icon(icon_name: &str, ico_b64: &str) -> std::result::Result<Vec<u8>, St
             "icon name {icon_name:?} must match [a-z0-9-]{{1,64}}.ico"
         ));
     }
+    // `con.ico`, `nul.ico`, `com1.ico`, … match the pattern, but Win32 opens
+    // such names as devices (the printer port, the null device): the helper
+    // would write the icon to a device and point the target at no file.
+    // Content-hashed names (`<slug>-<hash>.ico`) never look like this.
+    if is_reserved_device_name(icon_name) {
+        return Err(format!("icon name {icon_name:?} is a reserved device name"));
+    }
     if ico_b64.len() > MAX_ICO_B64_LEN {
         return Err(format!(
             "the icon is larger than {} KB",
@@ -414,7 +423,9 @@ pub fn validate_job(
     check_trusted_dir(public_icons_dir, "icons")?;
     let icons_dir = public_icons_dir.trim_end_matches(['\\', '/']);
 
-    let mut ops = Vec::with_capacity(job.ops.len());
+    let mut ops: Vec<ValidatedOp> = Vec::with_capacity(job.ops.len());
+    // Destination → index in `ops` of the first op writing it.
+    let mut writers: HashMap<String, usize> = HashMap::new();
     for (n, op) in job.ops.iter().enumerate() {
         let validated = match op {
             JobOp::SetShortcutIcon {
@@ -466,7 +477,30 @@ pub fn validate_job(
                     })
             }
         };
-        ops.push(validated.map_err(|why| invalid(format!("operation {}: {why}", n + 1)))?);
+        let validated = validated.map_err(|why| invalid(format!("operation {}: {why}", n + 1)))?;
+        // Two ops may share an icon file only if they carry the same bytes;
+        // otherwise the second write would change the first target's icon
+        // (or fail against the file the first op just wrote).
+        if let ValidatedOp::SetIcon { dest, ico, .. } = &validated {
+            match writers.get(dest) {
+                Some(&first) => {
+                    if let ValidatedOp::SetIcon { ico: first_ico, .. } = &ops[first]
+                        && first_ico != ico
+                    {
+                        return Err(invalid(format!(
+                            "operation {}: {} is also written by operation {} with different content",
+                            n + 1,
+                            paths::file_name_of(dest),
+                            first + 1
+                        )));
+                    }
+                }
+                None => {
+                    writers.insert(dest.clone(), ops.len());
+                }
+            }
+        }
+        ops.push(validated);
     }
     Ok(ValidatedJob {
         id: job.id.clone(),

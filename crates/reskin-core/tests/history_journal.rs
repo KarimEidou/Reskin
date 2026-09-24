@@ -12,6 +12,7 @@ use reskin_core::history::{
     GC_GRACE, Journal, MAX_INACTIVE_ENTRIES, NewEntry, PlanScope, Probe, RestoreTo,
 };
 use reskin_core::model::{EntryState, HistoryEntry, OriginalIcon, SystemIconId, TargetKind};
+use reskin_core::store;
 
 /// A unique temp directory, removed on drop.
 struct TempDir(PathBuf);
@@ -296,6 +297,39 @@ fn undo_repoints_to_the_previous_icon() {
 }
 
 #[test]
+fn stale_plans_are_refused_and_finishing_twice_is_harmless() {
+    let tmp = TempDir::new("stale-plan");
+    let mut j = Journal::load(tmp.journal_path()).unwrap();
+    let [_, b, c] = chain_of_three(&mut j);
+
+    // Planned while `c` was active, but another apply lands before the
+    // restore is recorded: recording it would re-activate `b` next to `d`.
+    let undo = j.plan_undo(&c).unwrap();
+    let full = j.plan_restore_target(APP).unwrap();
+    let d = apply(&mut j, APP, r"C:\icons\d.ico", original("c.ico", 0));
+    let before = j.entries().to_vec();
+    assert!(j.finish_plan(&undo, true).is_err());
+    assert!(j.finish_plan(&full, true).is_err());
+    assert_eq!(j.entries(), &before[..]);
+    let applied: Vec<&str> = j
+        .entries()
+        .iter()
+        .filter(|e| e.state == EntryState::Applied)
+        .map(|e| e.id.as_str())
+        .collect();
+    assert_eq!(applied, [d.as_str()]);
+
+    // A current plan finished twice records once.
+    let undo = j.plan_undo(&d).unwrap();
+    j.finish_plan(&undo, true).unwrap();
+    let after_first = j.entries().to_vec();
+    j.finish_plan(&undo, true).unwrap();
+    assert_eq!(j.entries(), &after_first[..]);
+    assert_eq!(j.active_for(APP).unwrap().id, c);
+    assert_eq!(state(&j, &b), EntryState::Superseded);
+}
+
+#[test]
 fn created_shortcuts_are_deleted_on_undo_and_restore() {
     let tmp = TempDir::new("created");
     let mut j = Journal::load(tmp.journal_path()).unwrap();
@@ -511,6 +545,62 @@ fn damaged_journals_are_moved_aside_and_newer_ones_refused() {
 }
 
 #[test]
+fn readable_entries_survive_a_partly_damaged_journal() {
+    let tmp = TempDir::new("salvage");
+    let good = fabricated(
+        "good",
+        r"C:\Users\Kim\Desktop\Good.lnk",
+        EntryState::Applied,
+    );
+    let also_good = fabricated("also-good", r"C:\x\Y.lnk", EntryState::Failed);
+    let mut from_the_future = serde_json::to_value(&good).unwrap();
+    from_the_future["id"] = "future".into();
+    from_the_future["kind"] = "teleporter".into();
+    let body = serde_json::json!({
+        "version": 1,
+        "entries": [good, {"id": 7}, from_the_future, also_good],
+        "failures": {"also-good": "locked"},
+    });
+    let bytes = serde_json::to_vec(&body).unwrap();
+    fs::write(tmp.journal_path(), &bytes).unwrap();
+
+    let j = Journal::load(tmp.journal_path()).unwrap();
+    let ids: Vec<&str> = j.entries().iter().map(|e| e.id.as_str()).collect();
+    assert_eq!(ids, ["good", "also-good"]);
+    assert_eq!(j.failure("also-good"), Some("locked"));
+    assert_eq!(
+        j.active_for(r"C:\Users\Kim\Desktop\Good.lnk").unwrap().id,
+        "good"
+    );
+    // The untouched original is kept, and the journal is clean again.
+    let backup = j.recovered_backup().unwrap();
+    assert_eq!(fs::read(backup).unwrap(), bytes);
+    let reloaded = Journal::load(tmp.journal_path()).unwrap();
+    assert_eq!(reloaded.entries(), j.entries());
+    assert_eq!(reloaded.recovered_backup(), None);
+
+    // Unreadable failure notes alone are dropped the same way.
+    let body = serde_json::json!({ "version": 1, "entries": [], "failures": [1, 2] });
+    fs::write(tmp.journal_path(), serde_json::to_vec(&body).unwrap()).unwrap();
+    let j = Journal::load(tmp.journal_path()).unwrap();
+    assert!(j.recovered_backup().is_some());
+    assert!(j.entries().is_empty());
+
+    // A journal without a version or entries list is not a journal.
+    for body in [
+        r#"{"entries":[]}"#,
+        r#"{"version":1}"#,
+        r#"{"version":"1","entries":[]}"#,
+        "[]",
+    ] {
+        fs::write(tmp.journal_path(), body).unwrap();
+        let j = Journal::load(tmp.journal_path()).unwrap();
+        assert!(j.recovered_backup().is_some(), "{body}");
+        assert!(!tmp.journal_path().exists(), "{body}");
+    }
+}
+
+#[test]
 fn a_failed_write_in_begin_records_nothing() {
     let tmp = TempDir::new("begin-fails");
     let mut j = Journal::load(tmp.journal_path()).unwrap();
@@ -613,6 +703,22 @@ fn gc_collects_old_unreferenced_icons_after_the_grace_period() {
     assert_eq!(j.gc_icons(&icons).unwrap(), 1);
     assert!(!old.exists());
     assert!(young.exists());
+}
+
+#[test]
+fn an_old_icon_reused_by_store_icon_survives_a_concurrent_gc() {
+    let tmp = TempDir::new("gc-reuse");
+    let icons = tmp.path().join("icons");
+    let ico = b"\x00\x00\x01\x00same design".to_vec();
+    // Stored long ago for a change that has since been restored.
+    let path = store::store_icon(&icons, "App", &ico).unwrap();
+    age(&path, GC_GRACE * 3);
+    // The same design is applied again: store_icon hands back that file,
+    // and a GC runs before the new entry is begun.
+    assert_eq!(store::store_icon(&icons, "App", &ico).unwrap(), path);
+    let j = Journal::load(tmp.journal_path()).unwrap();
+    assert_eq!(j.gc_icons(&icons).unwrap(), 0);
+    assert!(path.exists());
 }
 
 // ---------------------------------------------------------------------------

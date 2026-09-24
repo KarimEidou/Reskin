@@ -323,6 +323,18 @@ fn illegal_characters_and_device_names_are_rejected() {
 }
 
 #[test]
+fn unicode_look_alikes_of_the_desktop_folder_are_rejected() {
+    // U+212A KELVIN SIGN lowercases to 'k' but NTFS treats it as a
+    // different character, so this is a different folder.
+    assert_rejected(
+        set_lnk("C:\\Users\\Public\\Des\u{212A}top\\App.lnk"),
+        "not directly on the Public Desktop",
+    );
+    // Non-ASCII file names directly on the desktop are fine.
+    assert_ok(set_lnk("C:\\Users\\Public\\Desktop\\Café Ünïcode.lnk"));
+}
+
+#[test]
 fn overlong_targets_are_rejected() {
     let target = format!(r"{DESKTOP}\{}.lnk", "a".repeat(1100));
     assert_rejected(set_lnk(&target), "too long");
@@ -360,6 +372,46 @@ fn bad_icon_names_are_rejected() {
     assert_ok(with_icon(&longest, ico_b64()));
     assert_ok(with_icon("a.ico", ico_b64()));
     assert_ok(with_icon("-.ico", ico_b64()));
+}
+
+#[test]
+fn device_icon_names_are_rejected() {
+    // They match the pattern, but Win32 opens them as devices.
+    for name in [
+        "con.ico", "prn.ico", "aux.ico", "nul.ico", "com1.ico", "com0.ico", "lpt9.ico",
+    ] {
+        assert_rejected(with_icon(name, ico_b64()), "reserved device name");
+    }
+    for name in ["con-1.ico", "nul0.ico", "com10.ico", "console.ico"] {
+        assert_ok(with_icon(name, ico_b64()));
+    }
+}
+
+#[test]
+fn one_icon_name_cannot_carry_two_different_icons() {
+    let other = STANDARD.encode(ico::build_ico(&[Rgba::filled(16, 16, [0, 0, 255, 255])]).unwrap());
+    let err = validate(vec![
+        set_lnk(r"C:\Users\Public\Desktop\A.lnk"),
+        restore_lnk(r"C:\Users\Public\Desktop\B.lnk", None, 0),
+        JobOp::SetUrlIcon {
+            target: r"C:\Users\Public\Desktop\C.url".into(),
+            icon_name: ICON_NAME.into(),
+            ico_b64: other,
+        },
+    ])
+    .unwrap_err()
+    .to_string();
+    assert!(err.contains("operation 3"), "{err}");
+    assert!(err.contains("operation 1"), "{err}");
+    assert!(err.contains(ICON_NAME), "{err}");
+
+    // Sharing one icon file between targets is fine when the bytes agree.
+    let v = validate(vec![
+        set_lnk(r"C:\Users\Public\Desktop\A.lnk"),
+        set_url(r"C:\Users\Public\Desktop\C.url"),
+    ])
+    .unwrap();
+    assert_eq!(v.ops.len(), 2);
 }
 
 #[test]

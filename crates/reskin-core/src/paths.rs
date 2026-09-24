@@ -243,9 +243,17 @@ fn starts_with_ci(s: &str, prefix: &str) -> bool {
 ///
 /// * `/` becomes `\`;
 /// * the `\\?\` prefix is removed (`\\?\UNC\server\share` → `\\server\share`);
-/// * lowercase;
+/// * ASCII letters are lowercased;
 /// * runs of separators collapse to one (a leading `\\` of a UNC path is kept);
 /// * trailing separators are removed (`C:\` → `c:`).
+///
+/// Only ASCII is case-folded on purpose. Windows folds file names with its
+/// own upcase table, which does not match Unicode lowercasing: U+212A
+/// KELVIN SIGN lowercases to `k`, yet `Des\u{212A}top` and `Desktop` are
+/// different folders on NTFS. Folding such characters would make two
+/// different paths compare equal and let a path slip past
+/// [`is_directly_under`]; leaving them alone can at worst make two spellings
+/// of one non-ASCII name compare unequal, which is the safe direction.
 ///
 /// This does not resolve `.`/`..` or touch the file system; callers that
 /// need safety reject such components separately.
@@ -261,7 +269,7 @@ pub fn normalize_for_compare(path: &str) -> String {
     } else {
         unified
     };
-    let lower = stripped.to_lowercase();
+    let lower = stripped.to_ascii_lowercase();
 
     let mut out = String::with_capacity(lower.len());
     let mut rest = lower.as_str();
@@ -288,8 +296,8 @@ pub fn normalize_for_compare(path: &str) -> String {
 }
 
 /// True when `child` names an entry *directly* inside `dir` (not the
-/// directory itself and not a subfolder), comparing case-insensitively
-/// after [`normalize_for_compare`].
+/// directory itself and not a subfolder), comparing ASCII
+/// case-insensitively after [`normalize_for_compare`].
 pub fn is_directly_under(child: &str, dir: &str) -> bool {
     let child = normalize_for_compare(child);
     let dir = normalize_for_compare(dir);
@@ -404,6 +412,22 @@ mod tests {
         assert_eq!(normalize_for_compare(r"\\?\UNC\srv\share"), r"\\srv\share");
         assert_eq!(normalize_for_compare(r"\\srv\\share\"), r"\\srv\share");
         assert_eq!(normalize_for_compare(r"C:\"), "c:");
+    }
+
+    #[test]
+    fn only_ascii_is_case_folded() {
+        // Non-ASCII characters are kept verbatim ...
+        assert_eq!(normalize_for_compare("C:\\Ÿ\\É"), "c:\\Ÿ\\É");
+        // ... so a look-alike that Unicode lowercasing maps onto ASCII
+        // (KELVIN SIGN → 'k') does not match the real folder name.
+        assert_ne!(
+            normalize_for_compare("C:\\Des\u{212A}top"),
+            normalize_for_compare(r"C:\Desktop")
+        );
+        assert!(!is_directly_under(
+            "C:\\Users\\Public\\Des\u{212A}top\\App.lnk",
+            r"C:\Users\Public\Desktop"
+        ));
     }
 
     #[test]
