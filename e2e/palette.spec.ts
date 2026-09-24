@@ -142,6 +142,8 @@ test.describe('command palette', () => {
     await prompt.getByRole('button', { name: 'Grow' }).click();
     await expect(prompt).toHaveCount(0);
     expect(await selected(34, 250)).toBe(255);
+    // No Selection menu with the brush: the keyboard continues on the canvas.
+    await expect(page.getByTestId('canvas')).toBeFocused();
   });
 
   test('only commands that apply right now are listed', async ({ openEditor, page }) => {

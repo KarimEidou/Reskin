@@ -340,6 +340,26 @@ describe('tool keys', () => {
     expect(e.selectedToolId).toBe('smudge');
   });
 
+  it('a tool chosen another way in between ends the cycle, even when it is the same tool again', () => {
+    const e = session.engine;
+    const r = byId('tool.smudge');
+    r.runKey!(ctx);
+    expect(e.selectedToolId).toBe('smudge');
+    // Away on the rail and back to the smudge tool: R is a first press again.
+    e.setTool('brush');
+    e.setTool('smudge');
+    r.runKey!(ctx);
+    expect(e.selectedToolId).toBe('smudge');
+    r.runKey!(ctx);
+    expect(e.selectedToolId).toBe('blurSharpen');
+    // Holding Space (a temporary hand) and changing options keep the cycle going.
+    e.setToolOverride('hand');
+    e.setToolOverride(null);
+    e.setToolOptions('blurSharpen', { strength: 0.3 });
+    r.runKey!(ctx);
+    expect(e.selectedToolId).toBe('dodgeBurn');
+  });
+
   it('offers the new tools with their engine shortcuts', () => {
     const bindings = compileBindings(commands);
     const shortcuts: Array<[string, Partial<KeyEventInfo>, string]> = [

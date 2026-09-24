@@ -44,9 +44,10 @@
   // Leaving the Edit view drops the question (it must not pop up on return).
   $effect(() => () => refinePrompt.close());
 
+  /** Back to the Selection menu button, or to the canvas (the prompt came from the palette). */
   function apply(): void {
     refinePrompt.apply(engine);
-    if (anchor?.isConnected) anchor.focus({ preventScroll: true });
+    if (anchor instanceof HTMLButtonElement && anchor.isConnected) anchor.focus({ preventScroll: true });
     else stage.focusCanvas();
   }
 </script>

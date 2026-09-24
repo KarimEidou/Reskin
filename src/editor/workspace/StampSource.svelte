@@ -18,6 +18,8 @@
   const session = getSession();
   /** Thumbnail size, CSS px. */
   const THUMB = 24;
+  /** The sticker itself: the thumbnail redraws when it changes, not with every stamp option. */
+  const sticker = $derived(stamp);
 
   /** Draws the stamp fitted into the thumbnail at the device pixel ratio. */
   function thumbnail(image: Surface) {
@@ -40,9 +42,9 @@
 </script>
 
 <div class="source" data-testid="stamp-source">
-  {#if stamp}
+  {#if sticker}
     <span class="thumb" role="img" aria-label="Current sticker">
-      <canvas aria-hidden="true" {@attach thumbnail(stamp)}></canvas>
+      <canvas aria-hidden="true" {@attach thumbnail(sticker)}></canvas>
     </span>
   {:else}
     <span class="none">No sticker</span>

@@ -17,10 +17,11 @@
 // small (painting). A changed look (effect sliders, presets, adjustment
 // previews) restyles the whole layer in a worker (./styled-worker.ts), one
 // request per layer at a time, latest wins: the canvas keeps the previous
-// look until the new one lands, and the page never waits for it. A layer's
-// first styled render happens here, so it never shows without its effects.
-// All of this runs inside `render()`, which the host calls at most once per
-// animation frame.
+// look until the new one lands (a layer getting its first effects shows
+// its plain pixels meanwhile), and the page never waits for it. Only the
+// first frame after the caches were dropped styles here, so a design never
+// opens without its effects. All of this runs inside `render()`, which the
+// host calls at most once per animation frame.
 //
 // Never imported by the pure core; importing it in Node is harmless, but
 // constructing it needs OffscreenCanvas or a document.
@@ -185,6 +186,8 @@ export class CanvasView {
   private styleBuffer = new Uint8ClampedArray(0);
   /** Bumped by `invalidate()`: worker results of an older generation are dropped. */
   private generation = 0;
+  /** A frame was composed since the caches were dropped (restyles may go to the worker). */
+  private primed = false;
   private disposed = false;
 
   constructor(
@@ -211,6 +214,7 @@ export class CanvasView {
   /** Drops every cache (e.g. after a theme change). */
   invalidate(): void {
     this.generation++;
+    this.primed = false;
     this.layers.clear();
     this.below = this.above = this.frame = null;
     this.compareCanvas = null;
@@ -310,16 +314,18 @@ export class CanvasView {
         return s.canvas;
       }
     }
-    if (s.job) return s.canvas;
-    const worker = s.key === null ? null : styledWorker();
+    // Until a restyle lands the layer keeps its look: the plain pixels before its first.
+    const shown = s.key === null ? e.canvas : s.canvas;
+    if (s.job) return shown;
+    const worker = this.primed ? styledWorker() : null;
     if (worker) {
       this.restyleInWorker(layer.id, e, s, worker.render(src, key), key);
-    } else {
-      this.putStyled(s, renderStyledPixels(src, layer.effects, this.buffer(src.width * src.height)), true);
-      s.key = key;
-      s.version = e.version;
-      s.dirty = null;
+      return shown;
     }
+    this.putStyled(s, renderStyledPixels(src, layer.effects, this.buffer(src.width * src.height)), true);
+    s.key = key;
+    s.version = e.version;
+    s.dirty = null;
     return s.canvas;
   }
 
@@ -391,7 +397,9 @@ export class CanvasView {
   /** What a cached group shows of a layer: the canvas drawn (and its revision), opacity, blend. */
   private layerKey(layer: Layer): string {
     const e = this.layers.get(layer.id);
-    const shown = e?.styled ? `s${e.styled.rev}` : `p${e?.version ?? -1}`;
+    const styled = e?.styled;
+    // A styled layer waiting for its first look still shows its plain pixels.
+    const shown = styled && styled.key !== null ? `s${styled.rev}` : `p${e?.version ?? -1}`;
     return `${layer.id}:${shown}:${layer.opacity}:${layer.blend}`;
   }
 
@@ -457,6 +465,7 @@ export class CanvasView {
         }
       }
     }
+    this.primed = true;
     return this.frame.canvas;
   }
 

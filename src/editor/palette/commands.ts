@@ -266,8 +266,12 @@ export function createCommands(tools: ToolInfo): Command[] {
   );
 
   // ---- tools --------------------------------------------------------------------
-  /** The tool the last tool key selected (and which key), so pressing it again cycles. */
-  let lastKey: { pressed: ToolId; selected: ToolId } | null = null;
+  /**
+   * The tool the last tool key selected (and which key), so pressing it
+   * again cycles; `left` once another tool was selected since (the rail,
+   * the palette), which ends the cycle even if that tool comes back.
+   */
+  let lastKey: { pressed: ToolId; selected: ToolId; left: boolean; stop: () => void } | null = null;
   for (const id of TOOL_ORDER) {
     const tool = tools[id];
     list.push({
@@ -285,9 +289,17 @@ export function createCommands(tools: ToolInfo): Command[] {
       runKey: (c) => {
         const engine = c.session.engine;
         const current = engine.selectedToolId;
-        const tool = toolForKey(id, current, lastKey?.pressed === id && lastKey.selected === current);
+        const repeated = lastKey !== null && !lastKey.left && lastKey.pressed === id && lastKey.selected === current;
+        lastKey?.stop();
+        const tool = toolForKey(id, current, repeated);
         engine.setTool(tool);
-        lastKey = { pressed: id, selected: tool };
+        const key = { pressed: id, selected: tool, left: false, stop: () => {} };
+        key.stop = engine.subscribe((e) => {
+          if (e.kind !== 'tool' || engine.selectedToolId === tool) return;
+          key.left = true;
+          key.stop();
+        });
+        lastKey = key;
       },
     });
   }

@@ -686,9 +686,23 @@ test.describe('new tools', () => {
     });
     await expect(source.getByRole('img', { name: 'Current sticker' })).toBeVisible();
     await expect(source).not.toContainText('No sticker');
+    // The thumbnail is drawn once per sticker, not again with every option change:
+    // a mark put on it survives the rotation below.
+    const thumb = source.locator('canvas');
+    const mark = () =>
+      thumb.evaluate((c: HTMLCanvasElement) => {
+        const d = c.getContext('2d')!.getImageData(0, 0, 1, 1).data;
+        return [d[0], d[1], d[2], d[3]];
+      });
+    await thumb.evaluate((c: HTMLCanvasElement) => {
+      const ctx = c.getContext('2d')!;
+      ctx.fillStyle = '#00ff00';
+      ctx.fillRect(0, 0, 1, 1);
+    });
     const options = page.getByTestId('tool-options');
     await options.getByRole('slider', { name: 'Rotation' }).fill('45');
     expect(await withSession(page, (s) => s.engine.getToolOptions('stamp').rotation)).toBe(45);
+    expect(await mark()).toEqual([0, 255, 0, 255]);
     await options.getByRole('slider', { name: 'Rotation' }).fill('0');
     await options.getByRole('button', { name: 'More sticker stamp options' }).click();
     const more = page.getByRole('dialog', { name: 'Sticker stamp options' });
@@ -1191,6 +1205,35 @@ test.describe('effects performance', () => {
     await stroke(page, { x: 100, y: 6 }, { x: 200, y: 6 });
     await expect.poll(async () => red(await screenPixel(page, shadowAt))).toBe(true);
     expect(await screenPixel(page, { x: 150, y: 6 })).toEqual([0, 0, 0, 255]);
+  });
+
+  test('a layer getting its first effects is styled off the page: its plain pixels show until the look lands', async ({ page }) => {
+    await openWorkspace(page);
+    // Under the tile, where a hard red shadow 12 px straight down lands.
+    const below = { x: 256, y: 470 };
+    const before = await screenPixel(page, below);
+    const at = await toClient(page, below);
+    // The frame right after the change (its callback runs after the stage's render).
+    const firstFrame = await page.evaluate(
+      ({ x, y }) =>
+        new Promise<number[]>((resolve) => {
+          const s = (globalThis as unknown as Handle).__reskinSession;
+          s.engine.setLayerProps(s.engine.activeLayer!.id, {
+            effects: [{ type: 'dropShadow', enabled: true, color: { r: 255, g: 0, b: 0, a: 1 }, opacity: 1, angle: 90, distance: 12, blur: 0, spread: 0 }],
+          });
+          requestAnimationFrame(() => {
+            const canvas = document.querySelector<HTMLCanvasElement>('[data-testid="canvas"]')!;
+            const r = canvas.getBoundingClientRect();
+            const k = canvas.width / r.width;
+            const d = canvas.getContext('2d')!.getImageData(Math.round((x - r.left) * k), Math.round((y - r.top) * k), 1, 1).data;
+            resolve([d[0]!, d[1]!, d[2]!, d[3]!]);
+          });
+        }),
+      at,
+    );
+    expect(firstFrame).toEqual(before);
+    const redness = ([r, g]: number[]) => r! - g!;
+    await expect.poll(async () => redness(await screenPixel(page, below))).toBeGreaterThan(redness(before) + 60);
   });
 
   test('dragging an effect slider never blocks the page for long (512 px layer, three effects)', async ({ page }) => {
