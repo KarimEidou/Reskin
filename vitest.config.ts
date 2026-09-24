@@ -1,9 +1,12 @@
 import { defineConfig } from 'vitest/config';
+import { svelte } from '@sveltejs/vite-plugin-svelte';
 import { fileURLToPath, URL } from 'node:url';
 
 const r = (p: string) => fileURLToPath(new URL(p, import.meta.url));
 
 export default defineConfig({
+  // Compiles `.svelte.ts` rune modules so they can be unit tested.
+  plugins: [svelte()],
   resolve: {
     alias: {
       $lib: r('./src/lib'),
