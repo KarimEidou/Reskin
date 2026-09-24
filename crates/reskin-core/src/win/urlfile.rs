@@ -24,15 +24,15 @@ use windows::Win32::UI::Shell::{
 };
 use windows::core::{Interface, PCWSTR, PWSTR};
 
-use super::util::{ComScope, ResultExt, pcwstr, wide};
-use crate::urlini::UrlFile;
+use super::util::{ComScope, ResultExt, ini_bytes, pcwstr, read_ini, wide};
 use crate::{Error, Result};
 
 /// The custom icon of a `.url` file as stored (`IconFile`, raw — it may
 /// contain `%VARS%` or be relative to the file's folder) and `IconIndex`
-/// (0 when absent). `[InternetShortcut.W]` values win.
+/// (0 when absent). `[InternetShortcut.W]` values win; an ANSI file is
+/// decoded in the system code page, as Windows wrote it.
 pub fn read_url_icon(path: &Path) -> Result<(Option<String>, i32)> {
-    let file = UrlFile::parse(&std::fs::read(path)?);
+    let file = read_ini(path)?;
     Ok((file.icon_file().map(str::to_owned), file.icon_index()))
 }
 
@@ -157,17 +157,18 @@ fn write_properties(path: &Path, icon: Option<(&str, i32)>) -> Result<()> {
     Ok(())
 }
 
-/// Fallback: rewrites the INI with [`UrlFile::set_icon`], keeping every
-/// other key and the file's encoding (atomic replace via a sibling file).
+/// Fallback: rewrites the INI with [`crate::urlini::UrlFile::set_icon`],
+/// keeping every other key and the file's encoding (atomic replace via a
+/// sibling file).
 fn write_ini(path: &Path, icon: Option<(&str, i32)>) -> Result<()> {
-    let mut file = UrlFile::parse(&std::fs::read(path)?);
+    let mut file = read_ini(path)?;
     match icon {
         Some((f, i)) => file.set_icon(Some(f), i),
         None => file.set_icon(None, 0),
     }
     let mut tmp = path.as_os_str().to_owned();
     tmp.push(".reskin-tmp");
-    std::fs::write(&tmp, file.to_bytes())?;
+    std::fs::write(&tmp, ini_bytes(&file))?;
     std::fs::rename(&tmp, path).inspect_err(|_| {
         let _ = std::fs::remove_file(&tmp);
     })?;

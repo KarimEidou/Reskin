@@ -20,7 +20,7 @@
 //! in the state being changed is therefore replaced for good; the
 //! journal records originals per state value, not `(Default)`.
 
-use std::ffi::OsString;
+use std::ffi::{OsStr, OsString};
 use std::path::Path;
 
 use windows::Win32::System::Registry::{
@@ -32,6 +32,7 @@ use windows::core::PCWSTR;
 
 use super::util::{
     RegKey, delete_key_if_empty, expand_env, format_icon_location, parse_icon_location,
+    paths_equal_ci,
 };
 use crate::model::{OriginalIcon, SystemIconId};
 use crate::{Error, Result};
@@ -92,7 +93,6 @@ fn original_from(raw: Option<String>) -> OriginalIcon {
     }
 }
 
-/// The value as the registry would store it for `original`.
 /// Registry type for a restored value: Windows stores icon locations that
 /// use `%VARS%` as `REG_EXPAND_SZ` and plain paths as `REG_SZ`; restoring
 /// by the same rule puts originals back exactly.
@@ -104,6 +104,7 @@ fn value_type(value: &str) -> REG_VALUE_TYPE {
     }
 }
 
+/// The value as the registry would store it for `original`.
 fn value_of(original: &OriginalIcon) -> String {
     match &original.location {
         Some(location) => format_icon_location(location, original.index),
@@ -178,26 +179,58 @@ pub fn restore_system_icon(id: SystemIconId, original: &OriginalIcon) -> Result<
     Ok(())
 }
 
+/// A `path,index` registry value with the path expanded.
+fn parse_expanded(raw: String) -> Option<(String, i32)> {
+    parse_icon_location(&raw).map(|(p, i)| (expand_env(&p), i))
+}
+
+/// The per-user override, expanded (`None` when absent or unusable).
+fn user_icon(id: SystemIconId) -> Result<Option<(String, i32)>> {
+    Ok(
+        RegKey::open(HKEY_CURRENT_USER, &default_icon_key(id), KEY_READ)?
+            .and_then(|key| key.string(id.value_name()).ok().flatten())
+            .and_then(parse_expanded),
+    )
+}
+
+/// The machine default (`HKCR\CLSID\{GUID}\DefaultIcon`; the Recycle Bin
+/// falls back from `empty` / `full` to `(Default)`), expanded.
+fn machine_icon(id: SystemIconId) -> Result<Option<(String, i32)>> {
+    let name = id.value_name();
+    let machine = format!(r"CLSID\{}\DefaultIcon", id.clsid());
+    let Some(key) = RegKey::open(HKEY_CLASSES_ROOT, &machine, KEY_READ)? else {
+        return Ok(None);
+    };
+    let names: &[&str] = if name.is_empty() { &[""] } else { &[name, ""] };
+    Ok(names
+        .iter()
+        .find_map(|n| key.string(n).ok().flatten().and_then(parse_expanded)))
+}
+
 /// The icon Explorer uses for `id`: the per-user override, else the
 /// machine default (`HKCR\CLSID\{GUID}\DefaultIcon`; the Recycle Bin falls
 /// back from `empty` / `full` to `(Default)`). Returns the expanded path
 /// and index, `None` when neither is set.
 pub fn effective_system_icon(id: SystemIconId) -> Result<Option<(String, i32)>> {
-    let name = id.value_name();
-    let parse = |raw: String| parse_icon_location(&raw).map(|(p, i)| (expand_env(&p), i));
-    if let Some(key) = RegKey::open(HKEY_CURRENT_USER, &default_icon_key(id), KEY_READ)?
-        && let Some(found) = key.string(name).ok().flatten().and_then(parse)
-    {
-        return Ok(Some(found));
+    match user_icon(id)? {
+        Some(found) => Ok(Some(found)),
+        None => machine_icon(id),
     }
-    let machine = format!(r"CLSID\{}\DefaultIcon", id.clsid());
-    if let Some(key) = RegKey::open(HKEY_CLASSES_ROOT, &machine, KEY_READ)? {
-        let names: &[&str] = if name.is_empty() { &[""] } else { &[name, ""] };
-        for n in names {
-            if let Some(found) = key.string(n).ok().flatten().and_then(parse) {
-                return Ok(Some(found));
-            }
+}
+
+/// Whether `id` shows a customised icon: a per-user override exists and
+/// points somewhere other than the machine default. Windows itself may
+/// write the default icons into the per-user key (the Recycle Bin's
+/// `empty` / `full`, "Restore Default" in Desktop Icon Settings); that is
+/// not a customisation.
+pub fn is_customized(id: SystemIconId) -> bool {
+    let Ok(Some((path, index))) = user_icon(id) else {
+        return false;
+    };
+    match machine_icon(id) {
+        Ok(Some((default, default_index))) => {
+            index != default_index || !paths_equal_ci(OsStr::new(&path), OsStr::new(&default))
         }
+        _ => true,
     }
-    Ok(None)
 }
