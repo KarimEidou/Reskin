@@ -126,7 +126,11 @@
         toast({ message: `Could not open the file picker: ${errorText(e)}`, kind: 'error' });
         return;
       }
-      if (picked.length > 0) await shell.openItems(picked);
+      if (picked.length === 0) return;
+      await shell.openItems(picked);
+      // Asked for by name: show the project, not just queue it behind the open design.
+      const index = session.queue.findIndex((q) => q.info.id === picked[0]!.id);
+      if (index >= 0) await session.switchTo(index);
     },
     newBlank: () => shell.newBlank(),
     restoreAll: async () => {
