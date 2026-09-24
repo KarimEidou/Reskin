@@ -50,6 +50,23 @@ export const ABSORB_IMPACT_AT = 0.42;
 /** Celebrate burst and error shake lengths at speed 1. */
 export const CELEBRATE_MS = 900;
 export const ERROR_MS = 480;
+/** How long the error look stays at speed 1 (the shake, then its glow fading). */
+export const ERROR_HOLD_MS = ERROR_MS * 1.6;
+/** Reading time of an error message: a base plus this much per character. */
+const MESSAGE_BASE_MS = 1600;
+const MESSAGE_MS_PER_CHAR = 45;
+const MESSAGE_MAX_MS = 6000;
+
+/**
+ * How long the box stays in the error state: the error look, or — when it
+ * says why it shook — long enough to read the message (reading time does
+ * not follow the animation speed; `hold` is the scaled error look).
+ */
+export function errorLifetime(message: string | null, hold: number): number {
+  if (!message) return hold;
+  const read = Math.min(MESSAGE_MAX_MS, MESSAGE_BASE_MS + message.length * MESSAGE_MS_PER_CHAR);
+  return Math.max(hold, read);
+}
 /** Space between the visual box and the progress ring stroke centre. */
 export const RING_GAP = 5;
 export const RING_STROKE = 3;
@@ -188,6 +205,7 @@ export interface BoxVisualProps {
   compat: boolean;
   reducedMotion: boolean;
   hint: string | null;
+  message: string | null;
 }
 
 /**
@@ -215,6 +233,7 @@ export function handoffProps(
     compat: settings.compatibilityMode,
     reducedMotion,
     hint: items.length === 0 ? hint : null,
+    message: null,
   };
 }
 

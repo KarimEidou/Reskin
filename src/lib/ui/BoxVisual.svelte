@@ -17,6 +17,8 @@
   box (a rounded window region), so nothing that matters may live in the
   margin: the box itself does not scale or move (the content inside it
   squashes and shakes instead), and the badge and busy ring sit inside.
+  The hint and the error message are drawn inside the box for the same
+  reason.
 -->
 <script lang="ts">
   import type { BoxMetrics, BoxSkin } from '$lib/ipc/types';
@@ -50,6 +52,11 @@
     reducedMotion?: boolean;
     /** Short hint under the mark, e.g. "Drag a shortcut onto me". */
     hint?: string | null;
+    /**
+     * Why the box shook (error state): shown under the mark in place of the
+     * hint, up to three lines.
+     */
+    message?: string | null;
   }
 
   let {
@@ -63,6 +70,7 @@
     compat = false,
     reducedMotion = false,
     hint = null,
+    message = null,
   }: Props = $props();
 
   // Inward-drifting particles while armed: angle, stagger and size.
@@ -81,6 +89,7 @@
   const bodyTransform = $derived(compat ? 'none' : transformCss(STATE_TRANSFORM[state]));
   const pct = $derived(progress === null ? null : Math.round(Math.min(1, Math.max(0, progress)) * 1000) / 10);
   const bodyOpacity = $derived(state === 'idle' ? Math.min(1, Math.max(0, opacity)) : 1);
+  const caption = $derived(icon !== null ? null : (message ?? hint));
 </script>
 
 <div
@@ -88,7 +97,7 @@
   class:compat
   class:reduced={reducedMotion}
   class:with-icon={icon !== null}
-  class:with-hint={hint !== null && icon === null}
+  class:with-hint={caption !== null}
   data-skin={skin}
   data-state={state}
   aria-hidden="true"
@@ -128,8 +137,8 @@
                 <path d="M24 8v19M15.5 19.5 24 28l8.5-8.5M10 32v3a5 5 0 0 0 5 5h18a5 5 0 0 0 5-5v-3" />
               </svg>
             </span>
-            {#if hint !== null}
-              <span class="hint">{hint}</span>
+            {#if caption !== null}
+              <span class="hint" class:message={message !== null}>{caption}</span>
             {/if}
           {/if}
         </div>
@@ -382,6 +391,17 @@
     color: var(--bv-ink);
     text-shadow: 0 1px 2px rgb(0 0 0 / 0.35);
     text-wrap: balance;
+  }
+  /* An error message may run longer than the hint: smaller, three lines. */
+  .hint.message {
+    top: 47%;
+    font-size: max(9px, calc(var(--bv-vis) * 0.074));
+    display: -webkit-box;
+    -webkit-box-orient: vertical;
+    -webkit-line-clamp: 3;
+    line-clamp: 3;
+    overflow: hidden;
+    overflow-wrap: anywhere;
   }
 
   /* ------------------------------------------------------------------ */

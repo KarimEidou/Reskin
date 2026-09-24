@@ -6,7 +6,9 @@
   every change, the history does not. Apply records the adjustment as one
   undo step, Cancel restores the layer byte for byte, Reset returns to the
   defaults. Anything else that changes the design ends the preview (the
-  engine restores the layer) and closes the settings.
+  engine restores the layer) and closes the settings. Pixel sizes (radii,
+  block sizes, offsets) follow the document's size (./scale.ts). The command
+  palette opens an adjustment through `panelRequests.adjust`.
 -->
 <script lang="ts">
   import { onDestroy, tick, untrack } from 'svelte';
@@ -15,7 +17,7 @@
   import Lock from '@lucide/svelte/icons/lock';
   import RotateCcw from '@lucide/svelte/icons/rotate-ccw';
   import SquareDashedMousePointer from '@lucide/svelte/icons/square-dashed-mouse-pointer';
-  import { FILTER_CATEGORIES, FILTER_LIST, defaultParams, getFilter, type FilterId } from '$engine/filters';
+  import { FILTER_CATEGORIES, FILTER_LIST, getFilter, type FilterId } from '$engine/filters';
   import { isFilterCancelled } from '$engine/filters/client';
   import type { LayerPreview } from '$engine/index';
   import Button from '$lib/ui/Button.svelte';
@@ -25,18 +27,18 @@
   import { toast } from '$lib/ui/toasts.svelte';
   import { getSession } from '../../state/context';
   import Section from '../common/Section.svelte';
+  import { panelRequests, type AdjustTarget } from '../requests.svelte';
   import { chainRecipes, filterRecipe, helperRecipe } from '../styles/recipe';
   import { isCancelled } from '../worker/client';
-  import { HELPERS, defaultValues, getHelper, type ControlSpec, type ControlValue, type ControlValues, type HelperId } from './helper-defs';
+  import { HELPERS, defaultValues, getHelper, type ControlSpec, type ControlValue, type ControlValues } from './helper-defs';
   import ParamControls from './ParamControls.svelte';
+  import { scaleParams } from './scale';
 
   const session = getSession();
   const engine = session.engine;
 
-  type Target = { kind: 'filter'; id: FilterId } | { kind: 'helper'; id: HelperId };
-
   interface Editing {
-    target: Target;
+    target: AdjustTarget;
     label: string;
     description: string;
     params: readonly ControlSpec[];
@@ -66,17 +68,19 @@
   let seq = 0;
   let latest: Promise<void> = Promise.resolve();
 
-  function describe(t: Target, layerName: string): Editing {
+  /** The adjustment's controls, their pixel sizes scaled to the document. */
+  function describe(t: AdjustTarget, layerName: string): Editing {
+    const size = Math.max(engine.doc.width, engine.doc.height);
     if (t.kind === 'filter') {
       const f = getFilter(t.id);
-      return { target: t, label: f.label, description: f.description, params: f.params, usesSelection: true, layerName };
+      return { target: t, label: f.label, description: f.description, params: scaleParams(f.params, size), usesSelection: true, layerName };
     }
     const h = getHelper(t.id);
-    return { target: t, label: h.label, description: h.description, params: h.params, usesSelection: h.usesSelection, layerName };
+    return { target: t, label: h.label, description: h.description, params: scaleParams(h.params, size), usesSelection: h.usesSelection, layerName };
   }
 
-  function initial(t: Target): ControlValues {
-    return t.kind === 'filter' ? (structuredClone(defaultParams(t.id)) as unknown as ControlValues) : defaultValues(getHelper(t.id).params);
+  function initial(e: Editing): ControlValues {
+    return defaultValues(e.params);
   }
 
   let editorEl: HTMLDivElement | undefined = $state();
@@ -87,7 +91,7 @@
     if (editorEl?.contains(document.activeElement)) root?.focus();
   }
 
-  function open(t: Target): void {
+  function open(t: AdjustTarget): void {
     const l = engine.activeLayer;
     if (!l || l.kind !== 'raster' || l.locked) return;
     keep();
@@ -96,7 +100,7 @@
     const preview = engine.beginPreview(info.label, { layerId: l.id });
     if (!preview) return;
     live = preview;
-    values = initial(t);
+    values = initial(info);
     shown = $state.snapshot(values) as Record<string, unknown>;
     editing = info;
     // Kept, the adjustment on the canvas joins the design's recipe.
@@ -177,7 +181,7 @@
   function reset(): void {
     const e = editing;
     if (!e) return;
-    values = initial(e.target);
+    values = initial(e);
     compute();
   }
 
@@ -212,6 +216,17 @@
   }
 
   onDestroy(keep);
+
+  // The command palette asked for an adjustment (it may have loaded this
+  // panel for it): open it, if the active layer can be adjusted.
+  $effect(() => {
+    const asked = panelRequests.adjust;
+    if (!asked) return;
+    untrack(() => {
+      panelRequests.adjust = null;
+      open(asked);
+    });
+  });
 
   function onEditorKey(e: KeyboardEvent): void {
     if (e.key === 'Escape' && !e.defaultPrevented) {

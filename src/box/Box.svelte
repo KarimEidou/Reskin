@@ -20,7 +20,8 @@
     ABSORB_IMPACT_AT,
     ABSORB_MS,
     CELEBRATE_MS,
-    ERROR_MS,
+    ERROR_HOLD_MS,
+    errorLifetime,
     FIRST_RUN_HINT,
     iconRect,
     metricsFor,
@@ -28,7 +29,7 @@
     type BoxVisualState,
   } from '$lib/ui/box-geometry';
   import { flyIconIn } from './absorb';
-  import { boxReducer, initialBoxState, progressFraction, type BoxEvent } from './box-state';
+  import { boxReducer, initialBoxState, progressFraction, undoOutcome, type BoxEvent } from './box-state';
 
   /**
    * How long the first-run hint stays once the box is back on screen after
@@ -41,9 +42,9 @@
   /** Unfreeze a handoff that Rust never followed up on. */
   const HANDOFF_TIMEOUT_MS = 8000;
   /**
-   * The picture taken over with `box:collapse` is confirmed once its icon is
-   * decoded and two frames passed after the box is shown (a hidden window
-   * paints nothing); should that take longer, it is confirmed anyway.
+   * A picture taken on for a handoff is confirmed once its icon is decoded
+   * and two frames passed with the box on screen (a hidden window paints
+   * nothing); should that take longer, it is confirmed anyway.
    */
   const PAINT_TIMEOUT_MS = 250;
 
@@ -199,21 +200,23 @@
     if (!id) return;
     undoId = null;
     play('click');
+    let outcome: BoxEvent;
     try {
-      await commands.restore({ type: 'entry', id });
+      outcome = undoOutcome(await commands.restore({ type: 'entry', id }));
     } catch (e) {
-      send({ type: 'error', message: errorText(e) });
-      play('error');
+      outcome = { type: 'error', message: `Couldn't undo: ${errorText(e)}` };
     }
+    send(outcome);
+    play(outcome.type === 'error' ? 'error' : 'success');
   }
 
   // ---- timers ---------------------------------------------------------------
   $effect(() => {
-    const { name, epoch } = box;
+    const { name, epoch, message } = box;
     if (name !== 'celebrate' && name !== 'error') return;
     const t = setTimeout(
       () => send({ type: 'settled', epoch }),
-      dur(name === 'celebrate' ? CELEBRATE_MS : ERROR_MS * 1.6, 'hold'),
+      name === 'celebrate' ? dur(CELEBRATE_MS, 'hold') : errorLifetime(message, dur(ERROR_HOLD_MS, 'hold')),
     );
     return () => clearTimeout(t);
   });
@@ -234,7 +237,10 @@
     }
   }
 
-  /** Tells Rust the collapse picture is on screen: the editor's proxy may go. */
+  /**
+   * Tells Rust the picture taken on for a handoff is on screen: the editor
+   * may show its proxy over it (open) or let its proxy go (close).
+   */
   async function confirmPainted({ session, decoded }: { session: number; decoded: Promise<void> }): Promise<void> {
     const deadline = performance.now() + PAINT_TIMEOUT_MS;
     let timer: ReturnType<typeof setTimeout> | undefined;
@@ -283,6 +289,13 @@
           else if (f.phase === 'error') play('error');
         }),
         on('box:progress', (p) => send({ type: 'progress', done: p.done, total: p.total })),
+        on('box:handoff', (h) => {
+          // The editor opens over the (visible) box: freeze on the picture
+          // its proxy draws — the one a drop or click already froze on, or
+          // a new one when the open came from elsewhere.
+          send({ type: 'openRequested', icon: h.icon, count: h.count });
+          void confirmPainted({ session: h.session, decoded: iconDecoded() });
+        }),
         on('box:collapse', (c) => {
           send({ type: 'collapse', then: c.then, icon: c.icon });
           collapsePicture = { session: c.session, decoded: iconDecoded() };
@@ -376,6 +389,7 @@
         compat={s.compatibilityMode}
         reducedMotion={motion.reduced}
         {hint}
+        message={box.name === 'error' ? box.message : null}
       />
     {/if}
   </div>

@@ -11,8 +11,9 @@ use tauri::{AppHandle, Emitter, Manager, Runtime};
 use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind};
 
 use crate::state::AppState;
+use crate::windows::rules::{self, Toggle};
 use crate::windows::{box_window, morph, raw};
-use crate::{items, log, restore, tray};
+use crate::{items, log, restore};
 
 fn spawn<R: Runtime>(
     app: &AppHandle<R>,
@@ -39,22 +40,27 @@ pub fn box_error<R: Runtime>(app: &AppHandle<R>, message: &str) {
     );
 }
 
+/// Opens the editor (blocking); a failure shakes the box with the reason.
+fn open_blocking<R: Runtime>(app: &AppHandle<R>, items: Vec<ItemInfo>, view: EditorView) {
+    if let Err(e) = morph::open(app, items, view) {
+        log::line(&format!("open editor failed: {e}"));
+        box_error(app, &e);
+    }
+}
+
+/// Closes the editor (blocking); a failed handoff still ends closed.
+fn close_blocking<R: Runtime>(app: &AppHandle<R>, then: CollapseThen) {
+    if let Err(e) = morph::close(app, then, None) {
+        log::line(&format!("close editor failed: {e}"));
+    }
+}
+
 pub fn open_editor<R: Runtime>(app: &AppHandle<R>, items: Vec<ItemInfo>, view: EditorView) {
-    spawn(app, "open", move |app| {
-        if let Err(e) = morph::open(&app, items, view) {
-            log::line(&format!("open editor failed: {e}"));
-            box_error(&app, &e);
-        }
-    });
+    spawn(app, "open", move |app| open_blocking(&app, items, view));
 }
 
 pub fn close_editor<R: Runtime>(app: &AppHandle<R>, then: CollapseThen) {
-    spawn(app, "close", move |app| {
-        if let Err(e) = morph::close(&app, then, None) {
-            log::line(&format!("close editor failed: {e}"));
-            morph::force_hide(&app);
-        }
-    });
+    spawn(app, "close", move |app| close_blocking(&app, then));
 }
 
 /// Inspects paths (Explorer verb / second instance) and opens them.
@@ -65,11 +71,9 @@ pub fn open_paths<R: Runtime>(app: &AppHandle<R>, paths: Vec<PathBuf>) {
             box_error(&app, "Nothing Reskin can open there");
             return;
         }
+        // The user asked for Reskin: bring the box back to open out of it.
         set_box_hidden(&app, false);
-        if let Err(e) = morph::open(&app, infos, EditorView::Edit) {
-            log::line(&format!("open paths failed: {e}"));
-            box_error(&app, &e);
-        }
+        open_blocking(&app, infos, EditorView::Edit);
     });
 }
 
@@ -78,11 +82,7 @@ pub fn open_system_icon<R: Runtime>(app: &AppHandle<R>, id: SystemIconId) {
         app,
         "open-sys",
         move |app| match items::system_icon_blocking(&app, id) {
-            Ok(info) => {
-                if let Err(e) = morph::open(&app, vec![info], EditorView::Edit) {
-                    box_error(&app, &e);
-                }
-            }
+            Ok(info) => open_blocking(&app, vec![info], EditorView::Edit),
             Err(e) => {
                 log::line(&format!("system icon {id:?}: {e}"));
                 box_error(&app, &e);
@@ -91,37 +91,29 @@ pub fn open_system_icon<R: Runtime>(app: &AppHandle<R>, id: SystemIconId) {
     );
 }
 
-/// Hotkey / tray click: close the editor if open, else show/hide the box.
+/// Hotkey / tray click: close the editor if open, else show/hide the box —
+/// or, while a fullscreen app keeps the box hidden, open the editor.
 pub fn toggle_box<R: Runtime>(app: &AppHandle<R>) {
     spawn(app, "toggle", move |app| {
         let state = app.state::<AppState>();
-        if state.morph.phase() == morph::Phase::Open {
-            let _ = morph::close(&app, CollapseThen::Hide, None);
-            return;
-        }
         let visible = app
             .get_webview_window(box_window::LABEL)
-            .map(|w| raw::is_visible(raw::hwnd_of(&w)))
-            .unwrap_or(false);
-        set_box_hidden(&app, visible);
+            .is_some_and(|w| raw::is_visible(raw::hwnd_of(&w)));
+        match rules::toggle(state.morph.phase(), state.hidden_for_fullscreen(), visible) {
+            Toggle::CloseEditor => close_blocking(&app, CollapseThen::Hide),
+            Toggle::Nothing => {}
+            Toggle::OpenEditor => open_blocking(&app, vec![], EditorView::Start),
+            Toggle::SetHidden(hidden) => set_box_hidden(&app, hidden),
+        }
     });
 }
 
 /// Shows or hides the box on the user's behalf (remembered until changed).
+/// While the editor is open this only records the wish: the close honours
+/// it. A fullscreen app keeps the box hidden either way.
 pub fn set_box_hidden<R: Runtime>(app: &AppHandle<R>, hidden: bool) {
-    let state = app.state::<AppState>();
-    state.set_box_hidden_by_user(hidden);
-    if let Some(w) = app.get_webview_window(box_window::LABEL) {
-        let h = raw::hwnd_of(&w);
-        if hidden {
-            raw::hide(h);
-        } else if !state.hidden_for_fullscreen() {
-            raw::show_no_activate(h);
-            raw::set_topmost(h, true);
-            let _ = app.emit_to(box_window::LABEL, "box:shown", ());
-        }
-    }
-    tray::refresh(app, !hidden);
+    app.state::<AppState>().set_box_hidden_by_user(hidden);
+    morph::settle_box(app);
 }
 
 pub fn restore_all_interactive<R: Runtime>(app: &AppHandle<R>) {

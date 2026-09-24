@@ -809,6 +809,24 @@ pub struct BoxProgress {
     pub total: u32,
 }
 
+/// `box:handoff`: sent to the visible box as the editor starts to open over
+/// it. The box takes on the picture the editor's proxy draws — the first
+/// item's icon with a badge for more than one item, or the empty box — and
+/// confirms with `box_painted(session)` once it shows it (an open the box
+/// asked for finds it on that picture already).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(TS), ts(export))]
+#[serde(rename_all = "camelCase")]
+pub struct BoxHandoff {
+    /// Box session: numbers every picture handed to the box (`box:handoff`,
+    /// `box:collapse`), apart from the editor's handoff sessions.
+    pub session: u32,
+    /// Data URL of the first item's icon.
+    pub icon: Option<String>,
+    /// Number of items opening.
+    pub count: u32,
+}
+
 /// `box:collapse`: sent to the still hidden box once the editor has
 /// collapsed onto its proxy. The box takes on the proxy's final picture
 /// (the empty box after `Hide`, `icon` after `Fly` / `Celebrate`) so that it
@@ -817,6 +835,7 @@ pub struct BoxProgress {
 #[cfg_attr(feature = "ts", derive(TS), ts(export))]
 #[serde(rename_all = "camelCase")]
 pub struct BoxCollapse {
+    /// Box session (see `BoxHandoff::session`).
     pub session: u32,
     pub then: CollapseThen,
     /// Data URL of the icon the box carries (as in `EditorCmd::Collapse`).
@@ -852,7 +871,9 @@ pub enum EditorCmd {
     /// ack `Prepared`. The window is still hidden.
     Prepare {
         session: u32,
-        box_rect: Rect,
+        /// Where the box is; `None` while it is hidden: no proxy, the panel
+        /// fades in (`morph` is false then).
+        box_rect: Option<Rect>,
         items: Vec<ItemInfo>,
         view: EditorView,
         /// Settings snapshot (the editor may have been warm for a while).
@@ -1015,6 +1036,27 @@ mod tests {
             serde_json::to_string(&b).unwrap(),
             r#"{"session":2,"then":"celebrate","icon":null}"#
         );
+        let h = BoxHandoff {
+            session: 3,
+            icon: None,
+            count: 2,
+        };
+        assert_eq!(
+            serde_json::to_string(&h).unwrap(),
+            r#"{"session":3,"icon":null,"count":2}"#
+        );
+        // A hidden box: no rect to draw the proxy at.
+        let p: EditorCmd = serde_json::from_value(serde_json::json!({
+            "type": "prepare",
+            "session": 4,
+            "boxRect": null,
+            "items": [],
+            "view": "start",
+            "settings": Settings::default(),
+            "morph": false
+        }))
+        .unwrap();
+        assert!(matches!(p, EditorCmd::Prepare { box_rect: None, .. }));
         let o = ApplyOutcome::NeedsElevation {
             ticket: "t".into(),
             reason: "r".into(),

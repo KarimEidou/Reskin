@@ -242,6 +242,27 @@ test.describe('adjust', () => {
     return before;
   }
 
+  test('pixel sizes follow the document: a pixel-art icon gets its own range and default', async ({ page }) => {
+    await openEditor(page);
+    await openTab(page, 'adjust');
+    const radius = page.getByTestId('adjust-editor').getByRole('slider', { name: 'Radius' });
+    // The 512 px master: the blur's own range.
+    await page.locator('[data-filter="blur"]').click();
+    await expect(radius).toHaveAttribute('max', '64');
+    await expect(radius).toHaveValue('4');
+    await page.getByTestId('adjust-cancel').click();
+    // A 32 px pixel-art grid: 4 px of 512 is a quarter pixel, so the smallest
+    // blur there is (half a pixel), within a range scaled the same way.
+    await page.evaluate(() => (globalThis as any).__reskinSession.engine.setPixelArt(32));
+    await page.locator('[data-filter="blur"]').click();
+    await expect(radius).toHaveAttribute('max', '4');
+    await expect(radius).toHaveValue('0.5');
+    await page.getByTestId('adjust-cancel').click();
+    // A block of one pixel would change nothing.
+    await page.locator('[data-filter="pixelate"]').click();
+    await expect(page.getByTestId('adjust-editor').getByRole('slider', { name: 'Block size' })).toHaveValue('2');
+  });
+
   test('a live preview, Apply keeps it as one step, Ctrl+Z restores exactly', async ({ page }) => {
     const before = await startInvert(page);
     // The preview is on the canvas, not in the history, until it is applied.
@@ -506,6 +527,24 @@ test.describe('stickers', () => {
 });
 
 test.describe('history', () => {
+  test('Undo keeps keyboard focus when nothing is left to undo', async ({ page }) => {
+    await openEditor(page);
+    await page.getByTestId('add-layer').click();
+    await openTab(page, 'history');
+    const undo = page.getByTestId('history-panel').getByRole('button', { name: 'Undo' });
+    await undo.focus();
+    await page.keyboard.press('Enter');
+    await expect.poll(async () => (await layers(page)).length).toBe(1);
+    // Unavailable now, and still where the keyboard is.
+    await expect(undo).toHaveAttribute('aria-disabled', 'true');
+    await expect(undo).toBeFocused();
+    // Pressing it again does nothing; Redo is the next stop.
+    await page.keyboard.press('Enter');
+    expect((await history(page)).canRedo).toBe(true);
+    await page.keyboard.press('Tab');
+    await expect(page.getByTestId('history-panel').getByRole('button', { name: 'Redo' })).toBeFocused();
+  });
+
   test('lists every step and jumps back and forth', async ({ page }) => {
     await openEditor(page);
     await page.getByTestId('add-layer').click();

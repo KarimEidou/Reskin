@@ -8,6 +8,7 @@ pub mod mailbox;
 pub mod monitors;
 pub mod morph;
 pub mod raw;
+pub mod rules;
 pub mod webview2;
 
 use tauri::{AppHandle, Manager, Runtime, utils::config::WindowConfig};

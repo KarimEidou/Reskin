@@ -14,7 +14,7 @@
   import Button from '$lib/ui/Button.svelte';
   import ColorSwatch from '$lib/ui/ColorSwatch.svelte';
   import IconButton from '$lib/ui/IconButton.svelte';
-  import NumField from '../common/NumField.svelte';
+  import NumberField from '$lib/ui/NumberField.svelte';
   import Select from '$lib/ui/Select.svelte';
   import Toggle from '$lib/ui/Toggle.svelte';
   import { toast } from '$lib/ui/toasts.svelte';
@@ -169,10 +169,10 @@
 
     <div class="entry">
       <div class="hex"><HexInput value={current} label="Hex" onchange={(c) => set(c, true)} /></div>
-      <NumField label="R" value={Math.round(current.r)} min={0} max={255} width="44px" onchange={(v) => setChannel('r', v)} />
-      <NumField label="G" value={Math.round(current.g)} min={0} max={255} width="44px" onchange={(v) => setChannel('g', v)} />
-      <NumField label="B" value={Math.round(current.b)} min={0} max={255} width="44px" onchange={(v) => setChannel('b', v)} />
-      <NumField label="A" value={Math.round(current.a * 100)} min={0} max={100} width="44px" onchange={(v) => setChannel('a', v)} />
+      <NumberField label="R" value={Math.round(current.r)} min={0} max={255} width="44px" onchange={(v) => setChannel('r', v)} />
+      <NumberField label="G" value={Math.round(current.g)} min={0} max={255} width="44px" onchange={(v) => setChannel('g', v)} />
+      <NumberField label="B" value={Math.round(current.b)} min={0} max={255} width="44px" onchange={(v) => setChannel('b', v)} />
+      <NumberField label="A" value={Math.round(current.a * 100)} min={0} max={100} width="44px" onchange={(v) => setChannel('a', v)} />
     </div>
   </Section>
 

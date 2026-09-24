@@ -25,14 +25,12 @@
   import PencilLine from '@lucide/svelte/icons/pencil-line';
   import SquareDashedMousePointer from '@lucide/svelte/icons/square-dashed-mouse-pointer';
   import { BLEND_MODES, type BlendMode, type SelectionOp } from '$engine/index';
-  import Button from '$lib/ui/Button.svelte';
   import IconButton from '$lib/ui/IconButton.svelte';
   import Menu from '$lib/ui/Menu.svelte';
+  import NumberField from '$lib/ui/NumberField.svelte';
   import Select from '$lib/ui/Select.svelte';
   import Slider from '$lib/ui/Slider.svelte';
   import Tooltip from '$lib/ui/Tooltip.svelte';
-  import NumField from '../common/NumField.svelte';
-  import ToolButton from '../common/ToolButton.svelte';
   import { getSession } from '../../state/context';
   import { watchDpr } from '../common/canvas';
   import PixelThumb from '../common/PixelThumb.svelte';
@@ -302,14 +300,10 @@
   <div class="toolbar" role="toolbar" aria-label="Layer actions">
     <IconButton label="New layer" icon={Plus} size="sm" onclick={() => engine.addLayer()} data-testid="add-layer" />
     <IconButton label="New text layer" icon={Type} size="sm" onclick={addText} data-testid="add-text" />
-    <ToolButton label="Duplicate layer" icon={Copy} size="sm" disabled={!active} onclick={() => active && engine.duplicateLayer(active.id)} data-testid="duplicate-layer" />
-    <ToolButton label="Delete layer" icon={Trash2} size="sm" disabled={!active || rows.length < 2} onclick={() => active && remove(active.id)} data-testid="delete-layer" />
+    <IconButton label="Duplicate layer" icon={Copy} size="sm" focusableWhenDisabled disabled={!active} onclick={() => active && engine.duplicateLayer(active.id)} data-testid="duplicate-layer" />
+    <IconButton label="Delete layer" icon={Trash2} size="sm" focusableWhenDisabled disabled={!active || rows.length < 2} onclick={() => active && remove(active.id)} data-testid="delete-layer" />
     <span class="spacer"></span>
-    <Menu label="More layer actions" items={menuItems} placement="bottom-end" onselect={onMenu}>
-      {#snippet trigger(props)}
-        <Button {...props} variant="ghost" size="sm" icon={Ellipsis} aria-label="More layer actions" title="More layer actions" />
-      {/snippet}
-    </Menu>
+    <Menu label="More layer actions" iconOnly icon={Ellipsis} size="sm" items={menuItems} placement="bottom-end" onselect={onMenu} />
   </div>
 
   {#if active}
@@ -339,7 +333,7 @@
             engine.setLayerProps(active.id, { opacity: v / 100 }, { merge: 'opacity' });
           }}
         />
-        <NumField
+        <NumberField
           label="Opacity"
           hideLabel
           value={Math.round(active.opacity * 100)}

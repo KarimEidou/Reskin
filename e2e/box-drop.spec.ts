@@ -7,7 +7,7 @@ import { fileURLToPath } from 'node:url';
 import type { Page } from '@playwright/test';
 import { PNG } from 'pngjs';
 import type { BoxSkin } from '../src/lib/ipc/types';
-import { iconRect, metricsFor, visualRect } from '../src/lib/ui/box-geometry';
+import { FIRST_RUN_HINT, iconRect, metricsFor, visualRect } from '../src/lib/ui/box-geometry';
 import {
   calls,
   editorState,
@@ -20,6 +20,7 @@ import {
   SAMPLE_PATHS,
   setInspectDelay,
   setSettings,
+  settings as backendSettings,
   simulateBoxReturn,
   simulateClose,
   simulateOpen,
@@ -421,6 +422,119 @@ test.describe('events from Rust', () => {
     expect(painted).toBeGreaterThan(m.visual * m.visual * 0.5);
     expect(differing).toBe(0);
     await editor.close();
+  });
+
+  test('an open from elsewhere freezes the box on exactly the picture the editor draws, then confirms it', async ({
+    openBox,
+    page,
+    context,
+  }) => {
+    const box = await openBox();
+    const m = metricsFor('medium');
+    const region = { x: 0, y: 0, width: m.window, height: m.window };
+    // Explorer opened two items (no drop, no click): Rust hands the box the
+    // picture the editor's proxy will draw, then prepares the editor.
+    const editor = await context.newPage();
+    await openPage(editor, 'editor');
+    const items = await makeItems(editor, [SAMPLE_PATHS.steam, SAMPLE_PATHS.notes]);
+    await emit(page, 'box:handoff', { session: 4, icon: items[0]!.icon, count: 2 });
+    await waitForCall(page, 'box_painted', { session: 4 });
+    await expect(box.icon).toHaveAttribute('src', items[0]!.icon!);
+    await expect(box.badge).toHaveText('2');
+    // Frozen on it: no lift, no arming.
+    await box.hit.hover();
+    await box.expectState('idle');
+    await box.dragEnter([SAMPLE_PATHS.site]);
+    await box.expectState('idle');
+    await box.pointerAway();
+    await box.expectStatic();
+    const shown = PNG.sync.read(await page.screenshot({ clip: region, omitBackground: true }));
+
+    await pushEditorCmd(editor, {
+      type: 'prepare',
+      session: 1,
+      boxRect: { x: 0, y: 0, w: m.window, h: m.window },
+      items,
+      view: 'edit',
+      settings: await backendSettings(editor),
+      morph: true,
+    });
+    expect(await waitForAck(editor, 1, 'prepared')).toBe(true);
+    const proxy = PNG.sync.read(await editor.screenshot({ clip: region, omitBackground: true }));
+
+    let differing = 0;
+    let painted = 0;
+    for (let i = 0; i < proxy.data.length; i += 4) {
+      const d = Math.max(...[0, 1, 2, 3].map((c) => Math.abs(proxy.data[i + c]! - shown.data[i + c]!)));
+      if (d > 8) differing++;
+      if (shown.data[i + 3]! > 0) painted++;
+    }
+    expect(painted).toBeGreaterThan(m.visual * m.visual * 0.5);
+    expect(differing).toBe(0);
+    await editor.close();
+  });
+
+  test('the first-run welcome opens over the plain box: the hint gives way, and returns after', async ({ openBox, page }) => {
+    const box = await openBox({ firstRun: true });
+    const hint = box.visual.locator('.hint');
+    await expect(hint).toHaveText(FIRST_RUN_HINT);
+    // The welcome's proxy draws the empty box without a hint.
+    await emit(page, 'box:handoff', { session: 1, icon: null, count: 0 });
+    await waitForCall(page, 'box_painted', { session: 1 });
+    await expect(hint).toHaveCount(0);
+    await expect(box.icon).toHaveCount(0);
+    // "Got it" collapses the welcome back into the box: the hint is back.
+    const back = await simulateBoxReturn(page, 'hide');
+    expect(back.painted).toBe(true);
+    await expect(hint).toHaveText(FIRST_RUN_HINT);
+  });
+
+  test('a shake says why: the message shows inside the box until it has been read', async ({ openBox, page }) => {
+    // Compatibility mode: the window is clipped to the visual box.
+    const box = await openBox({ settings: { compatibilityMode: true } });
+    await box.flight('error', null, 'Nothing Reskin can open there');
+    const message = box.visual.locator('.hint.message');
+    await expect(message).toHaveText('Nothing Reskin can open there');
+    await expect(box.root.getByRole('status')).toHaveText('Nothing Reskin can open there');
+    const vb = (await box.visual.locator('.box').boundingBox())!;
+    const mb = (await message.boundingBox())!;
+    expect(mb.x).toBeGreaterThanOrEqual(vb.x);
+    expect(mb.y).toBeGreaterThanOrEqual(vb.y);
+    expect(mb.x + mb.width).toBeLessThanOrEqual(vb.x + vb.width);
+    expect(mb.y + mb.height).toBeLessThanOrEqual(vb.y + vb.height);
+    // Long after the shake itself is over, the message is still there.
+    await page.waitForTimeout(1500);
+    await box.expectState('error');
+    await expect(message).toBeVisible();
+    await box.expectState('idle', 5000);
+    await expect(message).toHaveCount(0);
+  });
+
+  test('Undo: the box celebrates once the icon is back, or shakes saying why not', async ({ openBox, page }) => {
+    const box = await openBox();
+    // An apply the backend journaled (box:undo carries its history entry).
+    const id = await page.evaluate(async (path) => {
+      type Invoke = (cmd: string, args?: unknown) => Promise<unknown>;
+      const invoke = (window as unknown as { __TAURI_INTERNALS__: { invoke: Invoke } }).__TAURI_INTERNALS__.invoke;
+      const [item] = (await invoke('inspect_paths', { paths: [path] })) as Array<{ id: string; icon: string }>;
+      const png = item!.icon.split(',')[1]!;
+      const outcome = (await invoke('apply_icon', {
+        req: { item: item!.id, images: [{ size: 256, png }], designName: null, mode: 'inPlace', flourish: false, updatePins: false },
+      })) as { entries: Array<{ id: string }> };
+      return outcome.entries[0]!.id;
+    }, SAMPLE_PATHS.steam);
+    await emit(page, 'box:undo', id);
+    await box.undo.click();
+    await box.waitForVisualState('celebrate');
+    await box.pointerAway();
+    await box.expectState('idle');
+
+    // An entry the backend does not know: the restore fails.
+    await emit(page, 'box:undo', 'h-missing');
+    await box.undo.click();
+    await box.expectState('error');
+    await expect(box.visual.locator('.hint.message')).toHaveText("Couldn't undo: no history entry h-missing");
+    await expect(box.root.getByRole('status')).toHaveText("Couldn't undo: no history entry h-missing");
   });
 
   test('box:undo offers Undo, which restores the entry', async ({ openBox, page }) => {

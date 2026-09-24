@@ -9,7 +9,12 @@ import type { Settings } from "./Settings";
 /**
  * Commands delivered to the editor through `editor_next`.
  */
-export type EditorCmd = { "type": "prepare", session: number, boxRect: Rect, items: Array<ItemInfo>, view: EditorView, 
+export type EditorCmd = { "type": "prepare", session: number, 
+/**
+ * Where the box is; `None` while it is hidden: no proxy, the panel
+ * fades in (`morph` is false then).
+ */
+boxRect: Rect | null, items: Array<ItemInfo>, view: EditorView, 
 /**
  * Settings snapshot (the editor may have been warm for a while).
  */

@@ -381,6 +381,38 @@ test.describe('crossfade fallback', () => {
     expect((await transitions(page)).at(-1)).toBe('crossfade');
   });
 
+  test('a hidden box leaves no proxy: only the panel fades in', async ({ openEditor, page }) => {
+    await openEditor();
+    await recordTransitions(page);
+    // Record every proxy that ever appears.
+    await page.evaluate(() => {
+      const w = window as unknown as { __proxies: number };
+      w.__proxies = 0;
+      new MutationObserver(() => {
+        if (document.querySelector('[data-testid="box-proxy"]')) w.__proxies++;
+      }).observe(document.body, { subtree: true, childList: true });
+    });
+    const [item] = await makeItems(page, [SAMPLE_PATHS.steam]);
+    await pushEditorCmd(page, {
+      type: 'prepare',
+      session: 1,
+      boxRect: null,
+      items: [item!],
+      view: 'edit',
+      settings: await backendSettings(page),
+      morph: false,
+    });
+    expect(await waitForAck(page, 1, 'prepared')).toBe(true);
+    await expect(frame(page)).toHaveAttribute('data-mode', 'hidden');
+    await pushEditorCmd(page, { type: 'reveal', session: 1 });
+    expect(await waitForAck(page, 1, 'revealed')).toBe(true);
+    await pushEditorCmd(page, { type: 'expand', session: 1, morph: false });
+    expect(await waitForAck(page, 1, 'expanded')).toBe(true);
+    await expect(frame(page)).toHaveAttribute('data-mode', 'open');
+    expect(await transitions(page)).toEqual(['crossfade']);
+    expect(await page.evaluate(() => (window as unknown as { __proxies: number }).__proxies)).toBe(0);
+  });
+
   test('reduced motion crossfades', async ({ openEditor, page }) => {
     await openEditor({ settings: { motion: 'reduced' } });
     await recordTransitions(page);

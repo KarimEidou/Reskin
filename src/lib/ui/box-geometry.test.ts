@@ -4,6 +4,8 @@ import {
   collapseItems,
   FIRST_RUN_HINT,
   handoffProps,
+  errorLifetime,
+  ERROR_HOLD_MS,
   iconRect,
   ICON_FRACTION,
   RING_GAP,
@@ -116,12 +118,27 @@ describe('box geometry', () => {
       compat: false,
       reducedMotion: true,
       hint: null,
+      message: null,
     });
     // A click handoff (start view) shows the empty box; the first-run
     // welcome collapses onto the hint the box then shows.
     expect(handoffProps(settings, [], false)).toMatchObject({ icon: null, count: 0, hint: null });
     expect(handoffProps(settings, [], false, undefined, FIRST_RUN_HINT).hint).toBe(FIRST_RUN_HINT);
     expect(handoffProps(settings, items, false, undefined, FIRST_RUN_HINT).hint).toBeNull();
+  });
+
+  it('keeps the error look for as long as its message takes to read', () => {
+    // Without a message: just the error look (scaled by the caller).
+    expect(errorLifetime(null, ERROR_HOLD_MS)).toBe(ERROR_HOLD_MS);
+    expect(errorLifetime('', 300)).toBe(300);
+    // A message stays long enough to read, longer the longer it is…
+    const short = errorLifetime('Nothing Reskin can open there', ERROR_HOLD_MS);
+    const long = errorLifetime("Couldn't undo: Firefox — the shortcut is read-only", ERROR_HOLD_MS);
+    expect(short).toBeGreaterThanOrEqual(2500);
+    expect(long).toBeGreaterThan(short);
+    // …but never for ever, and never shorter than the look itself.
+    expect(errorLifetime('x'.repeat(1000), ERROR_HOLD_MS)).toBe(6000);
+    expect(errorLifetime('x', 9000)).toBe(9000);
   });
 
   it('describes what the box holds at the end of a close handoff', () => {

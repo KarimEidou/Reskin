@@ -7,7 +7,11 @@ import type { CollapseThen } from "./CollapseThen";
  * (the empty box after `Hide`, `icon` after `Fly` / `Celebrate`) so that it
  * is shown under an identical picture, then confirms with `box_painted`.
  */
-export type BoxCollapse = { session: number, then: CollapseThen, 
+export type BoxCollapse = { 
+/**
+ * Box session (see `BoxHandoff::session`).
+ */
+session: number, then: CollapseThen, 
 /**
  * Data URL of the icon the box carries (as in `EditorCmd::Collapse`).
  */
