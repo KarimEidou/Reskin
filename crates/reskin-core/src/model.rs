@@ -809,6 +809,20 @@ pub struct BoxProgress {
     pub total: u32,
 }
 
+/// `box:collapse`: sent to the still hidden box once the editor has
+/// collapsed onto its proxy. The box takes on the proxy's final picture
+/// (the empty box after `Hide`, `icon` after `Fly` / `Celebrate`) so that it
+/// is shown under an identical picture, then confirms with `box_painted`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(TS), ts(export))]
+#[serde(rename_all = "camelCase")]
+pub struct BoxCollapse {
+    pub session: u32,
+    pub then: CollapseThen,
+    /// Data URL of the icon the box carries (as in `EditorCmd::Collapse`).
+    pub icon: Option<String>,
+}
+
 // ---------------------------------------------------------------------------
 // Editor mailbox (Rust -> editor), acks (editor -> Rust)
 // ---------------------------------------------------------------------------
@@ -992,6 +1006,15 @@ mod tests {
                 ..
             }
         ));
+        let b = BoxCollapse {
+            session: 2,
+            then: CollapseThen::Celebrate,
+            icon: None,
+        };
+        assert_eq!(
+            serde_json::to_string(&b).unwrap(),
+            r#"{"session":2,"then":"celebrate","icon":null}"#
+        );
         let o = ApplyOutcome::NeedsElevation {
             ticket: "t".into(),
             reason: "r".into(),

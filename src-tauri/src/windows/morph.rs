@@ -1,10 +1,11 @@
 //! The box ⇄ editor handoff state machine.
 //!
 //! Invariant: a window hides only when its content is transparent, and a
-//! window shows only on top of an identical picture. Neither window resizes
-//! while visible. The editor draws a proxy of the box (same `BoxVisual`
-//! component) exactly where the real box is, so swapping windows is
-//! invisible; the proxy then morphs into the panel. See
+//! window shows only over an identical picture (the box comes back under
+//! the editor's proxy and paints before the proxy goes). Neither window
+//! resizes while visible. The editor draws a proxy of the box (same
+//! `BoxVisual` component) exactly where the real box is, so swapping
+//! windows is invisible; the proxy then morphs into the panel. See
 //! docs/ARCHITECTURE.md for the message sequence.
 
 use std::collections::HashSet;
@@ -13,8 +14,8 @@ use std::time::{Duration, Instant};
 
 use reskin_core::geom;
 use reskin_core::model::{
-    AckStage, CollapseThen, EditorCmd, EditorView, ItemInfo, MotionPref, OpenStyle, Rect, Settings,
-    editor_size,
+    AckStage, BoxCollapse, CollapseThen, EditorCmd, EditorView, ItemInfo, MotionPref, OpenStyle,
+    Rect, Settings, editor_size,
 };
 use tauri::{AppHandle, Emitter, Manager, PhysicalPosition, PhysicalSize, Runtime, WebviewWindow};
 
@@ -28,6 +29,9 @@ const REVEAL_TIMEOUT: Duration = Duration::from_millis(1500);
 const EXPAND_TIMEOUT: Duration = Duration::from_millis(2500);
 const COLLAPSE_TIMEOUT: Duration = Duration::from_millis(1800);
 const CLEAR_TIMEOUT: Duration = Duration::from_millis(1000);
+/// How long the box may take to show the picture it took over from the
+/// editor's proxy (two frames once it is visible, plus the IPC round trip).
+const BOX_PAINT_TIMEOUT: Duration = Duration::from_millis(300);
 /// The editor page must be polling the mailbox within this long.
 const ALIVE_GRACE: Duration = Duration::from_secs(2);
 
@@ -45,6 +49,8 @@ struct Inner {
     session: u32,
     phase: Phase,
     acks: HashSet<(u32, AckStage)>,
+    /// Latest session whose collapse picture the box confirmed on screen.
+    box_painted: u32,
     /// The box was visible when this session opened (so it morphs back).
     box_was_visible: bool,
 }
@@ -74,22 +80,28 @@ impl Morph {
         self.cv.notify_all();
     }
 
+    /// Records that the box shows the collapse picture of `session`.
+    pub fn box_painted(&self, session: u32) {
+        let mut g = self.lock();
+        g.box_painted = g.box_painted.max(session);
+        drop(g);
+        self.cv.notify_all();
+    }
+
     fn lock(&self) -> std::sync::MutexGuard<'_, Inner> {
         self.inner.lock().unwrap_or_else(|e| e.into_inner())
     }
 
-    fn wait(&self, session: u32, stage: AckStage, timeout: Duration) -> bool {
+    /// Waits until `done` holds or `timeout` elapses; false on timeout.
+    fn wait_until(&self, timeout: Duration, done: impl Fn(&Inner) -> bool) -> bool {
         let deadline = Instant::now() + timeout;
         let mut g = self.lock();
         loop {
-            if g.acks.contains(&(session, stage)) {
+            if done(&g) {
                 return true;
             }
             let now = Instant::now();
             if now >= deadline {
-                log::line(&format!(
-                    "morph: session {session} timed out waiting for {stage:?}"
-                ));
                 return false;
             }
             g = self
@@ -98,6 +110,27 @@ impl Morph {
                 .unwrap_or_else(|e| e.into_inner())
                 .0;
         }
+    }
+
+    fn wait(&self, session: u32, stage: AckStage, timeout: Duration) -> bool {
+        let acked = self.wait_until(timeout, |g| g.acks.contains(&(session, stage)));
+        if !acked {
+            log::line(&format!(
+                "morph: session {session} timed out waiting for {stage:?}"
+            ));
+        }
+        acked
+    }
+
+    /// Waits for the box to confirm the collapse picture of `session`.
+    fn wait_box_painted(&self, session: u32, timeout: Duration) -> bool {
+        let painted = self.wait_until(timeout, |g| g.box_painted >= session);
+        if !painted {
+            log::line(&format!(
+                "morph: session {session}: the box did not confirm its picture in time; clearing anyway"
+            ));
+        }
+        painted
     }
 
     fn set_phase(&self, p: Phase) {
@@ -355,19 +388,38 @@ fn close_inner<R: Runtime>(
         session,
         box_rect: css,
         then,
-        icon,
+        icon: icon.clone(),
         morph: do_morph,
     });
     morph.wait(session, AckStage::Collapsed, COLLAPSE_TIMEOUT);
     if show_box {
-        raw::show_no_activate(bh);
-        raw::set_topmost(bh, true);
+        // The hidden box takes on the picture the editor's proxy ends on,
+        // is shown right under the (still topmost) editor — until it paints
+        // again it may show what it painted before it was hidden — and
+        // confirms once that picture is on screen: a hidden window paints
+        // nothing, so it can only confirm after being shown. Only then may
+        // the proxy go.
+        let _ = app.emit_to(
+            box_window::LABEL,
+            "box:collapse",
+            BoxCollapse {
+                session,
+                then,
+                icon,
+            },
+        );
+        raw::show_below(bh, eh);
         let _ = app.emit_to(box_window::LABEL, "box:shown", ());
+        morph.wait_box_painted(session, BOX_PAINT_TIMEOUT);
     }
     crate::smoke::probe(app, "5-collapsed");
     state.mailbox.push(EditorCmd::Clear { session });
     morph.wait(session, AckStage::Cleared, CLEAR_TIMEOUT);
     let _ = editor.hide();
+    if show_box {
+        // Back on top of the topmost band, where it lives.
+        raw::set_topmost(bh, true);
+    }
     let _ = editor.set_always_on_top(false);
     let _ = editor.set_skip_taskbar(true);
     webview2::set_memory_low(&editor, true);
@@ -411,6 +463,24 @@ mod tests {
         assert!(m.wait(1, AckStage::Prepared, Duration::from_millis(1)));
         assert!(!m.wait(1, AckStage::Revealed, Duration::from_millis(5)));
         assert!(!m.wait(2, AckStage::Prepared, Duration::from_millis(5)));
+    }
+
+    #[test]
+    fn box_painted_wait() {
+        let m = std::sync::Arc::new(Morph::default());
+        assert!(!m.wait_box_painted(1, Duration::from_millis(5)));
+        // A confirmation from another thread wakes the waiting close.
+        let other = m.clone();
+        let t = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(20));
+            other.box_painted(2);
+        });
+        assert!(m.wait_box_painted(2, Duration::from_secs(5)));
+        t.join().unwrap();
+        // A late confirmation for an older session changes nothing.
+        m.box_painted(1);
+        assert!(m.wait_box_painted(2, Duration::from_millis(1)));
+        assert!(!m.wait_box_painted(3, Duration::from_millis(5)));
     }
 
     #[test]

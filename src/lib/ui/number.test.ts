@@ -24,6 +24,15 @@ describe('formatNumber', () => {
     expect(formatNumber(100, 2)).toBe('100');
   });
 
+  it("shows NumberField's whole-number values in full", () => {
+    // NumberField formats with the decimals of its step grid: 0 for step 1.
+    const decimals = rangeDecimals({ min: 0, step: 1 });
+    expect(decimals).toBe(0);
+    expect(formatNumber(100, decimals)).toBe('100');
+    expect(formatNumber(80, decimals)).toBe('80');
+    expect(formatNumber(1000, rangeDecimals({ min: 0, step: 10 }))).toBe('1000');
+  });
+
   it('drops only trailing zeros of the fraction', () => {
     expect(formatNumber(2.5, 2)).toBe('2.5');
     expect(formatNumber(2.05, 2)).toBe('2.05');

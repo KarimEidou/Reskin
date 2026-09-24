@@ -112,6 +112,13 @@ export interface SimulateCloseResult {
   timedOut: AckStage[];
 }
 
+export interface SimulateBoxReturnResult {
+  /** Session number sent with `box:collapse`. */
+  session: number;
+  /** `box_painted` came within Rust's 300 ms. */
+  painted: boolean;
+}
+
 export interface E2EEditorState {
   /** Current (last) handoff session number; 0 before the first open. */
   session: number;
@@ -162,6 +169,12 @@ export interface E2EApi {
   ): Promise<SimulateOpenResult>;
   /** Runs Rust's close handoff: Collapse → collapsed → Clear → cleared. */
   simulateClose(then?: CollapseThen, opts?: SimulateCloseOptions): Promise<SimulateCloseResult>;
+  /**
+   * Box page: the box's part of Rust's close handoff (morph.rs close_inner,
+   * after `collapsed`): `box:collapse` to the hidden box, then show it
+   * (`box:shown`) and wait up to 300 ms for its `box_painted`.
+   */
+  simulateBoxReturn(then?: CollapseThen, icon?: string | null): Promise<SimulateBoxReturnResult>;
   setHeartbeatMs(ms: number): void;
 
   // ---- behaviour knobs -----------------------------------------------------------

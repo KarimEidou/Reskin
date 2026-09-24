@@ -7,7 +7,7 @@
 // `origin` (the window's top-left; pass the proxy's boxRect origin in the
 // editor).
 
-import type { BoxMetrics, ItemInfo, Rect, Settings, SizeClass } from '$lib/ipc/types';
+import type { BoxMetrics, CollapseThen, ItemInfo, Rect, Settings, SizeClass } from '$lib/ipc/types';
 
 export type BoxVisualState =
   | 'idle'
@@ -216,6 +216,16 @@ export function handoffProps(
     reducedMotion,
     hint: items.length === 0 ? hint : null,
   };
+}
+
+/**
+ * What the box holds at the end of a close handoff (pass it to
+ * `handoffProps`): nothing after a plain close, the new icon after an
+ * apply (`fly` / `celebrate`). The editor's proxy collapses onto this
+ * picture and the box takes it over (`box:collapse`) before it is shown.
+ */
+export function collapseItems(then: CollapseThen, icon: string | null): Array<Pick<ItemInfo, 'icon'>> {
+  return then === 'hide' ? [] : [{ icon }];
 }
 
 /**

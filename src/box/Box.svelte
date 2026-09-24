@@ -5,13 +5,13 @@
   `data-ready` (booted and listening) for tests.
 -->
 <script lang="ts">
-  import { onMount } from 'svelte';
+  import { onMount, tick } from 'svelte';
   import { getCurrentWebview } from '@tauri-apps/api/webview';
   import { boot } from '$lib/boot';
   import { commands } from '$lib/ipc/commands';
   import { on } from '$lib/ipc/events';
   import type { BootInfo, ItemInfo } from '$lib/ipc/types';
-  import { doubleRaf } from '$lib/motion/raf';
+  import { doubleRaf, frames } from '$lib/motion/raf';
   import { dur, motion } from '$lib/motion/speed.svelte';
   import { settings } from '$lib/settings/store.svelte';
   import { play } from '$lib/sound/synth';
@@ -40,6 +40,12 @@
   const UNDO_MS = 6000;
   /** Unfreeze a handoff that Rust never followed up on. */
   const HANDOFF_TIMEOUT_MS = 8000;
+  /**
+   * The picture taken over with `box:collapse` is confirmed once its icon is
+   * decoded and two frames passed after the box is shown (a hidden window
+   * paints nothing); should that take longer, it is confirmed anyway.
+   */
+  const PAINT_TIMEOUT_MS = 250;
 
   let info = $state.raw<BootInfo | null>(null);
   let box = $state.raw(initialBoxState);
@@ -51,6 +57,13 @@
   let hintClock = $state(0);
   let undoId = $state<string | null>(null);
   let flyLayer: HTMLDivElement | undefined = $state();
+  let hitEl: HTMLDivElement | undefined = $state();
+  /**
+   * The picture taken over with `box:collapse` while hidden, to confirm once
+   * the box is back on screen: its handoff session and its icon's decoding
+   * (an image not decoded yet paints as nothing).
+   */
+  let collapsePicture: { session: number; decoded: Promise<void> } | null = null;
 
   const s = $derived(settings());
   const metrics = $derived(
@@ -207,9 +220,33 @@
 
   $effect(() => {
     if (!box.handoff) return;
-    const t = setTimeout(() => send({ type: 'shown' }), HANDOFF_TIMEOUT_MS);
+    const t = setTimeout(() => send({ type: 'unfreeze' }), HANDOFF_TIMEOUT_MS);
     return () => clearTimeout(t);
   });
+
+  /** Decodes the icon of the state just sent (once it is in the DOM). */
+  async function iconDecoded(): Promise<void> {
+    await tick();
+    try {
+      await hitEl?.querySelector('img')?.decode();
+    } catch {
+      // A broken image paints as nothing either way; don't hold the handoff.
+    }
+  }
+
+  /** Tells Rust the collapse picture is on screen: the editor's proxy may go. */
+  async function confirmPainted({ session, decoded }: { session: number; decoded: Promise<void> }): Promise<void> {
+    const deadline = performance.now() + PAINT_TIMEOUT_MS;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const ready = await Promise.race([
+      decoded.then(() => true),
+      new Promise<false>((r) => (timer = setTimeout(() => r(false), PAINT_TIMEOUT_MS))),
+    ]);
+    clearTimeout(timer);
+    const { timedOut } = await frames(2, { timeoutMs: Math.max(0, deadline - performance.now()) });
+    if (!ready || timedOut) console.warn(`[box] the picture was not on screen within ${PAINT_TIMEOUT_MS} ms; confirming it anyway`);
+    await commands.boxPainted(session).catch((e: unknown) => console.error('[box] box_painted failed', e));
+  }
 
   $effect(() => {
     if (hint === null || hintClock === 0) return;
@@ -246,9 +283,16 @@
           else if (f.phase === 'error') play('error');
         }),
         on('box:progress', (p) => send({ type: 'progress', done: p.done, total: p.total })),
+        on('box:collapse', (c) => {
+          send({ type: 'collapse', then: c.then, icon: c.icon });
+          collapsePicture = { session: c.session, decoded: iconDecoded() };
+        }),
         on('box:shown', () => {
           send({ type: 'shown' });
           if (showHint) hintClock += 1;
+          const picture = collapsePicture;
+          collapsePicture = null;
+          if (picture) void confirmPainted(picture);
         }),
         on('box:undo', (id) => (undoId = id)),
         getCurrentWebview().onDragDropEvent(({ payload }) => {
@@ -307,6 +351,7 @@
 >
   <div
     class="hit"
+    bind:this={hitEl}
     role="button"
     tabindex="0"
     aria-label={label}

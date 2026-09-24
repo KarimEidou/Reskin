@@ -35,6 +35,7 @@
   let draft = $state('');
   let saving = $state(false);
   let renameInput: HTMLInputElement | undefined = $state();
+  let grid: HTMLUListElement | undefined = $state();
 
   const shown = $derived.by(() => {
     const list = entries ?? [];
@@ -116,7 +117,7 @@
       e.stopPropagation();
       renaming = null;
     }
-    void tick().then(() => card?.querySelector<HTMLElement>('.more-btn')?.focus());
+    void tick().then(() => card?.querySelector<HTMLElement>('.more [aria-haspopup="menu"]')?.focus());
   }
 
   async function remove(entry: LibraryEntry): Promise<void> {
@@ -127,11 +128,18 @@
       danger: true,
     });
     if (!ok) return;
+    const at = shown.findIndex((e) => e.id === entry.id);
     try {
       await commands.libraryDelete(entry.id);
-      releaseFocus();
       toast({ message: `Deleted "${entry.name}".`, kind: 'success' });
       await refresh();
+      await tick();
+      // Focus went with the card (the dialog gave it back to its menu
+      // button): keyboard users continue from the card now in its place.
+      if (document.activeElement === document.body) {
+        const buttons = grid?.querySelectorAll<HTMLElement>('.more [aria-haspopup="menu"]') ?? [];
+        buttons[Math.min(at, buttons.length - 1)]?.focus();
+      }
     } catch (e) {
       toast({ message: `Could not delete: ${errorText(e)}`, kind: 'error' });
     }
@@ -146,12 +154,6 @@
     }
   }
 
-  /** Drops focus from a card before the list re-renders (see ViewHost). */
-  function releaseFocus(): void {
-    const active = document.activeElement;
-    if (active instanceof HTMLElement && active.closest('[data-testid="library-card"]')) active.blur();
-  }
-
   function menuFor(): MenuEntry[] {
     return [
       { id: 'open', label: 'Open', icon: FolderOpen },
@@ -163,7 +165,6 @@
   }
 
   function onMenu(entry: LibraryEntry, id: string): void {
-    if (id !== 'rename') releaseFocus();
     if (id === 'open') void open(entry);
     else if (id === 'apply') void applyToCurrent(entry);
     else if (id === 'rename') void startRename(entry);
@@ -212,7 +213,7 @@
   {:else if shown.length === 0}
     <p class="none" role="status">No designs match “{query}”.</p>
   {:else}
-    <ul class="grid" data-stagger>
+    <ul class="grid" data-stagger bind:this={grid}>
       {#each shown as entry (entry.id)}
         <li class="card" data-testid="library-card">
           <button type="button" class="open" onclick={() => open(entry)} aria-label="Open {entry.name}">
@@ -235,15 +236,15 @@
             <span class="sub" title={fullDate(entry.updatedAt)}>{timeAgo(entry.updatedAt)} · {formatBytes(entry.bytes)}</span>
           </div>
           <div class="more">
-            <!-- Own trigger: the stock icon-only trigger swaps its tooltip
-                 wrapper while focused, which Svelte rejects mid-update. -->
-            <Menu items={menuFor()} label="More actions for {entry.name}" placement="bottom-end" onselect={(id) => onMenu(entry, id)}>
-              {#snippet trigger(props)}
-                <button type="button" class="more-btn" {...props} aria-label="More actions for {entry.name}" title="More actions">
-                  <Ellipsis size={16} aria-hidden="true" />
-                </button>
-              {/snippet}
-            </Menu>
+            <Menu
+              items={menuFor()}
+              label="More actions for {entry.name}"
+              iconOnly
+              icon={Ellipsis}
+              size="sm"
+              placement="bottom-end"
+              onselect={(id) => onMenu(entry, id)}
+            />
           </div>
         </li>
       {/each}
@@ -377,28 +378,9 @@
     right: var(--space-1-5);
     bottom: var(--space-2-5, 10px);
   }
-  .more-btn {
-    display: grid;
-    place-items: center;
-    width: var(--control-sm);
-    height: var(--control-sm);
-    padding: 0;
-    border: 0;
-    border-radius: var(--radius-sm);
-    background: transparent;
-    color: var(--text-3);
-    transition:
-      background-color var(--fade-1) linear,
-      color var(--fade-1) linear;
-  }
-  .more-btn:hover,
-  .more-btn[aria-expanded='true'] {
+  .more :global(.icon-btn[aria-expanded='true']) {
     background: var(--surface-hover);
     color: var(--text);
-  }
-  .more-btn:focus-visible {
-    outline: var(--focus-width) solid var(--focus-color);
-    outline-offset: 1px;
   }
   .none {
     margin: 0;

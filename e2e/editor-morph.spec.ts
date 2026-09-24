@@ -26,7 +26,7 @@ import {
 
 const SHOTS_DIR = join(dirname(fileURLToPath(import.meta.url)), '__screenshots__');
 
-const frame = (page: Page) => page.locator('.frame');
+const frame = (page: Page) => page.getByTestId('morph-frame');
 
 /** Waits until the opened item's design is loaded (it switches to Edit when done). */
 const designLoaded = (page: Page) =>
@@ -58,7 +58,7 @@ async function recordTransitions(page: Page): Promise<void> {
   await page.evaluate(() => {
     const seen: string[] = [];
     (window as unknown as { __transitions: string[] }).__transitions = seen;
-    const el = document.querySelector('.frame')!;
+    const el = document.querySelector('[data-testid="morph-frame"]')!;
     new MutationObserver(() => {
       const v = el.getAttribute('data-transition');
       if (v) seen.push(v);
@@ -272,6 +272,83 @@ test.describe('handoff protocol', () => {
     await expect.poll(async () => (await editorState(page)).phase).toBe('closed');
   });
 
+  test('Escape used by a window listener added after the App does not close', async ({ openEditor, page }) => {
+    await openEditor();
+    await simulateOpen(page, [], 'start');
+    // Like the canvas stage, whose window listeners come with the Edit view
+    // (long after the App's): it uses the key and calls preventDefault.
+    await page.evaluate(() =>
+      window.addEventListener('keydown', (e) => e.key === 'Escape' && e.preventDefault(), { once: true }),
+    );
+    await page.keyboard.press('Escape');
+    await page.waitForTimeout(150);
+    expect(await calls(page, 'editor_close')).toHaveLength(0);
+    // The next Escape nothing uses closes the editor.
+    await page.keyboard.press('Escape');
+    await waitForCall(page, 'editor_close', { reason: 'user' });
+  });
+
+  test('Escape during a brush stroke cancels the stroke, not the editor', async ({ openEditor, page }) => {
+    await openEditor();
+    await simulateOpen(page, [SAMPLE_PATHS.steam], 'edit');
+    await designLoaded(page);
+    const canvas = page.getByTestId('canvas');
+    const r = (await canvas.boundingBox())!;
+    await page.keyboard.press('b');
+    await page.mouse.move(r.x + r.width / 2, r.y + r.height / 2);
+    await page.mouse.down();
+    await page.mouse.move(r.x + r.width / 2 + 40, r.y + r.height / 2 + 30, { steps: 4 });
+    const interacting = () =>
+      page.evaluate(() => (window as unknown as { __reskinSession: { engine: { isInteracting: boolean } } }).__reskinSession.engine.isInteracting);
+    expect(await interacting()).toBe(true);
+    await page.keyboard.press('Escape');
+    expect(await interacting()).toBe(false);
+    await page.mouse.up();
+    await page.waitForTimeout(150);
+    expect(await calls(page, 'editor_close')).toHaveLength(0);
+    await expect(frame(page)).toHaveAttribute('data-mode', 'open');
+  });
+
+  test('Escape never closes over a pending move, wherever focus is', async ({ openEditor, page }) => {
+    await openEditor();
+    await simulateOpen(page, [SAMPLE_PATHS.steam], 'edit');
+    await designLoaded(page);
+    await page.getByTestId('tool-move').click();
+    const r = (await page.getByTestId('canvas').boundingBox())!;
+    await page.mouse.move(r.x + r.width / 2, r.y + r.height / 2);
+    await page.mouse.down();
+    await page.mouse.move(r.x + r.width / 2 + 40, r.y + r.height / 2, { steps: 4 });
+    await page.mouse.up();
+    const pending = () =>
+      page.evaluate(() => (window as unknown as { __reskinSession: { engine: { hasPending: boolean } } }).__reskinSession.engine.hasPending);
+    expect(await pending()).toBe(true);
+
+    // Focus in a non-modal overlay that has no use for Escape: the canvas
+    // leaves the key alone there, and nothing else says it was used.
+    await page.evaluate(() => {
+      const overlay = document.createElement('div');
+      overlay.setAttribute('role', 'dialog');
+      overlay.setAttribute('aria-label', 'Probe');
+      overlay.innerHTML = '<button type="button">Probe</button>';
+      document.body.append(overlay);
+      overlay.querySelector('button')!.focus();
+    });
+    await page.keyboard.press('Escape');
+    await page.waitForTimeout(150);
+    expect(await calls(page, 'editor_close')).toHaveLength(0);
+    expect(await pending()).toBe(true);
+
+    // On the canvas Escape cancels the move; only the next one closes.
+    await page.getByRole('dialog', { name: 'Probe' }).evaluate((el) => el.remove());
+    await page.getByTestId('canvas').focus();
+    await page.keyboard.press('Escape');
+    await expect.poll(pending).toBe(false);
+    await page.waitForTimeout(150);
+    expect(await calls(page, 'editor_close')).toHaveLength(0);
+    await page.keyboard.press('Escape');
+    await waitForCall(page, 'editor_close', { reason: 'user' });
+  });
+
   test('Escape is left to an open dialog or text field first', async ({ openEditor, page }) => {
     await openEditor();
     await simulateOpen(page, [], 'library');
@@ -359,7 +436,85 @@ test.describe('stale sessions', () => {
   });
 });
 
+test.describe('landing', () => {
+  test('the box icon settles exactly on the document on the canvas', async ({ openEditor, page }) => {
+    await openEditor();
+    const boxRect = { x: 1080, y: 520, w: 148, h: 148 };
+    await prepare(page, 1, boxRect);
+    // The workspace is mounted (Expand waits only briefly for a slow item).
+    await designLoaded(page);
+    await pushEditorCmd(page, { type: 'reveal', session: 1 });
+    expect(await waitForAck(page, 1, 'revealed')).toBe(true);
+    // Hold the icon's flight as it starts (on a busy machine the whole
+    // flight can pass between two polls).
+    await page.evaluate(() => {
+      const animate = Element.prototype.animate;
+      Element.prototype.animate = function (this: Element, ...args: Parameters<Element['animate']>) {
+        const animation = animate.apply(this, args);
+        if (this.matches('img.flyer')) animation.pause();
+        return animation;
+      };
+    });
+    await pushEditorCmd(page, { type: 'expand', session: 1, morph: true });
+    await page.waitForFunction(() => (document.querySelector('img.flyer')?.getAnimations().length ?? 0) > 0);
+    // Hold every animation at its end: where the icon lands.
+    await freezeAt(page, 1);
+    const landed = (await page.locator('img.flyer').boundingBox())!;
+    const doc = (await page.getByTestId('canvas-stage').locator('.doc-overlay').boundingBox())!;
+    expect(doc.width).toBeGreaterThan(100);
+    expect(Math.abs(landed.x - doc.x)).toBeLessThanOrEqual(1);
+    expect(Math.abs(landed.y - doc.y)).toBeLessThanOrEqual(1);
+    expect(Math.abs(landed.width - doc.width)).toBeLessThanOrEqual(1);
+    expect(Math.abs(landed.height - doc.height)).toBeLessThanOrEqual(1);
+    await page.evaluate(() => document.getAnimations().forEach((a) => a.play()));
+    expect(await waitForAck(page, 1, 'expanded')).toBe(true);
+  });
+
+  test('the workspace regions enter one after another', async ({ openEditor, page }) => {
+    await openEditor();
+    await prepare(page, 1, { x: 1080, y: 520, w: 148, h: 148 });
+    await designLoaded(page);
+    await pushEditorCmd(page, { type: 'reveal', session: 1 });
+    expect(await waitForAck(page, 1, 'revealed')).toBe(true);
+    // Record the regions' entrances as they start (polling could miss them).
+    type Entered = { __entered?: Array<{ panel: string; delay: number }> };
+    await page.evaluate(() => {
+      const entered: Array<{ panel: string; delay: number }> = [];
+      (window as Entered).__entered = entered;
+      const animate = Element.prototype.animate;
+      Element.prototype.animate = function (this: Element, ...args: Parameters<Element['animate']>) {
+        const animation = animate.apply(this, args);
+        const panel = this instanceof HTMLElement ? this.dataset.panel : undefined;
+        if (panel) entered.push({ panel, delay: Number(animation.effect?.getTiming().delay ?? 0) });
+        return animation;
+      };
+    });
+    await pushEditorCmd(page, { type: 'expand', session: 1, morph: true });
+    expect(await waitForAck(page, 1, 'expanded')).toBe(true);
+    const list = await page.evaluate(() => (window as Entered).__entered!);
+    expect(list.map((d) => d.panel)).toEqual(['rail', 'options', 'stage', 'sidebar', 'bottom']);
+    for (let i = 1; i < list.length; i++) expect(list[i]!.delay).toBeGreaterThan(list[i - 1]!.delay);
+  });
+});
+
 test.describe('mailbox commands', () => {
+  test('a slow handoff step keeps the mailbox polling without acknowledging it', async ({ openEditor, page }) => {
+    // Half speed: the expand runs about a second (Rust takes a mailbox
+    // silent for 2 s for a dead page).
+    await openEditor({ settings: { animationSpeed: 0.5 } });
+    await prepare(page, 1, { x: 1080, y: 520, w: 148, h: 148 });
+    await pushEditorCmd(page, { type: 'reveal', session: 1 });
+    expect(await waitForAck(page, 1, 'revealed')).toBe(true);
+    const start = await page.evaluate(() => performance.now());
+    const seq = await pushEditorCmd(page, { type: 'expand', session: 1, morph: true });
+    expect(await waitForAck(page, 1, 'expanded')).toBe(true);
+    const acked = (await page.evaluate(() => window.__e2e!.acks)).find((a) => a.stage === 'expanded')!.t;
+    const during = (await calls(page, 'editor_next')).filter((c) => c.t > start && c.t < acked);
+    expect(acked - start).toBeGreaterThan(700);
+    expect(during.length).toBeGreaterThanOrEqual(1);
+    for (const poll of during) expect(poll.args.after).toBeLessThan(seq);
+  });
+
   test('navigate, addItems and settings reach the open editor', async ({ openEditor, page }) => {
     await openEditor();
     await simulateOpen(page, [SAMPLE_PATHS.steam], 'edit');

@@ -81,7 +81,21 @@
       node.removeEventListener('cancel', onCancel);
       node.removeEventListener('keydown', onKey);
       node.removeEventListener('click', onClick);
-      if (node.open) node.close();
+      if (!node.open) return;
+      // Removed while open (e.g. its question was answered): a close too,
+      // but focus went with the removed content. Give it back once the
+      // teardown is over (focus handlers may write state), unless something
+      // else took it meanwhile.
+      node.close();
+      const back = restoreFocus;
+      restoreFocus = null;
+      if (back) {
+        queueMicrotask(() => {
+          if (back.isConnected && (document.activeElement === document.body || document.activeElement === null)) {
+            back.focus();
+          }
+        });
+      }
     };
   }
 </script>

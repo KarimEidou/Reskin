@@ -3,21 +3,25 @@
   routes every EditorCmd: the handoff commands go through MorphController
   (which drives MorphFrame: the box proxy ⇄ the panel), the rest to the
   session / shell. Mounts the chrome, the views, the dialogs, the command
-  palette and the global keyboard handling.
+  palette and the global keyboard handling (Escape closes the editor, an
+  image pasted outside the canvas becomes part of the design).
 -->
 <script lang="ts">
-  import { onMount, type Component } from 'svelte';
+  import { onMount, tick, type Component } from 'svelte';
+  import { decodeImage } from '$engine/dom';
+  import type { Surface } from '$engine/index';
   import { boot } from '$lib/boot';
   import { commands } from '$lib/ipc/commands';
   import { startMailbox } from '$lib/ipc/mailbox';
-  import type { EditorCmd, ItemId, Settings } from '$lib/ipc/types';
-  import { doubleRaf } from '$lib/motion/raf';
+  import type { EditorCmd, ItemId, Rect, Settings } from '$lib/ipc/types';
+  import { doubleRaf, nextFrame } from '$lib/motion/raf';
   import { motion } from '$lib/motion/speed.svelte';
   import { applySettingsFromMailbox, settings, updateSettings } from '$lib/settings/store.svelte';
   import { currentTheme } from '$lib/theme/theme';
-  import { handoffProps } from '$lib/ui/box-geometry';
+  import { collapseItems, handoffProps } from '$lib/ui/box-geometry';
   import ToastHost from '$lib/ui/ToastHost.svelte';
   import { clearToasts, toast } from '$lib/ui/toasts.svelte';
+  import { afterAllListeners } from './chrome/last-listener';
   import { Shell, setShell } from './chrome/shell.svelte';
   import TitleBar from './chrome/TitleBar.svelte';
   import { answerConfirm } from './dialogs/confirm.svelte';
@@ -35,10 +39,12 @@
   } from './morph/MorphController';
   import { createCommands, type CommandContext } from './palette/commands';
   import { installKeyboard } from './palette/dispatcher';
+  import { isTypingTarget } from './palette/keys';
   import { createSession, setSession } from './state/context';
   import { errorText } from './state/session.svelte';
   import { preloadViews } from './views/lazy.svelte';
   import ViewHost from './views/ViewHost.svelte';
+  import { stage } from './workspace/stage.svelte';
 
   const session = setSession(createSession());
   const shell = setShell(new Shell(session));
@@ -52,6 +58,8 @@
   let recoveryPending: Promise<string | null> | null = null;
 
   const s = $derived(settings());
+
+  const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
 
   // ---- lazily loaded overlays --------------------------------------------------
   let Palette = $state<Component<{ open?: boolean; commands: typeof registry; ctx: CommandContext }> | null>(null);
@@ -130,8 +138,9 @@
 
   async function collapse(cmd: CollapseCmd): Promise<void> {
     closeTransient();
-    // Plain close: the box comes back empty; after an apply it carries the new icon.
-    const items = cmd.then === 'hide' ? [] : [{ icon: cmd.icon }];
+    // Plain close: the box comes back empty; after an apply it carries the
+    // new icon. The box takes this very picture over (box:collapse).
+    const items = collapseItems(cmd.then, cmd.icon);
     const props = cmd.morph ? handoffProps(settings(), items, motion.reduced) : null;
     await frame?.collapse(cmd.boxRect, props, cmd.morph && !motion.reduced);
   }
@@ -140,6 +149,30 @@
     closeTransient();
     frame?.clear();
     clearToasts();
+  }
+
+  /** How long Expand waits for the opened item to reach the canvas. */
+  const LANDING_WAIT_MS = 250;
+
+  /**
+   * Where the box's icon settles at the end of the open morph: the document
+   * on the canvas. The item loads while the proxy is prepared and revealed;
+   * when it is not on the canvas yet, this waits a little for it (the
+   * workspace mounts with the design and sizes its canvas on the next
+   * frame). Null outside the Edit view, or when the item takes longer.
+   */
+  async function landing(): Promise<Rect | null> {
+    if (session.view !== 'edit') return null;
+    const deadline = performance.now() + LANDING_WAIT_MS;
+    await Promise.race([shell.idle(), sleep(LANDING_WAIT_MS)]);
+    await tick();
+    for (;;) {
+      const r = stage.docRect();
+      if (r) return { x: r.x, y: r.y, w: r.width, h: r.height };
+      const left = deadline - performance.now();
+      if (left <= 0 || !session.hasDesign) return null;
+      await nextFrame({ timeoutMs: left });
+    }
   }
 
   /** Fetches the lazily loaded parts while nothing else is going on. */
@@ -162,7 +195,8 @@
     surface: {
       prepare,
       expand: async (m) => {
-        await frame?.expand(m && !motion.reduced);
+        const morph = m && !motion.reduced;
+        await frame?.expand(morph, morph ? await landing() : null);
       },
       collapse,
       clear,
@@ -176,9 +210,102 @@
     onIssue: (issue) => console.warn(`[morph] ${issue.step} ${issue.kind} (session ${issue.session})`, issue.error ?? ''),
   });
 
+  // ---- Escape and paste ----------------------------------------------------------
+  // Both are decided after every other listener (./chrome/last-listener.ts):
+  // whatever uses the key or the paste calls preventDefault (or stops it) —
+  // dialogs, popovers and menus, the canvas (a drag, a pending transform, a
+  // text edit, a lasso polygon, an image pasted as a layer) and the
+  // sidebar's panel editors — and many of them listen on the window, where
+  // they come after the App's own listeners.
+
+  /**
+   * The Escape keydown on its way. The keyboard dispatcher leaves it alone
+   * (it would decide before the listeners added after it): closeOnEscape
+   * decides instead.
+   */
+  let escapeKey: KeyboardEvent | null = null;
+  /**
+   * The engine had a gesture, a pending transform or a text edit when that
+   * Escape went down: the key is for it, even if what settles it on the
+   * way does not say so (or nothing on the way handles it, e.g. focus in a
+   * non-modal overlay).
+   */
+  let escapeForEngine = false;
+
+  /** Window capture, before any other keydown listener. */
+  function trackEscape(e: KeyboardEvent): void {
+    escapeKey = e.key === 'Escape' ? e : null;
+    if (!escapeKey) return;
+    const engine = session.engine;
+    escapeForEngine = engine.hasPending || engine.isInteracting || engine.textEditLayerId !== null;
+  }
+
+  const modalOpen = () => document.querySelector('dialog:modal') !== null;
+
+  /** The event's target keeps the key / the paste (text entry, the hotkey recorder). */
+  function keptByTarget(e: Event): boolean {
+    const target = e.target instanceof Element ? e.target : null;
+    return !!target && (isTypingTarget(target) || target.closest('[data-capture-keys]') !== null);
+  }
+
+  /** Escape nothing else used closes the editor (the collapse handoff). */
+  function closeOnEscape(e: KeyboardEvent): void {
+    if (e.key !== 'Escape' || e.defaultPrevented || e.repeat || e.isComposing) return;
+    if (!shell.interactive || escapeForEngine || modalOpen() || keptByTarget(e)) return;
+    e.preventDefault();
+    void session.requestClose().catch((err: unknown) => console.error('[editor] close failed', err));
+  }
+
+  function pastedImage(data: DataTransfer | null): File | null {
+    if (!data) return null;
+    for (const item of data.items) {
+      if (item.kind === 'file' && item.type.startsWith('image/')) return item.getAsFile();
+    }
+    return null;
+  }
+
+  /**
+   * An image pasted where nothing took it (the canvas adds pasted images
+   * itself): it joins the open design as a layer, or starts a design.
+   */
+  function pasteImage(e: ClipboardEvent): void {
+    if (e.defaultPrevented || !shell.interactive || modalOpen() || keptByTarget(e)) return;
+    const file = pastedImage(e.clipboardData);
+    if (!file) return;
+    e.preventDefault();
+    void importPasted(file);
+  }
+
+  /** The design an image joins (null: it starts one). */
+  const openDesign = () => (session.hasDesign ? session.engine.doc : null);
+
+  async function importPasted(file: File): Promise<void> {
+    const design = openDesign();
+    let surface: Surface;
+    try {
+      surface = await decodeImage(file);
+    } catch (e) {
+      toast({ message: `Couldn't read the pasted image: ${errorText(e)}`, kind: 'error' });
+      return;
+    }
+    // The editor closed, or another design opened, while decoding.
+    if (!shell.interactive || openDesign() !== design) return;
+    const fresh = design === null;
+    if (fresh) session.newBlank();
+    const starter = fresh ? session.engine.doc.layers[0] : undefined;
+    session.importSurface(surface);
+    if (fresh) {
+      // Like an opened image: the design is the picture, with nothing to undo.
+      if (starter && session.engine.doc.layers.length > 1) session.engine.deleteLayer(starter.id);
+      session.engine.clearHistory();
+    }
+    shell.navigate('edit');
+  }
+
   // ---- smoke test -----------------------------------------------------------------
 
-  const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
+  /** The SmokeCycle running (see onCommand); a second one waits for it. */
+  let smokeRun: Promise<void> = Promise.resolve();
 
   /** Waits until `item` is in the queue with its design loaded. */
   async function waitForItem(item: ItemId, timeoutMs: number): Promise<void> {
@@ -243,7 +370,10 @@
         applySettingsFromMailbox(cmd.settings);
         break;
       case 'smokeCycle':
-        await smokeCycle(cmd.item);
+        // Long work (an item load, an apply and a restore) must never hold
+        // the mailbox: Rust takes a page whose mailbox is silent for 2 s for
+        // dead. The cycle reports through smoke_ready.
+        smokeRun = smokeRun.then(() => smokeCycle(cmd.item));
         break;
       case 'heartbeat':
         break;
@@ -253,12 +383,17 @@
   onMount(() => {
     let stop: (() => void) | null = null;
     let disposed = false;
+    // Added before the dispatcher's listeners, so it sees every keydown first.
+    window.addEventListener('keydown', trackEscape, true);
+    const uninstallEscape = afterAllListeners(window, 'keydown', closeOnEscape, (e) => e.key === 'Escape');
+    const uninstallPaste = afterAllListeners(window, 'paste', pasteImage);
     const uninstallKeys = installKeyboard({
       commands: registry,
       ctx: () => ctx,
-      active: () => shell.interactive,
+      active: () => shell.interactive && escapeKey === null,
       engine: () => session.engine,
-      onEscape: () => void session.requestClose().catch((e: unknown) => console.error('[editor] close failed', e)),
+      // Never called: Escape is not active for the dispatcher (closeOnEscape).
+      onEscape: () => {},
       onError: (cmd, e) => toast({ message: `${cmd.label} failed: ${errorText(e)}`, kind: 'error' }),
     });
 
@@ -280,6 +415,9 @@
 
     return () => {
       disposed = true;
+      window.removeEventListener('keydown', trackEscape, true);
+      uninstallEscape();
+      uninstallPaste();
       uninstallKeys();
       stop?.();
       session.dispose();

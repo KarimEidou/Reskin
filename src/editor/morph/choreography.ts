@@ -251,13 +251,17 @@ export function cancelOn(elements: ReadonlyArray<Element | null | undefined>): v
   }
 }
 
+/** Marks the regions that enter one after another (document order). */
+const STAGGER_SELECTOR = '[data-stagger], [data-panel]';
+
 /**
- * The regions that stagger in: `[data-stagger]` elements, or — for views
- * that don't mark any — the view's top-level children.
+ * The regions that stagger in: `[data-stagger]` elements and the Edit
+ * view's `[data-panel]` regions (rail, options, stage, sidebar, bottom), or
+ * — for views that mark none — the view's top-level children.
  */
 export function staggerTargets(content: HTMLElement, view: HTMLElement | null): HTMLElement[] {
   const visible = (el: HTMLElement) => el.getClientRects().length > 0;
-  const marked = [...content.querySelectorAll<HTMLElement>('[data-stagger]')].filter(visible);
+  const marked = [...content.querySelectorAll<HTMLElement>(STAGGER_SELECTOR)].filter(visible);
   const inView = view ? marked.filter((el) => view.contains(el)) : [];
   if (view && inView.length === 0) {
     // Unmarked view: use its children (descending through single wrappers).
@@ -270,17 +274,13 @@ export function staggerTargets(content: HTMLElement, view: HTMLElement | null): 
 }
 
 /**
- * Where the icon lands on the canvas: `[data-morph-target]` (the workspace
- * marks its canvas stage) fitted like the document (24 px padding), or the
- * view's centre as a fallback.
+ * Where the icon lands at the end of the open morph: exactly on the
+ * document (`landing`, the canvas stage's document rect), or — when no
+ * canvas shows the icon — a square in the middle of the view.
  */
-export function iconTarget(content: HTMLElement, view: HTMLElement | null, iconSize: number): Rect {
-  const target = content.querySelector<HTMLElement>('[data-morph-target]');
-  const r = (target ?? view ?? content).getBoundingClientRect();
-  if (target) {
-    const side = Math.max(iconSize, Math.min(r.width, r.height) - 48);
-    return { x: r.left + (r.width - side) / 2, y: r.top + (r.height - side) / 2, w: side, h: side };
-  }
+export function iconTarget(landing: Rect | null, view: HTMLElement, iconSize: number): Rect {
+  if (landing) return { x: landing.x, y: landing.y, w: landing.w, h: landing.h };
+  const r = view.getBoundingClientRect();
   const side = Math.max(iconSize, Math.min(r.width, r.height) * 0.42);
   return { x: r.left + (r.width - side) / 2, y: r.top + (r.height - side) / 2, w: side, h: side };
 }

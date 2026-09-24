@@ -1,4 +1,7 @@
 import { describe, expect, it } from 'vitest';
+import type { CollapseThen } from '$lib/ipc/types';
+import { defaultSettings } from '$lib/settings/defaults';
+import { collapseItems, handoffProps } from '$lib/ui/box-geometry';
 import { boxReducer, initialBoxState, progressFraction, type BoxEvent, type BoxState } from './box-state';
 
 const run = (events: BoxEvent[], from: BoxState = initialBoxState) => events.reduce(boxReducer, from);
@@ -111,6 +114,60 @@ describe('boxReducer', () => {
   it('resets everything on box:shown but keeps the epoch monotonic', () => {
     const s = run([{ type: 'drop', count: 2 }, { type: 'inspectDone', icon: 'x', count: 2 }, { type: 'shown' }]);
     expect(s).toEqual({ ...initialBoxState, epoch: 1 });
+  });
+
+  describe('the close handoff (box:collapse, then box:shown)', () => {
+    /** The box handed over a dropped icon to the editor (frozen on it). */
+    const handedOver = run([{ type: 'drop', count: 2 }, { type: 'inspectDone', icon: 'data:dropped', count: 2 }, { type: 'openRequested' }]);
+    const collapse = (then: CollapseThen, icon: string | null) => boxReducer(handedOver, { type: 'collapse', then, icon });
+
+    it("takes over the picture the editor's proxy collapsed onto", () => {
+      for (const [then, icon] of [
+        ['hide', 'data:new'],
+        ['fly', 'data:new'],
+        ['celebrate', 'data:new'],
+        ['fly', null],
+      ] as const) {
+        const s = collapse(then, icon);
+        // Exactly what App renders the proxy from (handoffProps of collapseItems).
+        const proxy = handoffProps(defaultSettings(), collapseItems(then, icon), false);
+        expect(s).toMatchObject({ name: proxy.state, icon: proxy.icon, count: proxy.count, handoff: true });
+        expect(s.epoch).toBe(handedOver.epoch);
+      }
+      // A plain close never shows the dropped icon (nor the new one).
+      expect(collapse('hide', 'data:new')).toMatchObject({ icon: null, count: 0 });
+    });
+
+    it('box:shown keeps the picture: a plain close rests on it', () => {
+      const shown = boxReducer(collapse('hide', null), { type: 'shown' });
+      expect(shown).toMatchObject({ name: 'idle', icon: null, count: 0, handoff: false, collapsed: null });
+      expect(boxReducer(shown, { type: 'pointerEnter' }).name).toBe('hover');
+    });
+
+    it('box:shown keeps the new icon, frozen until the flight carries it on', () => {
+      const shown = boxReducer(collapse('fly', 'data:new'), { type: 'shown' });
+      expect(shown).toMatchObject({ name: 'idle', icon: 'data:new', handoff: true });
+      expect(run([{ type: 'pointerEnter' }, { type: 'dragEnter', count: 1 }], shown)).toMatchObject({ name: 'idle', icon: 'data:new' });
+      const depart = boxReducer(shown, { type: 'flight', phase: 'depart', icon: 'data:new' });
+      expect(depart).toMatchObject({ name: 'flying', icon: 'data:new', handoff: false });
+      const land = boxReducer(depart, { type: 'flight', phase: 'land', icon: 'data:new' });
+      expect(land).toMatchObject({ name: 'celebrate', handoff: false });
+      expect(boxReducer(land, { type: 'flight', phase: 'return' }).name).toBe('flying');
+      // A flight leg without an icon carries the one taken over.
+      expect(boxReducer(shown, { type: 'flight', phase: 'celebrate', icon: null })).toMatchObject({
+        name: 'celebrate',
+        icon: 'data:new',
+      });
+    });
+
+    it('a picture the flight never follows up on is dropped by the unfreeze', () => {
+      const shown = boxReducer(collapse('celebrate', 'data:new'), { type: 'shown' });
+      expect(boxReducer(shown, { type: 'unfreeze' })).toEqual({ ...initialBoxState, epoch: shown.epoch });
+    });
+
+    it('a flight without an icon does not bring back an icon that was not handed over', () => {
+      expect(boxReducer(handedOver, { type: 'flight', phase: 'depart', icon: null }).icon).toBeNull();
+    });
   });
 
   it('drops the handoff picture when the window gets hidden', () => {

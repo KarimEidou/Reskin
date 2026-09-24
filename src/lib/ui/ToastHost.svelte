@@ -2,7 +2,8 @@
   Renders the toast stack (bottom centre). Mount once per page. Hovering or
   focusing the stack pauses auto-dismissal. The stack is a persistent polite
   live region (a live region inserted together with its text is often not
-  announced), so info/success toasts are read politely; warnings and errors
+  announced), so every toast is read as it arrives. Each toast carries its
+  own role: info/success toasts are status messages, warnings and errors
   are alerts.
 -->
 <script lang="ts">
@@ -54,7 +55,7 @@
     {@const Icon = ICONS[t.kind]}
     <div
       class="toast kind-{t.kind}"
-      role={t.kind === 'error' || t.kind === 'warning' ? 'alert' : undefined}
+      role={t.kind === 'error' || t.kind === 'warning' ? 'alert' : 'status'}
       animate:flip={{ duration: dur(220) }}
       in:fly={{ y: 14, duration: dur(260), opacity: 0 }}
       out:fade={{ duration: dur(160, 'fade') }}

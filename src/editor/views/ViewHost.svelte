@@ -31,7 +31,8 @@
   });
 
   // Release focus before the old view is torn down: a focused element that
-  // disappears fires focusout mid-update (Tooltip writes state there).
+  // disappears fires focusout mid-update, where a field committing its
+  // draft on blur would write state.
   let host: HTMLDivElement | undefined = $state();
   $effect.pre(() => {
     void shown;

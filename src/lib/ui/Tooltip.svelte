@@ -5,7 +5,9 @@
   on leave, blur, press or Escape. The wrapper is `display: contents`, so it
   does not affect layout. While shown, the trigger is described by the
   tooltip (aria-describedby) unless `describe` is false — turn that off
-  when the text merely repeats the trigger's accessible name.
+  when the text merely repeats the trigger's accessible name. `disabled`
+  turns the tooltip off without touching the trigger (keep the Tooltip
+  mounted rather than unwrapping a trigger that may have focus).
 -->
 <script lang="ts">
   import type { Snippet } from 'svelte';
@@ -40,6 +42,8 @@
   let anchor: HTMLSpanElement | undefined = $state();
   let open = $state(false);
   let timer: ReturnType<typeof setTimeout> | undefined;
+  /** False once torn down: a late blur must not write state any more. */
+  let alive = true;
 
   /** The element to position against: the trigger itself. */
   const target = () => (anchor?.firstElementChild as HTMLElement | null) ?? null;
@@ -52,7 +56,21 @@
 
   function hide(): void {
     clearTimeout(timer);
-    open = false;
+    if (alive && open) open = false;
+  }
+
+  /**
+   * Focus left the trigger. When the trigger is being removed (its block is
+   * torn down) the browser fires focusout in the middle of Svelte's update,
+   * where writing state is forbidden; so this settles right after the
+   * update — and does nothing if the tooltip went away with its trigger,
+   * or focus came straight back.
+   */
+  function blurred(): void {
+    clearTimeout(timer);
+    queueMicrotask(() => {
+      if (!anchor?.contains(document.activeElement)) hide();
+    });
   }
 
   // Listeners are attached here rather than in the markup: the wrapper is a
@@ -72,15 +90,16 @@
     node.addEventListener('pointerleave', hide);
     node.addEventListener('pointerdown', hide);
     node.addEventListener('focusin', focusIn);
-    node.addEventListener('focusout', hide);
+    node.addEventListener('focusout', blurred);
     node.addEventListener('keydown', key);
     return () => {
+      alive = false;
       clearTimeout(timer);
       node.removeEventListener('pointerenter', enter);
       node.removeEventListener('pointerleave', hide);
       node.removeEventListener('pointerdown', hide);
       node.removeEventListener('focusin', focusIn);
-      node.removeEventListener('focusout', hide);
+      node.removeEventListener('focusout', blurred);
       node.removeEventListener('keydown', key);
     };
   }

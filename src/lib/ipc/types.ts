@@ -5,6 +5,7 @@ export type { ApplyMode } from './bindings/ApplyMode';
 export type { ApplyOutcome } from './bindings/ApplyOutcome';
 export type { ApplyRequest } from './bindings/ApplyRequest';
 export type { BootInfo } from './bindings/BootInfo';
+export type { BoxCollapse } from './bindings/BoxCollapse';
 export type { BoxFlight } from './bindings/BoxFlight';
 export type { BoxMetrics } from './bindings/BoxMetrics';
 export type { BoxProgress } from './bindings/BoxProgress';

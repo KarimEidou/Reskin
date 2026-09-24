@@ -6,6 +6,7 @@ const COMMANDS: &[&str] = &[
     "box_drag",
     "box_menu",
     "open_editor",
+    "box_painted",
     "editor_next",
     "editor_ack",
     "editor_close",

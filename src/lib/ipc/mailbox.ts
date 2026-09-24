@@ -13,7 +13,14 @@
 // * heartbeats reach the handler too, so the page can track liveness;
 // * a failing `editor_next` is retried with exponential backoff
 //   (50 ms → 2 s), reset after the next successful poll;
-// * a throwing handler is reported and skipped; it never stalls the queue.
+// * a throwing handler is reported and skipped; it never stalls the queue;
+// * the page never looks dead while a handler runs: Rust recreates an
+//   editor whose mailbox has been silent for 2 s (morph.rs ALIVE_GRACE), so
+//   a handler that takes longer than `keepAliveMs` gets keep-alive polls
+//   every `keepAliveMs`. They poll from the last *handled* envelope, so they
+//   acknowledge nothing (the envelope being handled is still queued, and
+//   Rust answers at once); their answers are dropped — the loop fetches
+//   those envelopes again once the handler is done.
 
 import { commands } from './commands';
 import type { EditorCmd, Envelope } from './types';
@@ -33,6 +40,8 @@ export interface MailboxOptions {
   onPollError?: (error: unknown, retryInMs: number) => void;
   /** Called when a handler throws or rejects (default: console.error). */
   onHandlerError?: (error: unknown, envelope: Envelope) => void;
+  /** Keep-alive poll interval while a handler runs (default 500 ms). */
+  keepAliveMs?: number;
   /** Timer used between retries; injectable for tests. */
   sleep?: (ms: number, signal: AbortSignal) => Promise<void>;
 }
@@ -48,6 +57,8 @@ export interface MailboxHandle {
 
 export const MAILBOX_MIN_BACKOFF_MS = 50;
 export const MAILBOX_MAX_BACKOFF_MS = 2000;
+/** Well under Rust's 2 s liveness grace, with room for a slow IPC round trip. */
+export const MAILBOX_KEEPALIVE_MS = 500;
 
 function abortableSleep(ms: number, signal: AbortSignal): Promise<void> {
   return new Promise((resolve) => {
@@ -71,6 +82,7 @@ export function startMailbox(handler: MailboxHandler, opts: MailboxOptions = {})
   const minBackoff = opts.minBackoffMs ?? MAILBOX_MIN_BACKOFF_MS;
   const maxBackoff = Math.max(minBackoff, opts.maxBackoffMs ?? MAILBOX_MAX_BACKOFF_MS);
   const sleep = opts.sleep ?? abortableSleep;
+  const keepAliveMs = opts.keepAliveMs ?? MAILBOX_KEEPALIVE_MS;
   const onHandlerError =
     opts.onHandlerError ??
     ((error: unknown, env: Envelope) =>
@@ -79,6 +91,31 @@ export function startMailbox(handler: MailboxHandler, opts: MailboxOptions = {})
   const abort = new AbortController();
   let after = opts.after ?? 0;
   let backoff = minBackoff;
+
+  /** Polls every `keepAliveMs` until `finished` aborts (see the guarantees above). */
+  async function keepAlive(finished: AbortSignal): Promise<void> {
+    for (;;) {
+      await abortableSleep(keepAliveMs, finished);
+      if (finished.aborted) return;
+      try {
+        await next(after);
+      } catch {
+        // The loop's own next poll reports (and retries) a broken mailbox.
+      }
+    }
+  }
+
+  async function handle(envelope: Envelope): Promise<void> {
+    const handled = new AbortController();
+    void keepAlive(AbortSignal.any([abort.signal, handled.signal]));
+    try {
+      await handler(envelope.cmd, envelope.seq);
+    } catch (error) {
+      onHandlerError(error, envelope);
+    } finally {
+      handled.abort();
+    }
+  }
 
   async function run(): Promise<void> {
     while (!abort.signal.aborted) {
@@ -102,11 +139,7 @@ export function startMailbox(handler: MailboxHandler, opts: MailboxOptions = {})
       for (const envelope of ordered) {
         if (abort.signal.aborted) return;
         if (envelope.seq <= after) continue;
-        try {
-          await handler(envelope.cmd, envelope.seq);
-        } catch (error) {
-          onHandlerError(error, envelope);
-        }
+        await handle(envelope);
         // Advance only after handling so the next poll acknowledges it.
         after = envelope.seq;
       }
