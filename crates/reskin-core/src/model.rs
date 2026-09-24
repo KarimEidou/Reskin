@@ -851,9 +851,12 @@ pub enum EditorCmd {
     Reveal {
         session: u32,
     },
-    /// The real box is hidden: morph the proxy into the panel, ack `Expanded`.
+    /// The real box is hidden: morph the proxy into the panel (or, when
+    /// `morph` is false because `Prepared` came too late, crossfade the
+    /// panel in), then ack `Expanded`.
     Expand {
         session: u32,
+        morph: bool,
     },
     /// Collapse into a proxy at `box_rect`, ack `Collapsed`.
     Collapse {
@@ -862,6 +865,9 @@ pub enum EditorCmd {
         then: CollapseThen,
         /// Icon the box should carry (for `Fly`).
         icon: Option<String>,
+        /// false = fade out instead of collapsing into the proxy (the box is
+        /// hidden, or reduced motion).
+        morph: bool,
     },
     /// The box is visible again: clear to transparent, ack `Cleared`.
     Clear {
@@ -877,6 +883,12 @@ pub enum EditorCmd {
     },
     Settings {
         settings: Settings,
+    },
+    /// `--smoke-test` only: render the current design through the export
+    /// pipeline, `apply_icon` it to `item` (a temp fixture), `restore` it,
+    /// then report the outcome with `smoke_ready`.
+    SmokeCycle {
+        item: ItemId,
     },
     /// Nothing happened for a while; poll again.
     Heartbeat,
@@ -970,7 +982,7 @@ mod tests {
             r#"{"type":"reveal","session":3}"#
         );
         let c: EditorCmd = serde_json::from_str(
-            r#"{"type":"collapse","session":1,"boxRect":{"x":0,"y":0,"w":10,"h":10},"then":"fly","icon":null}"#,
+            r#"{"type":"collapse","session":1,"boxRect":{"x":0,"y":0,"w":10,"h":10},"then":"fly","icon":null,"morph":true}"#,
         )
         .unwrap();
         assert!(matches!(

@@ -40,7 +40,7 @@ src-tauri/                      the Tauri app (windows, animator, mailbox, comma
   after 25 s of silence). The editor processes envelopes strictly in order and
   awaits each handler before the next.
 
-### Morph / handoff protocol (session numbers increase per open/close)
+### Morph / handoff protocol (session numbers increase per open)
 
 ```
 open_editor(items, view)                     [box → Rust]
@@ -48,23 +48,44 @@ Rust: place_editor(), move hidden editor     (editor never resizes while visible
 Prepare{session, boxRect(css px, editor-relative), items, view, settings, morph}
    editor: render BoxVisual proxy at boxRect (same skin/size/state as the box),
            await img.decode() + double rAF → editor_ack(session,'prepared')
-   (no ack within 400 ms → Rust proceeds with morph=false crossfade)
 Rust: show editor (topmost), Reveal{session}
    editor: double rAF → editor_ack(session,'revealed')
-Rust: hide box; Expand{session}
-   editor: FLIP proxy → panel (~480 ms spring, scaled by animation speed),
-           panels stagger in → editor_ack(session,'expanded')
+Rust: hide box; Expand{session, morph}
+   morph=true : FLIP proxy → panel (~480 ms spring, scaled by animation speed),
+                panels stagger in → editor_ack(session,'expanded')
+   morph=false: crossfade the panel in (Prepared came later than 400 ms, the
+                box was hidden, reduced motion, or the user chose crossfade)
 Rust: focus editor, not topmost.
 
 editor_close(reason)                          [editor → Rust]
-Rust: editor topmost; Collapse{session, boxRect, then, icon}
-   editor: panel → proxy at boxRect → editor_ack(session,'collapsed')
-Rust: show box (+ box:shown, box:flight when then=fly/celebrate); Clear{session}
+Rust: editor topmost; Collapse{session, boxRect, then, icon, morph}
+   editor: panel → proxy at boxRect (or fade out when morph=false)
+           → editor_ack(session,'collapsed')
+Rust: show box (+ box:shown); Clear{session}
    editor: clear to fully transparent, double rAF → editor_ack(session,'cleared')
 Rust: hide editor (+ low-memory: destroy); glide box home if needed.
 ```
 Invariant: a window hides only when its content is transparent and shows only
-on top of an identical picture.
+on top of an identical picture. Acks for an old session are ignored.
+
+`then` on Collapse: `hide` (plain close), `fly` (the box will fly to the
+desktop icon carrying `icon`), `celebrate` (in-place celebration). The apply
+flow drives these itself (`editor_close('applied')` is a no-op).
+
+`SmokeCycle{item}` (only under `--smoke-test`): the editor renders its current
+design through the export pipeline, calls `apply_icon` (mode inPlace,
+flourish false) on `item`, then `restore({type:'item', item})`, and reports
+`smoke_ready({window:'editor', detail:'cycle:ok'})` or
+`'cycle:fail:<reason>'`.
+
+### Box events
+
+`box:flight` (`BoxFlight{phase, icon, durationMs, message}`) — depart/land/
+return/home legs of the fly-to-icon, `celebrate`, and `error` (shake, with
+message). `box:progress` (batch ring), `box:shown`, `settings:changed`, and
+`box:undo` (payload: history entry id) — after a successful apply the box
+shows an **Undo** chip for 6 s; clicking it calls
+`restore({type:'entry', id})`.
 
 ## Rust: reskin-core module contracts
 
