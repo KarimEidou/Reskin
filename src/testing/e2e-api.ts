@@ -136,6 +136,8 @@ export interface E2EEditorState {
   visible: boolean;
   /** Morph flag of the last open. */
   morph: boolean;
+  /** Low-memory mode destroyed the editor: its page counts as gone (see tauri-mock.ts). */
+  destroyed: boolean;
 }
 
 export interface E2EApi {

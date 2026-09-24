@@ -977,7 +977,9 @@ pub enum AckStage {
 pub enum CloseReason {
     /// Close button / Esc.
     User,
-    /// After a successful apply (Rust drives the flight itself).
+    /// Not a request: the page settled an apply that closed the editor
+    /// (Rust drove that collapse and flight itself). Low-memory mode
+    /// destroys the editor only then.
     Applied,
     /// Hotkey / tray "hide".
     Hide,

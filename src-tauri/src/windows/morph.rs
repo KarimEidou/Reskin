@@ -26,6 +26,7 @@ use reskin_core::model::{
 };
 use tauri::{AppHandle, Emitter, Manager, PhysicalPosition, PhysicalSize, Runtime, WebviewWindow};
 
+use super::rules::AfterClose;
 pub use super::rules::Phase;
 use super::{box_window, editor_window, monitors, raw, rules, webview2};
 use crate::state::AppState;
@@ -57,6 +58,9 @@ struct Inner {
     box_painted: u32,
     /// The box was visible when this session opened (so it morphs back).
     box_was_visible: bool,
+    /// Low-memory mode destroys the closed editor once its page settled the
+    /// apply that closed it (`AfterClose::DestroyWhenSettled`).
+    destroy_when_settled: bool,
 }
 
 #[derive(Default)]
@@ -290,6 +294,8 @@ pub fn open<R: Runtime>(
         return Ok(());
     }
     morph.set_phase(Phase::Opening);
+    // The editor is needed again: a destroy still waiting for it is off.
+    morph.lock().destroy_when_settled = false;
     let result = open_inner(app, items, view);
     if result.is_ok() {
         morph.set_phase(Phase::Open);
@@ -345,7 +351,7 @@ fn open_inner<R: Runtime>(
     view: EditorView,
 ) -> Result<(), String> {
     let state = app.state::<AppState>();
-    let settings = state.settings();
+    let settings = crate::smoke::handoff_settings(&state.smoke, state.settings());
     let editor = ensure_editor(app, &settings)?;
     let bh = box_hwnd(app);
     let box_visible = raw::is_visible(bh);
@@ -420,6 +426,7 @@ fn open_inner<R: Runtime>(
     };
     raw::hide(bh);
     crate::smoke::probe(app, "2-revealed");
+    crate::smoke::handoff_taken(app, crate::smoke::Handoff::Open, morphing);
     state.mailbox.push(EditorCmd::Expand {
         session,
         morph: morphing,
@@ -451,7 +458,7 @@ pub fn close<R: Runtime>(
     morph.set_phase(Phase::Closing);
     let result = close_inner(app, then, icon);
     if result.is_err() {
-        rest_closed(app);
+        rest_closed(app, then);
     }
     morph.set_phase(Phase::Closed);
     result
@@ -463,7 +470,7 @@ fn close_inner<R: Runtime>(
     icon: Option<String>,
 ) -> Result<(), String> {
     let state = app.state::<AppState>();
-    let settings = state.settings();
+    let settings = crate::smoke::handoff_settings(&state.smoke, state.settings());
     let morph = &state.morph;
     let (session, box_was_visible) = {
         let g = morph.lock();
@@ -497,6 +504,7 @@ fn close_inner<R: Runtime>(
     );
     let do_morph =
         show_box && box_was_visible && wants_morph(&settings, state.system_reduced_motion());
+    crate::smoke::handoff_taken(app, crate::smoke::Handoff::Close, do_morph);
 
     let _ = editor.set_always_on_top(true);
     state.mailbox.push(EditorCmd::Collapse {
@@ -536,26 +544,53 @@ fn close_inner<R: Runtime>(
         // Back on top of the topmost band, where it lives.
         raw::set_topmost(bh, true);
     }
-    finish_close(app, &editor, &settings);
+    finish_close(app, &editor, &settings, then);
     tray::refresh(app);
-    log::line(&format!("morph: session {session} closed"));
+    log::line(&format!(
+        "morph: session {session} closed (morph={do_morph})"
+    ));
     if show_box && then == CollapseThen::Hide && (at.x != home.x || at.y != home.y) {
         state.animator.glide_to((home.x as i32, home.y as i32));
     }
     Ok(())
 }
 
-/// The editor is closed: at rest (see `rest_editor`), then rebuilt with the
-/// box when compatibility mode changed meanwhile, or destroyed in
-/// low-memory mode.
-fn finish_close<R: Runtime>(app: &AppHandle<R>, editor: &WebviewWindow<R>, settings: &Settings) {
+/// The editor is closed (`then`): at rest (see `rest_editor`), then rebuilt
+/// with the box when compatibility mode changed meanwhile, or destroyed in
+/// low-memory mode — after an apply's close only once its page settled the
+/// apply (`rules::after_close`, `apply_settled`).
+fn finish_close<R: Runtime>(
+    app: &AppHandle<R>,
+    editor: &WebviewWindow<R>,
+    settings: &Settings,
+    then: CollapseThen,
+) {
     rest_editor(editor);
-    if app.state::<AppState>().take_window_rebuild() {
-        // Compatibility mode changed while the editor was open.
-        crate::commands::settings::rebuild_windows(app, settings);
-    } else if settings.low_memory {
+    let state = app.state::<AppState>();
+    match rules::after_close(then, settings.low_memory, state.take_window_rebuild()) {
+        AfterClose::Keep => {}
+        AfterClose::Rebuild => crate::commands::settings::rebuild_windows(app, settings),
         // Free the editor's memory entirely; it is recreated on next open.
-        destroy_editor(app, editor);
+        AfterClose::Destroy => destroy_editor(app, editor),
+        AfterClose::DestroyWhenSettled => state.morph.lock().destroy_when_settled = true,
+    }
+}
+
+/// The editor page settled the apply that closed it (`editor_close
+/// ('applied')`): its outcome is handled and the design's autosave settled.
+/// A low-memory destroy that waited for it (`AfterClose::DestroyWhenSettled`)
+/// happens now — unless the editor opened again meanwhile.
+pub fn apply_settled<R: Runtime>(app: &AppHandle<R>) {
+    let state = app.state::<AppState>();
+    let morph = &state.morph;
+    let _busy = morph.busy.lock().unwrap_or_else(|e| e.into_inner());
+    let due = std::mem::take(&mut morph.lock().destroy_when_settled);
+    if due
+        && morph.phase() == Phase::Closed
+        && state.settings().low_memory
+        && let Some(editor) = app.get_webview_window(editor_window::LABEL)
+    {
+        destroy_editor(app, &editor);
     }
 }
 
@@ -563,11 +598,11 @@ fn finish_close<R: Runtime>(app: &AppHandle<R>, editor: &WebviewWindow<R>, setti
 /// closed state without it — the editor as after any close
 /// (`finish_close`), the box resting on the empty picture, shown when it is
 /// allowed. The caller holds `busy`.
-fn rest_closed<R: Runtime>(app: &AppHandle<R>) {
+fn rest_closed<R: Runtime>(app: &AppHandle<R>, then: CollapseThen) {
     let state = app.state::<AppState>();
     let morph = &state.morph;
     if let Some(editor) = app.get_webview_window(editor_window::LABEL) {
-        finish_close(app, &editor, &state.settings());
+        finish_close(app, &editor, &state.settings(), then);
     }
     let bh = box_hwnd(app);
     if box_allowed(&state) {
@@ -644,5 +679,15 @@ mod tests {
         assert!(wants_morph(&s, true));
         s.open_style = OpenStyle::Crossfade;
         assert!(!wants_morph(&s, false));
+    }
+
+    #[test]
+    fn the_smoke_test_forces_either_path() {
+        use crate::smoke::HandoffPath;
+        // The CI runner: Windows reports reduced motion.
+        let user = Settings::default();
+        assert!(!wants_morph(&user, true));
+        assert!(wants_morph(&HandoffPath::Morph.apply(user.clone()), true));
+        assert!(!wants_morph(&HandoffPath::Crossfade.apply(user), false));
     }
 }

@@ -33,6 +33,20 @@ const designLoaded = (page: Page) =>
   page.waitForFunction(() => (window as unknown as { __reskinSession: { hasDesign: boolean } }).__reskinSession.hasDesign);
 const proxy = (page: Page) => page.getByTestId('box-proxy');
 
+/**
+ * Nothing of the panel shows behind the proxy: it is laid out but fully
+ * transparent, and its shield takes the pointer.
+ */
+async function expectPanelTransparent(page: Page): Promise<void> {
+  const panel = page.getByTestId('editor-panel');
+  for (const part of ['shadow', 'shell', 'content']) await expect(panel.locator(`:scope > .${part}`)).toHaveCSS('opacity', '0');
+  const hit = await panel.evaluate((el) => {
+    const r = el.getBoundingClientRect();
+    return document.elementFromPoint(r.x + r.width / 2, r.y + r.height / 2)?.className ?? '';
+  });
+  expect(hit).toContain('shield');
+}
+
 function acks(page: Page): Promise<string[]> {
   return page.evaluate(() => window.__e2e!.acks.map((a) => `${a.session}:${a.stage}`));
 }
@@ -112,8 +126,8 @@ test.describe('prepare', () => {
     await expect(proxy(page).locator('img.icon')).toHaveAttribute('src', item!.icon!);
     await expect(proxy(page).locator('.bv')).toHaveAttribute('data-state', 'idle');
     await expect(proxy(page).locator('.bv')).toHaveAttribute('data-skin', 'glass');
-    // Nothing of the panel is painted yet.
-    await expect(page.getByTestId('editor-panel')).toHaveCSS('visibility', 'hidden');
+    // Nothing of the panel shows yet.
+    await expectPanelTransparent(page);
   });
 
   test('a batch shows the count badge like the box', async ({ openEditor, page }) => {
@@ -178,11 +192,36 @@ test.describe('handoff protocol', () => {
     const bb = (await proxy(page).locator('.bv').boundingBox())!;
     expect(Math.abs(bb.x - boxRect.x)).toBeLessThanOrEqual(1);
     expect(Math.abs(bb.y - boxRect.y)).toBeLessThanOrEqual(1);
-    await expect(page.getByTestId('editor-panel')).toHaveCSS('visibility', 'hidden');
+    await expectPanelTransparent(page);
 
     await pushEditorCmd(page, { type: 'clear', session });
     expect(await waitForAck(page, session, 'cleared')).toBe(true);
     await expect(frame(page)).toHaveAttribute('data-mode', 'hidden');
+  });
+
+  test('floating layers (tooltips, menus, popovers) show only over the open panel', async ({ openEditor, page }) => {
+    // Half speed: the collapse runs about a second.
+    await openEditor({ settings: { animationSpeed: 0.5 } });
+    const { session } = await simulateOpen(page, [], 'start');
+    // Portalled out of the panel, a floating layer is marked as one…
+    await page.getByRole('button', { name: 'Close editor' }).hover();
+    await expect(page.getByRole('tooltip')).toHaveAttribute('data-floating-layer', '');
+    // …and the page hides every one while the panel is not open.
+    await page.evaluate(() => {
+      const layer = document.createElement('div');
+      layer.setAttribute('data-floating-layer', '');
+      layer.dataset.testid = 'floating-probe';
+      layer.textContent = 'Floating';
+      layer.style.cssText = 'position: fixed; left: 40px; top: 40px';
+      document.body.append(layer);
+    });
+    const probe = page.getByTestId('floating-probe');
+    await expect(probe).toBeVisible();
+    await pushEditorCmd(page, { type: 'collapse', session, boxRect: { x: 32, y: 32, w: 148, h: 148 }, then: 'hide', icon: null, morph: true });
+    await expect(page.locator('html')).toHaveAttribute('data-stage', 'animating');
+    await expect(probe).toBeHidden();
+    expect(await waitForAck(page, session, 'collapsed')).toBe(true);
+    await expect(probe).toBeHidden();
   });
 
   test('a plain close collapses into the empty box', async ({ openEditor, page }) => {
@@ -475,24 +514,35 @@ test.describe('landing', () => {
     await openEditor();
     const boxRect = { x: 1080, y: 520, w: 148, h: 148 };
     await prepare(page, 1, boxRect);
-    // The workspace is mounted (Expand waits only briefly for a slow item).
+    // The workspace is mounted (Expand waits for a slow item, but not forever).
     await designLoaded(page);
     await pushEditorCmd(page, { type: 'reveal', session: 1 });
     expect(await waitForAck(page, 1, 'revealed')).toBe(true);
-    // Hold the icon's flight as it starts (on a busy machine the whole
-    // flight can pass between two polls).
+    // Hold the icon's flight: it never starts playing (on a busy machine
+    // the whole flight can pass between two polls).
+    type Held = { __play?: Animation['play'] };
     await page.evaluate(() => {
-      const animate = Element.prototype.animate;
-      Element.prototype.animate = function (this: Element, ...args: Parameters<Element['animate']>) {
-        const animation = animate.apply(this, args);
-        if (this.matches('img.flyer')) animation.pause();
-        return animation;
+      const play = Animation.prototype.play;
+      (window as Held).__play = play;
+      Animation.prototype.play = function (this: Animation) {
+        const target = (this.effect as KeyframeEffect | null)?.target;
+        if (!target?.matches('img.flyer')) play.call(this);
       };
     });
     await pushEditorCmd(page, { type: 'expand', session: 1, morph: true });
     await page.waitForFunction(() => (document.querySelector('img.flyer')?.getAnimations().length ?? 0) > 0);
-    // Hold every animation at its end: where the icon lands.
+    // While the icon flies, the document it lands on does not show (it is
+    // drawn already: the two would show side by side)…
+    const landingOpacity = () =>
+      page.evaluate(() => [...document.querySelectorAll('[data-morph-landing]')].map((el) => getComputedStyle(el).opacity));
+    await freezeAt(page, 0.3);
+    await expect(page.locator('img.flyer')).toHaveCSS('opacity', '1');
+    expect(await landingOpacity()).toEqual(['0', '0']);
+    // …and it shows as the icon settles on it. Hold every animation at its
+    // end: where the icon lands.
     await freezeAt(page, 1);
+    expect(await landingOpacity()).toEqual(['1', '1']);
+    await page.evaluate(() => (Animation.prototype.play = (window as Held).__play!));
     const landed = (await page.locator('img.flyer').boundingBox())!;
     const doc = (await page.getByTestId('canvas-stage').locator('.doc-overlay').boundingBox())!;
     expect(doc.width).toBeGreaterThan(100);
@@ -500,8 +550,58 @@ test.describe('landing', () => {
     expect(Math.abs(landed.y - doc.y)).toBeLessThanOrEqual(1);
     expect(Math.abs(landed.width - doc.width)).toBeLessThanOrEqual(1);
     expect(Math.abs(landed.height - doc.height)).toBeLessThanOrEqual(1);
-    await page.evaluate(() => document.getAnimations().forEach((a) => a.play()));
+    await resume(page);
     expect(await waitForAck(page, 1, 'expanded')).toBe(true);
+  });
+
+  /** Holds every `item_frames` answer until `release()` (in the page). */
+  async function holdItemFrames(page: Page): Promise<void> {
+    await page.evaluate(() => {
+      type Invoke = (cmd: string, args?: unknown, opts?: unknown) => Promise<unknown>;
+      const w = window as unknown as { __release?: () => void; __TAURI_INTERNALS__: { invoke: Invoke } };
+      const inner = w.__TAURI_INTERNALS__.invoke;
+      const held = new Promise<void>((r) => (w.__release = r));
+      w.__TAURI_INTERNALS__.invoke = (cmd, args, opts) =>
+        cmd === 'item_frames' ? held.then(() => inner(cmd, args, opts)) : inner(cmd, args, opts);
+    });
+  }
+  const release = (page: Page) => page.evaluate(() => (window as unknown as { __release: () => void }).__release());
+
+  test('the morph waits behind the proxy until the opened item is on the canvas', async ({ openEditor, page }) => {
+    await openEditor();
+    await recordTransitions(page);
+    await holdItemFrames(page);
+    await prepare(page, 1, { x: 1080, y: 520, w: 148, h: 148 });
+    await pushEditorCmd(page, { type: 'reveal', session: 1 });
+    expect(await waitForAck(page, 1, 'revealed')).toBe(true);
+    await pushEditorCmd(page, { type: 'expand', session: 1, morph: true });
+    // Still loading: the proxy stays, nothing of the panel shows.
+    await page.waitForTimeout(400);
+    await expect(frame(page)).toHaveAttribute('data-mode', 'proxy');
+    await expectPanelTransparent(page);
+    expect(await transitions(page)).toEqual([]);
+    // Then it morphs into the Edit view.
+    await release(page);
+    expect(await waitForAck(page, 1, 'expanded')).toBe(true);
+    expect(await transitions(page)).toEqual(['morph']);
+    await expect(page.getByTestId('canvas')).toBeVisible();
+  });
+
+  test('an item that takes longer than a second arrives in the open panel', async ({ openEditor, page }) => {
+    await openEditor();
+    await holdItemFrames(page);
+    await prepare(page, 1, { x: 1080, y: 520, w: 148, h: 148 });
+    await pushEditorCmd(page, { type: 'reveal', session: 1 });
+    expect(await waitForAck(page, 1, 'revealed')).toBe(true);
+    const expand = await page.evaluate(() => performance.now());
+    await pushEditorCmd(page, { type: 'expand', session: 1, morph: true });
+    expect(await waitForAck(page, 1, 'expanded')).toBe(true);
+    // Within the protocol's time box (Rust waits 2.5 s for `expanded`).
+    const expanded = await page.evaluate(() => window.__e2e!.acks.find((a) => a.stage === 'expanded')!.t);
+    expect(expanded - expand).toBeLessThan(2500);
+    await expect(page.getByText('Loading the icon…')).toBeVisible();
+    await release(page);
+    await expect(page.getByTestId('canvas')).toBeVisible();
   });
 
   test('the workspace regions enter one after another', async ({ openEditor, page }) => {
@@ -574,18 +674,47 @@ test.describe('mailbox commands', () => {
   });
 });
 
+/** The animations `freezeAt` holds, until `resume` lets them go on. */
+type Frozen = { __frozen?: Set<Animation> };
+
 /**
- * Pauses every running animation at `fraction` of its own timeline (delay
- * included), so a screenshot shows one exact moment of the morph.
+ * Waits until the morph plays (the frame sets `data-transition`), then
+ * freezes every animation of it at one moment: `fraction` of the whole
+ * morph, up to the end of its last animation (the shell, the fading shadow,
+ * the content and the regions entering after one another, all on one
+ * clock); an animation over by then is held at its end. `resume` lets
+ * them go on.
  */
 async function freezeAt(page: Page, fraction: number): Promise<void> {
+  await expect(frame(page)).toHaveAttribute('data-transition', /.+/);
   await page.evaluate((f) => {
-    for (const a of document.getAnimations()) {
-      a.pause();
+    const endOf = (a: Animation) => {
       const t = a.effect?.getComputedTiming();
-      a.currentTime = (Number(t?.delay ?? 0) + Number(t?.activeDuration ?? 0)) * f;
+      return Number(t?.delay ?? 0) + Number(t?.activeDuration ?? 0);
+    };
+    const w = window as unknown as Frozen;
+    // Held at their end, animations no longer show in getAnimations().
+    const frozen = (w.__frozen ??= new Set());
+    for (const a of document.getAnimations()) if (Number.isFinite(endOf(a))) frozen.add(a);
+    const at = Math.max(...[...frozen].map(endOf)) * f;
+    for (const a of frozen) {
+      a.pause();
+      a.currentTime = Math.min(at, endOf(a));
     }
   }, fraction);
+}
+
+/** Lets the animations `freezeAt` holds go on; those held at their end finish there. */
+async function resume(page: Page): Promise<void> {
+  await page.evaluate(() => {
+    const w = window as unknown as Frozen;
+    for (const a of w.__frozen ?? []) {
+      const t = a.effect?.getComputedTiming();
+      if (Number(a.currentTime) >= Number(t?.delay ?? 0) + Number(t?.activeDuration ?? 0)) a.finish();
+      else a.play();
+    }
+    w.__frozen = undefined;
+  });
 }
 
 test.describe('morph gallery', () => {
@@ -611,22 +740,21 @@ test.describe('morph gallery', () => {
       await pushEditorCmd(page, { type: 'reveal', session: 1 });
       await waitForAck(page, 1, 'revealed');
       await pushEditorCmd(page, { type: 'expand', session: 1, morph: true });
-      await page.waitForFunction(() => document.getAnimations().length >= 3);
-      // Three moments of the expand, then let it finish.
-      for (const [i, f] of [0.08, 0.2, 0.45].entries()) {
+      // Three moments of the expand — the last as the panel's shadow (a
+      // layer of its own) fades in — then let it finish.
+      for (const [i, f] of [0.1, 0.4, 0.85].entries()) {
         await freezeAt(page, f);
         await shoot(page, `editor-shell-morph-${i + 1}${suffix}.png`);
       }
-      await page.evaluate(() => document.getAnimations().forEach((a) => a.play()));
+      await resume(page);
       expect(await waitForAck(page, 1, 'expanded')).toBe(true);
       await expect(frame(page)).toHaveAttribute('data-mode', 'open');
 
       // And one moment of the collapse back into the box.
       await pushEditorCmd(page, { type: 'collapse', session: 1, boxRect, then: 'hide', icon: null, morph: true });
-      await page.waitForFunction(() => document.getAnimations().length >= 3);
       await freezeAt(page, 0.3);
       await shoot(page, `editor-shell-morph-4-collapse${suffix}.png`);
-      await page.evaluate(() => document.getAnimations().forEach((a) => a.play()));
+      await resume(page);
       expect(await waitForAck(page, 1, 'collapsed')).toBe(true);
     });
   }

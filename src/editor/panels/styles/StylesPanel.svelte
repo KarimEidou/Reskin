@@ -113,7 +113,7 @@
       const token = session.designToken;
       const snap = snapshotDoc(engine.doc);
       session.panels
-        .request({ op: 'renderSizes', doc: snap, sizes: [256] }, { transfer: snapshotTransfer(snap) })
+        .request({ op: 'renderSizes', doc: snap, sizes: [256] }, { transfer: snapshotTransfer(snap), priority: 'low' })
         .then(([r]) => {
           if (!session.isOpenDesign(token)) return;
           const px = r?.pixels;

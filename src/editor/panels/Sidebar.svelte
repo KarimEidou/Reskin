@@ -5,8 +5,8 @@
 
   In 300 px only the active tab shows its label; the others are icons (the
   label stays their accessible name and tooltip). Panels other than Layers
-  are loaded on first use and prefetched when the editor is idle; each tab
-  remembers its scroll position.
+  are loaded on first use and prefetched when the open editor is idle; each
+  tab remembers its scroll position.
 -->
 <script lang="ts">
   import { onMount, tick, untrack, type Component } from 'svelte';
@@ -48,15 +48,20 @@
   });
 
   onMount(() => {
-    // Warm the other panels once the editor has settled.
+    // Warm the other panels once the editor is open (not while it morphs
+    // open) and has settled.
     const ids = SIDEBAR_TABS.map((t) => t.id).filter((id) => id !== 'layers');
     let cancel = () => {};
+    let mounted = true;
     const next = (i: number) => {
-      if (i >= ids.length) return;
+      if (i >= ids.length || !mounted) return;
       cancel = whenIdle(() => void load(ids[i]!).then(() => next(i + 1)), 2000);
     };
-    next(0);
-    return () => cancel();
+    void session.whenInteractive().then(() => next(0));
+    return () => {
+      mounted = false;
+      cancel();
+    };
   });
 
   // ---- scroll position per tab ----------------------------------------------------

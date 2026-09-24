@@ -8,7 +8,7 @@ update this file in the same change.
 
 ```
 box.html editor.html            Vite pages, each built on its own (vite.config.ts `environments`)
-src/box/                        floating box page — NO engine imports, tiny (≤33 KB gz JS)
+src/box/                        floating box page — NO engine imports, tiny (≤33.5 KB gz JS)
 src/editor/                     editor page: App.svelte, morph/MorphController.ts, panels/*, dialogs/*
 src/engine/                     pure-TS image engine (no Svelte, no DOM in core logic) — unit tested in node
 src/lib/ipc/                    commands.ts (typed invoke wrappers), events.ts, mailbox.ts, types.ts, bindings/ (ts-rs, generated)
@@ -63,7 +63,12 @@ src-tauri/                      the Tauri app (windows, animator, mailbox, comma
   (`BootInfo.accent`, `systemReducedMotion`, `hotkeyError`), and
   `src/lib/boot.ts` calls it again whenever the page's window gains focus
   or becomes visible (`settings/system.svelte.ts`: `system`,
-  `refreshSystem()`); no event needed.
+  `refreshSystem()`). One change can come while nothing gains focus: Rust's
+  start-up check registers the saved hotkey on a thread of its own and may
+  find it taken after the pages read `app_boot`, so it then emits
+  `system:changed` (`commands::settings::SYSTEM_CHANGED`) to both pages,
+  which read it again — the box then says so. `boot.ts` listens before its
+  first `app_boot`, so the change is never missed.
 * `settings_set(settings)`: the settings that mirror OS state (hotkey,
   "Start with Windows", Explorer verb) are applied before saving; a part
   Windows refuses is taken back (the old hotkey stays registered: the new
@@ -88,16 +93,25 @@ Prepare{session, boxRect(css px, editor-relative; null: box hidden), items,
         view, settings, morph}
    editor: render BoxVisual proxy at boxRect (same skin/size/state as the box),
            await img.decode() + double rAF → editor_ack(session,'prepared');
-           no boxRect: no proxy (morph is false)
+           no boxRect: no proxy (morph is false). The items start loading
+           (the icon's resample to the design runs in the panels worker)
+           and the view gets ready behind the proxy: the panel is laid out
+           and drawn there, only transparent (its shield takes the pointer)
 Rust: waits for prepared (400 ms) and box_painted (300 ms from box:handoff)
 Rust: show editor (topmost), Reveal{session}
    editor: double rAF → editor_ack(session,'revealed')
 Rust: hide box; Expand{session, morph}
+   editor: waits (≤ 1 s, READY_WAIT_MS) until the view is ready — the items
+           Prepare loads are in, the Edit workspace mounted, laid out and its
+           canvas drawn (stage.docRect()) — so nothing loads while the panel
+           animates; draws the animation's first frame (the picture on screen
+           already), then plays it:
    morph=true : FLIP proxy → panel (~480 ms spring, scaled by animation speed),
-                regions stagger in ([data-stagger], the workspace's
-                [data-panel]), the box's icon lands exactly on the document
-                (stage.docRect(); waits ≤ 250 ms for the item to reach the
-                canvas) → editor_ack(session,'expanded')
+                regions fade in one after another ([data-stagger], the
+                workspace's [data-panel]), the box's icon lands exactly on
+                the document, which shows only as the icon settles on it
+                (the two cross-fade; `[data-morph-landing]`)
+                → editor_ack(session,'expanded')
    morph=false: crossfade the panel in (Prepared came later than 400 ms, the
                 box was hidden, reduced motion, or the user chose crossfade)
 Rust: focus editor, not topmost.
@@ -185,23 +199,43 @@ with `box_painted(session)`, `box:shown` (keeps a picture taken over with
 (payload: history entry id) — after a successful apply the box shows an
 **Undo** chip for 6 s; clicking it calls `restore({type:'entry', id})`, then
 celebrates, or shakes saying why the icon is not back (a failed entry, or
-the administrator prompt was cancelled).
+the administrator prompt was cancelled). `system:changed` (no payload) goes
+to both pages: Windows state they show changed behind their back, read it
+again (`refreshSystem`).
+
+A saved hotkey Windows would not register (`system.hotkeyError`, from
+`app_boot` or a later `system:changed`) is said once in the box's hint
+bubble ("Ctrl+Alt+Shift+R is taken — change it in Settings", at most three
+lines in the small box; `box/hotkey-hint.ts`). Its few seconds run only
+while it is the hint on screen — after the first-run hint, paused by a
+handoff or a drag — and it goes as soon as the hotkey works again. The
+box's tooltip and accessible description say it in full for as long as the
+hotkey doesn't work.
 
 ### Editor keyboard and paste
 
-Escape closes the editor, and a pasted image outside the canvas joins the
-design (or starts one), only when nothing else used the event: whatever
-handles Escape (a dialog, popover or menu, a text field, a drag, a pending
-transform, a text edit, a lasso polygon, a panel editor) or a paste (the
-canvas adds pasted images as layers) calls `preventDefault` or stops it.
-Escape also never closes while the engine had a gesture, a pending
-transform or a text edit when the key went down. The App decides in a
-window listener added while the event is on its way
-(`chrome/last-listener.ts`), so it runs after every other listener — the
-workspace's window listeners are added long after the App's. Files dropped
-from Explorer (Tauri drag-drop events) stay the App's (import popover). An
-image pasted into an open design (on the canvas or elsewhere) becomes a
-layer at once and says so in a toast with **Undo** (`workspace/pasted.ts`).
+Escape closes the editor only when nothing else used the key: whatever
+handles it (a dialog, popover or menu, a text field or the hotkey recorder,
+a drag, a pending transform, a text edit, a lasso polygon, a panel editor)
+calls `preventDefault` or stops it, and it never closes while the engine
+had a gesture, a pending transform or a text edit when the key went down.
+An adjustment still previewing on the canvas is cancelled by that Escape
+instead of the editor closing. The App decides in a window listener added
+while the event is on its way (`chrome/last-listener.ts`), so it runs after
+every other listener — the workspace's window listeners are added long
+after the App's.
+
+A pasted image goes through `shell.askImport` like every other import
+(`workspace/pasted.ts`): with nothing open it starts a design, with a
+design open the import popover asks what it becomes (a layer, or a design
+of its own in the queue). The canvas takes the pastes it gets (asking at
+the pointer) and image files dropped on it; the App takes an image pasted
+where nothing else took it (a text field keeps its paste), asking in the
+middle of the window. Files dropped from Explorer (Tauri drag-drop events)
+are the App's too, through the same popover. A layer imported while work
+is in progress keeps that work: an adjustment still being tuned is kept
+(`session.keepPreview`) and pending tool work is committed, so Undo takes
+back just the layer.
 
 The canvas stage owns Enter, Escape, the arrows, Delete and Backspace
 (`workspace/keys.ts` `STAGE_KEYS`): they go to the active tool, and Delete /
@@ -237,27 +271,53 @@ one switches the sidebar tab and asks the panel through
   `switchTo(i)` and `remove(i)` — the queue strip and the title bar's
   queue menu — are refused, and `apply` / `applyStyleToAll` do not start.
 * **Save & Apply** uses `preferredMode(item)` (`workspace/apply-modes.ts`:
-  a classic shortcut for Store apps). It sends `flourish` only when every
-  other queued item is applied; otherwise the editor stays open, the item
-  is marked applied, the next one not applied opens, and — while the
-  editor is interactive — a toast offers Undo for 6 s
-  (`restore({type:'entry'})` per journal entry). "Apply style to all"
-  replays the current item's recipe on a scratch engine per other queued
-  target (the current design and its history are untouched), keeps each
-  failure's reason on its entry (`problem`), and asks about every
-  `needsElevation` at once (`elevation.requests`, approved ticket by
-  ticket, or personal copies with the icons already rendered).
+  a classic shortcut for Store apps). Only queued *targets* count: it
+  sends `flourish` only when every other queued target is applied (design
+  sources — entries without a target — keep nothing open), otherwise the
+  editor stays open, the item is marked applied, the next target not
+  applied opens, and — while the editor is interactive — a toast offers
+  Undo for 6 s (`restore({type:'entry'})` per journal entry). When the
+  flourish closed the editor, the page tells Rust once the apply is
+  settled — its outcome handled, the autosave settled
+  (`editor_close('applied')`): low-memory mode destroys the editor only
+  then. "Apply style to all" replays the current item's recipe on a
+  scratch engine per other queued target (the current design and its
+  history are untouched), keeps each failure's reason on its entry
+  (`problem`), and asks about every `needsElevation` at once
+  (`elevation.requests`, approved ticket by ticket, or personal copies
+  with the icons already rendered).
+* **Recipe.** `recipe` is the open design's style (the Styles, Backdrop,
+  Adjust and Effects panels chain their steps onto it), and it follows the
+  design's history: a panel sets it right after its change, so each value
+  belongs to a history step — undo brings back the recipe before the step,
+  redo brings the step's back, a step undone and replaced by another
+  change is gone for good, and steps the history lets go of (its memory
+  cap, Clear history) stay. "Apply style to all" never replays a look the
+  design no longer has, and a look comes out the same at any document
+  size: presets and backdrops are measured in fractions of the document,
+  and the steps with pixel settings (adjustments, icon helpers, layer
+  effects) remember the size they were chosen on and scale those settings
+  to the document they replay on (`panels/styles/recipe.ts`).
 * **Library.** `libraryId` is the Library design the open design came from
-  or was saved as; `saveToLibrary` updates it (`asNew` makes another), and
-  the design takes its Library name. Opening a Library design over unsaved
-  changes asks first (`shell.openLibraryDesign`).
+  or was saved as, `libraryName` that design's name as the Library has it
+  (kept per queue entry too, and through renames in the Library view): the
+  design goes by it. A Library design is only ever saved over from a form
+  that names it — Save to Library says "Updates …" (Save changes / Save as
+  new); without that notice it saves as new, and the Library view's "Save
+  current design" adds a new design when the linked one is not on the page
+  — so no design is overwritten unseen. Opening a Library design over
+  unsaved changes asks first (`shell.openLibraryDesign`).
 * **Autosave.** A design is *unsaved* when it came with unsaved changes (a
   recovered draft) or its history moved since it was loaded, applied,
   saved to the Library or exported as a project (`engine.currentEntryId`,
   sealed at each save). Only unsaved designs are written:
   `autosave(json)` 2 s after the last change, at least every 10 s while
   editing goes on, before another design opens and when the editor
-  closes. The JSON is encoded off the main thread (`ProjectEncoder`: the
+  closes — also a close Rust starts (the hotkey, the tray, an apply): the
+  collapse calls `flushAutosave` with the design as it is then, so an open
+  right after (whose Prepare resets the session) cannot cancel it, and
+  Clear waits (time-boxed) for that write before the editor may be
+  destroyed. The JSON is encoded off the main thread (`ProjectEncoder`: the
   page only copies the layer pixels). Once the open design is safe the
   live slot takes another queued unsaved design, or empties
   (`autosave('')`). Rust keeps two slots (`AutosaveSlots`): each launch
@@ -436,7 +496,8 @@ Windows (`win/`, `#[cfg(windows)]`, type-checked on Linux with
   box*), then dialog, opener, global-shortcut; `setup` creates the box
   (visible; a failure is reported, not returned into Tauri), reconciles the
   OS-backed settings on a thread (`commands::settings::
-  reconcile_at_startup`) and schedules the editor pre-warm (skipped in
+  reconcile_at_startup`; a saved hotkey found taken is announced with
+  `system:changed`) and schedules the editor pre-warm (skipped in
   low-memory mode unless the welcome or `--edit` opens it; the welcome,
   due while `!onboarded`, never opens at an `--autostart` start);
   `invoke_handler` registers every command in `commands.ts`. Error boxes
@@ -461,7 +522,8 @@ Windows (`win/`, `#[cfg(windows)]`, type-checked on Linux with
   `ScaleFactorChanged`); `windows/mailbox.rs` (seq queue + long-poll,
   generations); `windows/morph.rs` (handoff FSM with acks/timeouts/fallback,
   the box at rest); `windows/rules.rs` (its decisions, unit tested: who hands
-  over, when the box may show, what the hotkey does); `windows/animator.rs`
+  over, when the box may show, what the hotkey does, what a close does with
+  the editor); `windows/animator.rs`
   (box motion, drag loop, fling/snap, flights).
 * `apply.rs`: Save & Apply. Before anything is journaled or collapsed it
   probes the target again (`access::probe_writable`, or `probe_creatable`
@@ -498,7 +560,12 @@ Windows (`win/`, `#[cfg(windows)]`, type-checked on Linux with
   `settings::rebuild_windows` (compatibility mode) and the low-memory drop
   destroy the editor through `morph::destroy_editor`, which returns once
   tauri has released its label and the mailbox moved on, so the next open
-  never meets a half-destroyed editor.
+  never meets a half-destroyed editor. What a close does with the editor
+  is `rules::after_close`: in low-memory mode a plain close destroys it at
+  once, an apply's close (`fly` / `celebrate`) only once the page settled
+  that apply (`editor_close('applied')` → `morph::apply_settled`; an open
+  meanwhile keeps it) — the close's autosave still held the design being
+  applied, and only the page empties it.
 * Permissions: `build.rs` lists every command in `AppManifest::commands`;
   `capabilities/box.json` and `capabilities/editor.json` grant per window.
 
@@ -626,6 +693,150 @@ uninstaller then keeps Reskin's data, so nothing is lost.
 * Unit tests: `src/**/*.test.ts` (Vitest, node env) and `scripts/*.test.mjs`
   (`node --test`), both in `pnpm test`. E2E: `e2e/*.spec.ts`; tests drive
   the fake backend through `window.__e2e` (see tauri-mock.ts).
+
+## Performance
+
+Budgets, and what enforces them:
+
+* **Animations** (`e2e/perf.spec.ts`, Chromium with the CPU throttled 4×
+  through CDP): the open handoff with its morph (into the Edit view with an
+  item, and into the Start view), the collapse from each, and the box's
+  hover → armed → absorb never block the main thread for more than 50 ms —
+  no long task (PerformanceObserver) and no gap between two animation
+  frames longer than that — and run at 55 fps or better (median frame
+  ≤ 18.2 ms). A handoff is timed from the moment its animations play (the
+  morph frame's `data-transition`) to `expanded`, or for a close to
+  `cleared` (the median over the motion, up to `collapsed`). What comes
+  before shows a picture that is already on screen — the proxy, drawn just
+  like the box — so it is waiting, not jank; how long the open waited is
+  printed with its numbers. The handoffs are driven the way Rust drives
+  them, one command at a time. Each scenario runs up to three times on a
+  freshly loaded page and the best attempt counts; every attempt's numbers
+  are printed. Work that only exists in the test (the fake backend on the
+  page's thread — its wallpaper and item frames are made before measuring —
+  and Playwright's injected scripts) is done before measuring.
+* **No whole-view restyle** (same spec, Chromium trace): neither an open
+  morph nor a collapse runs a style recalc of half the Edit view's
+  elements or more (it has ~580; a change they all inherit restyles
+  nearly all of them, the targeted changes a few dozen).
+* **Idle** (same spec): the box at rest, and the editor in the Edit view
+  with nothing happening, run no animation-frame callback, no animation,
+  no style recalc and no layout for 2 s (< 20 ms of tasks: idle CPU ~0).
+* **Initial JS** (`pnpm bundle:budget`, gzip -9, entry + modulepreloads):
+  box ≤ 33.5 KB, editor ≤ 220 KB — about 10 % over their sizes when set,
+  so growth is a decision.
+* **Memory** (`--smoke-test`, `src-tauri/src/memory.rs`): the whole process
+  tree — reskin.exe and every WebView2 process below it — is logged idle
+  after start and again after the handoffs and the apply/restore cycle,
+  with the editor hidden (its WebView2 memory target low): working set
+  and private bytes (`PROCESS_MEMORY_COUNTERS_EX.PrivateUsage`, what a
+  leak makes grow). Private bytes over 450 MB log a warning, over 700 MB
+  fail the run (exit 3). WebView2 dominates the total: its browser, GPU and
+  utility processes and one renderer per window (box and editor);
+  reskin.exe itself is a small share, and shared DLL pages count once per
+  process in the working set. Low-memory mode destroys the editor after a
+  close — after an apply's close only once its page is done with the apply
+  (`editor_close('applied')`) — and skips the pre-warm.
+* **The real morph on Windows** (`--smoke-test --capture-handoff`): the
+  CI runner reports reduced motion, so on its own it would only ever run
+  the crossfade. The smoke test captures two round trips, each forcing a
+  path through the handoff's settings (`smoke::HandoffPath`, smoke-only):
+  the morph (full motion — Rust and the editor both follow the `Prepare`
+  settings), then the crossfade. Each must take its path (`morph: session N
+  open (morph=true)` / `closed (morph=true)` in the log) and keep the
+  handoff invariant on its captured frames
+  (`%TEMP%\reskin-handoff-<path>-<frame>.png`); either failing exits 3.
+
+Measured in a Linux container (headless Chromium with software rendering,
+4× CPU): `pnpm e2e e2e/perf.spec.ts` several times, once and with
+`--repeat-each=3`, and in full `pnpm e2e` runs. Frame gaps fall on the
+60 Hz grid; the ranges are over the passing attempts.
+
+| Scenario | Longest frame | Median frame | Motion started |
+| --- | --- | --- | --- |
+| Open, Edit view (22–29 frames) | 33.4–50.1 ms | 16.7–16.8 ms | 377–638 ms after Expand |
+| Collapse, Edit view (27–30 frames) | 33.3–50.1 ms | 16.7 ms | 41–56 ms after Collapse |
+| Open, Start view (33–36 frames) | 16.8–33.4 ms | 16.7 ms | 35–65 ms after Expand |
+| Collapse, Start view (28–32 frames) | 16.7–50.0 ms | 16.7 ms | 31–45 ms after Collapse |
+| Box hover → armed → absorb (115–118 frames) | 16.8–33.4 ms | 16.7 ms | — |
+
+No passing attempt had a long task over 50 ms. The first attempt of the
+Edit-view open — the first page of a new browser context — misses the
+budget in about 4 runs of 10 (a 66.7–83.4 ms frame, a 51–55 ms task, or
+— with a second test worker taking the CPU — a 33 ms median frame) and
+the second attempt has passed every time; the collapse's first
+attempt misses about 1 in 8 (a 54–73 ms task). Traced, those are mostly
+the software renderer rather than the page's work: the display compositor
+draws each frame of the morph on the CPU in 24–32 ms, so a frame with more
+to draw takes three or four vsyncs, and in the collapse the page's main
+thread waits 30–50 ms in its commit for that compositor. The page's own
+task among them is the panel settling into `open` after the motion's last
+frame (~45–55 ms at 4×: the focus, and the work the open panel lets go).
+Idle, both pages ran 0 frame callbacks, 0 animations, 0 style recalcs and
+0 layouts, with 0.0–0.4 ms of tasks in 2 s. Initial JS: box 31.0 KB,
+editor 201.0 KB. On the Windows smoke run the idle working set of the
+process tree has been ~370 MB.
+
+What gets the open ready before its motion (the Edit view with an item):
+
+* `Prepare` starts loading the item; the design is made from its icon
+  while the proxy shows, and the resample of the icon to the master size
+  (256 → 512 px) runs in the panels worker (`fit`), not on the page.
+* `Expand` waits — up to a second (`READY_WAIT_MS` in App.svelte), within
+  the step's time box — until the item is in and the Edit workspace is
+  mounted, laid out and its canvas drawn, all behind the proxy; then the
+  morph starts on a view that is ready, and the box's icon lands on the
+  canvas. The document is drawn there all along, so it is hidden while the
+  icon flies and fades in under it as the icon fades out on landing (the
+  canvas and its shadow, `data-morph-landing`): the two never show side by
+  side. An item that takes longer arrives in the open panel.
+* Behind the proxy the panel is transparent through the opacity of its
+  three parts (shadow, shell, content), not `visibility`: every element of
+  the view inherits that, and showing the panel restyled them all as the
+  morph started.
+* The morph's animations are made paused and play two frames later
+  (MorphFrame's `play`): the frame that starts them — the mode change, new
+  layers — lands before the motion, not in its first frame.
+* What the open panel needs only once it is used waits for it
+  (`session.whenInteractive()`): the panels worker holds its background
+  (low-priority) jobs; the desktop preview reads the wallpaper, decoded
+  off the page's thread (`createImageBitmap`); the sidebar's idle
+  prefetch, the workspace's preloads and the Backdrop panel's previews
+  start then. A preview's canvas exists only once something is drawn on
+  it: each canvas is a layer of its own that every frame of the morph
+  would commit.
+* The regions enter by fading only: a region that moved would give every
+  layer painted above it a layer of its own for its whole entrance (the
+  compositor assumes they overlap).
+
+What keeps the morph cheap (`src/editor/morph/`):
+
+* Proxy, flyer and panel regions animate transform and opacity only; the
+  proxy and the flyer carry a constant non-compositable property so they
+  stay on the main thread's clock with the shell (`MAIN_THREAD`).
+* The shell's radius changes every frame, so the shell is repainted every
+  frame: it carries only its fill, hairline and highlight. The blurred drop
+  shadow is a layer of its own that never moves — it fades in as the shell
+  settles and out as the collapse starts. (In software rendering — CI
+  runners, VMs — repainting the blurred shadow with the shell doubled the
+  raster work of every frame, ~50 ms per frame at the panel's size, and the
+  main thread waits for raster at every commit.)
+* The content's clip-path runs only while the content shows (from its
+  fade-in on open; for the ~110 ms of its fade-out on close).
+* The panel is never `inert` (toggling it restyles every element in it):
+  a shield takes the pointer while it animates and focus is kept out.
+* Floating layers (tooltips, menus, popovers) are portalled to `<body>`
+  and marked `data-floating-layer` (`src/lib/ui/floating.ts`); App.svelte
+  hides them while the panel is not open with a rule keyed on that
+  attribute. (A rule on `body > :not(#app)` cannot be keyed by the style
+  engine: every `data-stage` change restyled the whole document, ~730
+  elements and 50–85 ms at 4× as a collapse started.)
+* After a collapse the content rests with `content-visibility: hidden`
+  until the next open shows or morphs it, so hiding the panel (and the
+  page's `data-stage` changes) skip the elements of the view; the next
+  open usually replaces the view before it is rendered again.
+* Animations are tracked and cancelled directly (no DOM queries or layout
+  reads to find them).
 
 ## Checks (all must pass before pushing)
 

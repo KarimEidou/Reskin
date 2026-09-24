@@ -6,14 +6,20 @@
 // or transform can clip or displace it: into the modal <dialog> that holds
 // the anchor (everything outside an open modal dialog is inert and painted
 // below it, in the top layer), else into <body>. Keep a portalled element
-// the only node of its `{#if}` block. `floating` keeps it `position: fixed`
-// next to its anchor, flipping/shifting inside the window, and tracks
-// scroll, resize and size changes. It exposes `data-side` and `--available`
-// (space on the chosen side) for styling. `dismissable` closes stacked
-// layers innermost-first.
+// the only node of its `{#if}` block. It carries `data-floating-layer`
+// (FLOATING_LAYER), so a page-wide rule can reach the floating layers alone
+// (the editor hides them while its panel is not open) without matching —
+// and restyling — anything else. `floating` keeps it `position: fixed` next
+// to its anchor, flipping/shifting inside the window, and tracks scroll,
+// resize and size changes. It exposes `data-side` and `--available` (space
+// on the chosen side) for styling. `dismissable` closes stacked layers
+// innermost-first.
 
 import type { Attachment } from 'svelte/attachments';
 import { computePosition, type Placement } from './position';
+
+/** The attribute every portalled element carries (see `portal`). */
+export const FLOATING_LAYER = 'data-floating-layer';
 
 /** Where floating UI for `anchor` must live: its modal dialog, else <body>. */
 export function layerHost(anchor: Element | null | undefined): HTMLElement {
@@ -22,11 +28,13 @@ export function layerHost(anchor: Element | null | undefined): HTMLElement {
 
 /**
  * Moves the node into `target` (an element, or the anchor whose layer host
- * — see `layerHost` — receives it; default <body>).
+ * — see `layerHost` — receives it; default <body>) and marks it as a
+ * floating layer (FLOATING_LAYER).
  */
 export function portal(target?: HTMLElement | (() => Element | null | undefined)): Attachment<HTMLElement> {
   return (node) => {
     const host = typeof target === 'function' ? layerHost(target()) : (target ?? document.body);
+    node.setAttribute(FLOATING_LAYER, '');
     host.appendChild(node);
     return () => node.remove();
   };

@@ -20,14 +20,16 @@ pub fn editor_ack(session: u32, stage: AckStage, state: State<'_, AppState>) {
     state.morph.ack(session, stage);
 }
 
-/// The editor asks to close (close button, Esc). The collapse handoff runs
-/// on its own thread; this returns immediately so the page can keep
-/// polling the mailbox.
+/// The editor asks to close (close button, Esc), or says it is done with
+/// an apply that closed it (`applied`). The collapse handoff (or the
+/// low-memory destroy) runs on its own thread; this returns immediately so
+/// the page can keep polling the mailbox.
 #[tauri::command]
 pub fn editor_close(app: AppHandle, reason: CloseReason) {
     match reason {
-        // The apply flow drives its own collapse + flight.
-        CloseReason::Applied => {}
+        // The apply flow drove its own collapse and flight; the page is done
+        // with it now (low-memory mode may destroy the editor).
+        CloseReason::Applied => actions::apply_settled(&app),
         CloseReason::User | CloseReason::Hide => actions::close_editor(&app, CollapseThen::Hide),
     }
 }

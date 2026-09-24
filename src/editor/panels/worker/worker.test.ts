@@ -164,4 +164,38 @@ describe('PanelsClient', () => {
     expect(client.pending).toBe(0);
     client.dispose();
   });
+
+  it('holds background work back, and only it, until released', async () => {
+    const posted: PanelMessage[] = [];
+    const fake: WorkerLike = {
+      onmessage: null,
+      onerror: null,
+      postMessage: (m) => posted.push(m as PanelMessage),
+      terminate: () => {},
+    };
+    const client = new PanelsClient(fake);
+    const sent = () => posted.map((m) => (m as { id: string }).id);
+    const reply = (i: number) => fake.onmessage!({ data: { reqId: posted[i]!.reqId, result: (posted[i] as { id: string }).id } } as MessageEvent);
+    const sticker = (id: string) => ({ op: 'sticker' as const, id, size: 16, box: 12, color: null, outline: null });
+
+    client.holdBackground(true);
+    const thumb = client.request(sticker('thumb'), { priority: 'low' });
+    const gone = client.request(sticker('gone'), { channel: 'preview', priority: 'low' });
+    gone.catch(() => {});
+    const user = client.request(sticker('user'));
+    expect(sent()).toEqual(['user']);
+    reply(0);
+    await expect(user).resolves.toBe('user');
+    // Nothing held back is computed, not even once the worker is free.
+    client.cancel('preview');
+    await expect(gone).rejects.toSatisfy(isCancelled);
+    expect(sent()).toEqual(['user']);
+    expect(client.pending).toBe(1);
+
+    client.holdBackground(false);
+    expect(sent()).toEqual(['user', 'thumb']);
+    reply(1);
+    await expect(thumb).resolves.toBe('thumb');
+    client.dispose();
+  });
 });

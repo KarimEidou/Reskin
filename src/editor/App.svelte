@@ -197,20 +197,28 @@
     await closingSave;
   }
 
-  /** How long Expand waits for the opened item to reach the canvas. */
-  const LANDING_WAIT_MS = 250;
+  /**
+   * How long Expand waits for the view it opens on. Within the protocol's
+   * time box for the whole step (MorphController's `expand`, Rust's
+   * EXPAND_TIMEOUT) with room for the slowest morph.
+   */
+  const READY_WAIT_MS = 1000;
 
   /**
-   * Where the box's icon settles at the end of the open morph: the document
-   * on the canvas. The item loads while the proxy is prepared and revealed;
-   * when it is not on the canvas yet, this waits a little for it (the
-   * workspace mounts with the design and sizes its canvas on the next
-   * frame). Null outside the Edit view, or when the item takes longer.
+   * Waits until the view the editor opens on is ready to be shown, so the
+   * morph (or the crossfade) never runs while it loads: the item Prepare
+   * started to load is in, and the Edit workspace is mounted, laid out and
+   * its canvas drawn (it sizes the canvas on the frame after it mounts).
+   * All of that happens behind the proxy, which looks just like the box
+   * (docs/ARCHITECTURE.md, "Performance"). Resolves with where the box's
+   * icon settles at the end of the morph — the document on the canvas — or
+   * null outside the Edit view, or when the item takes longer than
+   * READY_WAIT_MS (the panel then shows it arriving).
    */
-  async function landing(): Promise<Rect | null> {
+  async function viewReady(): Promise<Rect | null> {
     if (session.view !== 'edit') return null;
-    const deadline = performance.now() + LANDING_WAIT_MS;
-    await Promise.race([shell.idle(), sleep(LANDING_WAIT_MS)]);
+    const deadline = performance.now() + READY_WAIT_MS;
+    await Promise.race([shell.idle(), sleep(READY_WAIT_MS)]);
     await tick();
     for (;;) {
       const r = stage.docRect();
@@ -241,8 +249,9 @@
     surface: {
       prepare,
       expand: async (m) => {
+        const landing = await viewReady();
         const morph = m && !motion.reduced;
-        await frame?.expand(morph, morph ? await landing() : null);
+        await frame?.expand(morph, morph ? landing : null);
       },
       collapse,
       clear,
@@ -506,8 +515,12 @@
   :global(html[data-compat='true']:not([data-stage='hidden'])) {
     background: var(--bg);
   }
-  /* Portalled menus / popovers / tooltips only show over the open panel. */
-  :global(html:not([data-stage='open']) body > :not(#app)) {
+  /* Portalled menus / popovers / tooltips only show over the open panel.
+     Keyed on the floating layers themselves (floating.ts FLOATING_LAYER):
+     a rule that matched "everything else in <body>" could not be narrowed
+     down by the style engine, so every data-stage change restyled the
+     whole page (docs/ARCHITECTURE.md, "Performance"). */
+  :global(html:not([data-stage='open']) [data-floating-layer]) {
     visibility: hidden;
   }
   /* Modal scrims cover the panel only: the window's 12 px shadow margin is

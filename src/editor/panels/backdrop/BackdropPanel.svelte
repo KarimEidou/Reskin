@@ -77,21 +77,28 @@
   let preview = $state.raw<{ width: number; height: number; data: Uint8ClampedArray } | null>(null);
   let chips = $state.raw<Record<string, { width: number; height: number; data: Uint8ClampedArray }>>({});
 
+  // Both are rendered once the editor is open: none lands on the page while
+  // it morphs open.
+  let mounted = true;
+
   const renderPreview = debounce((s: BackdropSpec) => {
     const size = Math.round(PREVIEW * (devicePixelRatio || 1));
-    session.filters
-      .backdrop(s, size, { channel: 'backdrop-preview' })
-      .then((px) => (preview = px))
-      .catch((e: unknown) => {
-        if (!isFilterCancelled(e)) console.warn('backdrop preview failed', e);
-      });
+    void session.whenInteractive().then(() => {
+      if (!mounted) return;
+      session.filters
+        .backdrop(s, size, { channel: 'backdrop-preview' })
+        .then((px) => (preview = px))
+        .catch((e: unknown) => {
+          if (!isFilterCancelled(e)) console.warn('backdrop preview failed', e);
+        });
+    });
   }, 30);
 
   $effect(() => {
     renderPreview($state.snapshot(spec) as BackdropSpec);
   });
 
-  onMount(() => {
+  function renderChips(): void {
     const size = Math.round(CHIP * (devicePixelRatio || 1));
     for (const style of BACKDROP_STYLES) {
       const key = `${style.id}:${size}`;
@@ -108,7 +115,14 @@
         })
         .catch(() => {});
     }
+  }
+
+  onMount(() => {
+    void session.whenInteractive().then(() => {
+      if (mounted) renderChips();
+    });
     return () => {
+      mounted = false;
       renderPreview.cancel();
       session.filters.cancel('backdrop-preview');
     };
