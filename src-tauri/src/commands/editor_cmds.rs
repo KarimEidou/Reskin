@@ -1,7 +1,8 @@
-use reskin_core::model::{AckStage, Envelope};
-use tauri::State;
+use reskin_core::model::{AckStage, CloseReason, CollapseThen, Envelope};
+use tauri::{AppHandle, State};
 
 use super::CmdResult;
+use crate::actions;
 use crate::state::AppState;
 use crate::windows::mailbox::HEARTBEAT;
 
@@ -15,6 +16,18 @@ pub async fn editor_next(after: u32, state: State<'_, AppState>) -> CmdResult<Ve
 }
 
 #[tauri::command]
-pub fn editor_ack(session: u32, stage: AckStage) {
-    crate::log::line(&format!("editor ack {session} {stage:?}"));
+pub fn editor_ack(session: u32, stage: AckStage, state: State<'_, AppState>) {
+    state.morph.ack(session, stage);
+}
+
+/// The editor asks to close (close button, Esc). The collapse handoff runs
+/// on its own thread; this returns immediately so the page can keep
+/// polling the mailbox.
+#[tauri::command]
+pub fn editor_close(app: AppHandle, reason: CloseReason) {
+    match reason {
+        // The apply flow drives its own collapse + flight.
+        CloseReason::Applied => {}
+        CloseReason::User | CloseReason::Hide => actions::close_editor(&app, CollapseThen::Hide),
+    }
 }

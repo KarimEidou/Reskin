@@ -8,6 +8,25 @@ pub fn run() -> i32 {
     let mut checks = Vec::new();
     checks.push(check("webview2", webview2_version));
     checks.push(check("app-data", app_data_writable));
+    checks.push(check("known-folders", || {
+        let desktop = reskin_core::win::known::desktop().map_err(|e| e.to_string())?;
+        let public = reskin_core::win::known::public_desktop().map_err(|e| e.to_string())?;
+        Ok(format!("desktop={} public={}", desktop.display(), public.display()))
+    }));
+    checks.push(check("journal", || {
+        let dirs = reskin_core::paths::AppDirs::from_env();
+        let j = reskin_core::history::Journal::load(dirs.journal_file()).map_err(|e| e.to_string())?;
+        Ok(format!("{} entries", j.entries().len()))
+    }));
+    checks.push(check("icon-store", || {
+        let dirs = reskin_core::paths::AppDirs::from_env();
+        let dir = dirs.icons_dir();
+        std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+        let probe = dir.join(".self-test");
+        std::fs::write(&probe, b"ok").map_err(|e| e.to_string())?;
+        std::fs::remove_file(&probe).map_err(|e| e.to_string())?;
+        Ok(dir.display().to_string())
+    }));
     checks.push(check("executable", || {
         std::env::current_exe()
             .map(|p| p.display().to_string())
@@ -57,8 +76,7 @@ fn webview2_version() -> Result<String, String> {
 }
 
 fn app_data_writable() -> Result<String, String> {
-    let base = std::env::var_os("APPDATA").ok_or("APPDATA is not set")?;
-    let dir = std::path::Path::new(&base).join(crate::APP_ID);
+    let dir = reskin_core::paths::AppDirs::from_env().roaming;
     std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
     let probe = dir.join(".self-test");
     std::fs::write(&probe, b"ok").map_err(|e| e.to_string())?;

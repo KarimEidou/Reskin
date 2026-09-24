@@ -16,11 +16,11 @@ pub fn app_boot(window: WebviewWindow, state: State<'_, AppState>) -> BootInfo {
         version: env!("CARGO_PKG_VERSION").to_string(),
         box_metrics: BoxMetrics::for_size(settings.box_size),
         settings,
-        system_reduced_motion: false,
-        accent: None,
+        system_reduced_motion: state.system_reduced_motion(),
+        accent: reskin_core::win::wallpaper::accent_color(),
         build: crate::build_label(),
         smoke: state.smoke.enabled,
         first_run: state.first_run,
-        windows11: false,
+        windows11: reskin_core::win::wallpaper::is_windows11(),
     }
 }
