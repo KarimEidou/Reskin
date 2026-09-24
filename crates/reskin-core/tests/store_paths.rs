@@ -353,6 +353,14 @@ fn design(id: Option<&str>, name: &str, data: &str) -> LibrarySave {
 fn library_save_list_load_delete() {
     let tmp = TempDir::new("library");
     let lib = Library::new(tmp.join("library"));
+    // `Library { dir }` is also constructible directly.
+    assert_eq!(
+        Library {
+            dir: tmp.join("library")
+        },
+        lib
+    );
+    assert_eq!(lib.dir(), tmp.join("library"));
     assert!(lib.list().unwrap().is_empty());
 
     let data = r#"{"format":"reskin","layers":[{"name":"Ünïcode \"quoted\"\n"}]}"#;

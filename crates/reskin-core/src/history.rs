@@ -36,7 +36,8 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
+use serde_json::Value;
 
 use crate::model::{EntryState, HistoryEntry, OriginalIcon, SystemIconId, TargetKind};
 use crate::store::io_error;
@@ -50,8 +51,9 @@ pub const JOURNAL_VERSION: u32 = 1;
 pub const MAX_INACTIVE_ENTRIES: usize = 500;
 
 /// [`Journal::gc_icons`] leaves icons younger than this alone, so an icon
-/// that was just stored but whose entry is not begun yet survives a GC
-/// running concurrently.
+/// that was just stored (or reused: [`store::store_icon`] refreshes the
+/// modification time of a file it reuses) but whose entry is not begun yet
+/// survives a GC running concurrently.
 pub const GC_GRACE: Duration = Duration::from_secs(10 * 60);
 
 /// What the caller is about to apply.
@@ -138,18 +140,51 @@ pub struct RestorePlan {
     pub scope: PlanScope,
 }
 
-#[derive(Deserialize)]
-struct VersionProbe {
-    version: u32,
+/// What [`parse_journal`] made of a journal file.
+#[derive(Debug)]
+enum Parsed {
+    /// Everything was readable.
+    Intact(Vec<HistoryEntry>, BTreeMap<String, String>),
+    /// The file is a version-1 journal, but some entries (or the failure
+    /// notes) could not be read and were dropped.
+    Salvaged(Vec<HistoryEntry>, BTreeMap<String, String>),
+    /// A journal with another version (written by a newer Reskin).
+    OtherVersion(u64),
+    /// Not a journal at all (truncated, not JSON, wrong shape).
+    Damaged,
 }
 
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct JournalFile {
-    // `version` is read through `VersionProbe` first.
-    entries: Vec<HistoryEntry>,
-    #[serde(default)]
-    failures: BTreeMap<String, String>,
+/// Parses `journal.json`, keeping every entry that is readable on its own
+/// so one damaged entry does not cost the originals of all the others.
+fn parse_journal(body: &[u8]) -> Parsed {
+    let Ok(Value::Object(mut root)) = serde_json::from_slice::<Value>(body) else {
+        return Parsed::Damaged;
+    };
+    match root.get("version").map(Value::as_u64) {
+        Some(Some(v)) if v == u64::from(JOURNAL_VERSION) => {}
+        Some(Some(v)) => return Parsed::OtherVersion(v),
+        _ => return Parsed::Damaged,
+    }
+    let Some(Value::Array(raw)) = root.remove("entries") else {
+        return Parsed::Damaged;
+    };
+    let total = raw.len();
+    let entries: Vec<HistoryEntry> = raw
+        .into_iter()
+        .filter_map(|v| serde_json::from_value(v).ok())
+        .collect();
+    let (failures, failures_ok) = match root.remove("failures") {
+        None | Some(Value::Null) => (BTreeMap::new(), true),
+        Some(v) => match serde_json::from_value(v) {
+            Ok(f) => (f, true),
+            Err(_) => (BTreeMap::new(), false),
+        },
+    };
+    if entries.len() == total && failures_ok {
+        Parsed::Intact(entries, failures)
+    } else {
+        Parsed::Salvaged(entries, failures)
+    }
 }
 
 #[derive(Serialize)]
@@ -170,7 +205,7 @@ pub struct Journal {
     entries: Vec<HistoryEntry>,
     /// Why entries failed (`fail` / `reconcile`), by entry id.
     failures: BTreeMap<String, String>,
-    /// Where a damaged journal was moved on load.
+    /// Where [`Journal::load`] saved a damaged journal.
     recovered: Option<PathBuf>,
 }
 
@@ -180,10 +215,14 @@ fn target_key(target: &str) -> String {
 }
 
 impl Journal {
-    /// Opens the journal at `path`. A missing file is an empty journal. A
-    /// damaged file is moved aside to `journal.json.bak-<unix ms>` (see
-    /// [`Journal::recovered_backup`]) and an empty journal is returned; a
-    /// journal written by a newer Reskin is refused rather than clobbered.
+    /// Opens the journal at `path`. A missing file is an empty journal.
+    ///
+    /// Damage is contained: entries that cannot be read on their own are
+    /// dropped, the untouched file is copied to `journal.json.bak-<unix ms>`
+    /// (see [`Journal::recovered_backup`]) and the readable rest is written
+    /// back. A file that is not a journal at all is moved to that backup
+    /// name and an empty journal is returned. A journal with another
+    /// version (written by a newer Reskin) is refused rather than clobbered.
     pub fn load(path: impl Into<PathBuf>) -> Result<Journal> {
         let path = path.into();
         let mut journal = Journal {
@@ -197,30 +236,30 @@ impl Journal {
             Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(journal),
             Err(e) => return Err(io_error(e, "reading", &journal.path)),
         };
-        let body = store::strip_bom(&bytes);
-        let version = serde_json::from_slice::<VersionProbe>(body).map(|p| p.version);
-        if let Ok(v) = version
-            && v != JOURNAL_VERSION
-        {
-            return Err(Error::Unsupported(format!(
-                "{} has version {v}; this Reskin understands version {JOURNAL_VERSION}",
-                journal.path.display(),
-            )));
-        }
-        match (version, serde_json::from_slice::<JournalFile>(body)) {
-            (Ok(_), Ok(file)) => {
-                journal.entries = file.entries;
-                journal.failures = file.failures;
+        match parse_journal(store::strip_bom(&bytes)) {
+            Parsed::Intact(entries, failures) => {
+                journal.entries = entries;
+                journal.failures = failures;
             }
-            _ => {
-                let name = journal
-                    .path
-                    .file_name()
-                    .map(|n| n.to_string_lossy().into_owned())
-                    .unwrap_or_else(|| "journal.json".to_owned());
-                let backup = journal
-                    .path
-                    .with_file_name(format!("{name}.bak-{}", now_ms() as u64));
+            Parsed::Salvaged(entries, mut failures) => {
+                // Keep the original first; only then replace it.
+                let backup = journal.backup_path();
+                fs::copy(&journal.path, &backup)
+                    .map_err(|e| io_error(e, "backing up", &journal.path))?;
+                journal.recovered = Some(backup);
+                failures.retain(|id, _| entries.iter().any(|e| &e.id == id));
+                journal.entries = entries;
+                journal.failures = failures;
+                journal.persist()?;
+            }
+            Parsed::OtherVersion(v) => {
+                return Err(Error::Unsupported(format!(
+                    "{} has version {v}; this Reskin understands version {JOURNAL_VERSION}",
+                    journal.path.display(),
+                )));
+            }
+            Parsed::Damaged => {
+                let backup = journal.backup_path();
                 fs::rename(&journal.path, &backup)
                     .map_err(|e| io_error(e, "moving aside", &journal.path))?;
                 journal.recovered = Some(backup);
@@ -229,11 +268,23 @@ impl Journal {
         Ok(journal)
     }
 
+    /// `journal.json` → `journal.json.bak-<unix ms>`.
+    fn backup_path(&self) -> PathBuf {
+        let name = self
+            .path
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "journal.json".to_owned());
+        self.path
+            .with_file_name(format!("{name}.bak-{}", now_ms() as u64))
+    }
+
     pub fn path(&self) -> &Path {
         &self.path
     }
 
-    /// Set when [`Journal::load`] found a damaged journal and moved it here.
+    /// Set when [`Journal::load`] found a damaged journal: the untouched
+    /// file was saved here (entries it could still read were kept).
     pub fn recovered_backup(&self) -> Option<&Path> {
         self.recovered.as_deref()
     }
@@ -530,7 +581,9 @@ impl Journal {
     }
 
     /// One full-restore plan per target with an applied entry, oldest
-    /// first.
+    /// first. Pending entries are not included: run [`Journal::reconcile`]
+    /// first (e.g. in `--restore-all`) so a change interrupted by a crash
+    /// is restored too.
     pub fn plan_restore_all(&self) -> Vec<RestorePlan> {
         let mut seen = HashSet::new();
         let mut plans: Vec<RestorePlan> = self
@@ -548,10 +601,27 @@ impl Journal {
     /// Records the outcome of a plan. On success an undo marks its entry
     /// `Restored` and re-activates the previous entry; a full restore marks
     /// the whole chain `Restored`. A failed plan changes nothing, so it can
-    /// be retried.
+    /// be retried. Finishing a plan twice is harmless.
+    ///
+    /// A plan is only valid while its entry is the target's applied one.
+    /// If the journal changed in between (another apply superseded the
+    /// entry), the plan is stale: nothing is recorded and an error is
+    /// returned, since marking it would leave two applied entries for one
+    /// target. Plan, execute and finish under the same journal lock.
     pub fn finish_plan(&mut self, plan: &RestorePlan, ok: bool) -> Result<()> {
         if !ok {
             return Ok(());
+        }
+        let i = self.index_of(&plan.entry_id)?;
+        match self.entries[i].state {
+            EntryState::Applied => {}
+            EntryState::Restored => return Ok(()),
+            other => {
+                return Err(Error::Other(format!(
+                    "cannot record the restore of history entry {}: it is {other:?} now",
+                    plan.entry_id
+                )));
+            }
         }
         let now = now_ms();
         let restore = |entries: &mut [HistoryEntry], id: &str| {
@@ -635,6 +705,12 @@ impl Journal {
 
     /// Deletes `*.ico` files in `dir` that no entry references, skipping
     /// files younger than [`GC_GRACE`]. Returns how many were deleted.
+    ///
+    /// The grace period makes it safe to run while another thread is
+    /// between [`store::store_icon`] and [`Journal::begin`]; icons of a
+    /// change that was restored moments ago are collected by a later run.
+    /// Use [`Journal::gc_icons_older_than`] with `Duration::ZERO` only when
+    /// no apply can be in flight.
     pub fn gc_icons(&self, dir: &Path) -> Result<u32> {
         self.gc_icons_older_than(dir, GC_GRACE)
     }
