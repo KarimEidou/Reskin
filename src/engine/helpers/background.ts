@@ -12,7 +12,10 @@
  *    foreground (un-mixing anti-aliased edges), with the background colour
  *    removed from their RGB ("decontamination").
  * 4. Optional `feather` fades alpha over that many px inwards, using an
- *    exact distance transform to the removed region.
+ *    exact distance transform to the removed region. The fade is scaled by
+ *    the background's own opacity: cutting away a transparent background
+ *    creates no new hard edge (the icon's anti-aliasing is already there),
+ *    so running this on an already-cut icon does not erode it.
  */
 import type { Rgba } from '../filters/colormath';
 import { assertPixels, type Mask, type Pixels } from '../filters/types';
@@ -61,7 +64,7 @@ function detect(src: Pixels, tolerance: number): Detection {
   const region = new Uint8Array(n);
   const distance = new Float32Array(n);
   const ref = new Float64Array(4);
-  const threshold = (Math.max(0, Math.min(100, tolerance)) / 100) * 255;
+  const threshold = (Math.max(0, Math.min(100, Number.isFinite(tolerance) ? tolerance : 12)) / 100) * 255;
   if (n === 0) return { region, color: [0, 0, 0, 0], count: 0, distance, threshold, ref };
 
   // Border pixels, each once.
@@ -143,9 +146,12 @@ export function detectBackground(src: Pixels, opts: RemoveBackgroundOptions = {}
 export function removeBackground(src: Pixels, opts: RemoveBackgroundOptions = {}, mask?: Mask | null): Pixels {
   const det = detect(src, opts.tolerance ?? 12);
   if (det.count === 0) return identityOutput(src, mask, undefined);
-  const feather = Math.max(0, Math.min(20, opts.feather ?? 1));
+  const featherIn = opts.feather ?? 1;
+  const feather = Number.isFinite(featherIn) ? Math.max(0, Math.min(20, featherIn)) : 1;
   const { width: w, height: h, data: s } = src;
   const { region, distance, ref } = det;
+  // How much of the feather applies: none against a transparent background.
+  const featherStrength = ref[3] / 255;
   const toBg = distanceTransform(region, w, h);
   const dst = beginOutput(src, mask, undefined);
   const d = dst.data;
@@ -198,7 +204,7 @@ export function removeBackground(src: Pixels, opts: RemoveBackgroundOptions = {}
       d[i + 1] = pg * inv;
       d[i + 2] = pb * inv;
       // The feather fades alpha only; straight colour is unaffected.
-      d[i + 3] = feather > 0 ? pa * smoothstep(0.5, 0.5 + feather, near) : pa;
+      d[i + 3] = feather > 0 && featherStrength > 0 ? pa * (1 - featherStrength * (1 - smoothstep(0.5, 0.5 + feather, near))) : pa;
     }
   }
   return finishOutput(src, dst, mask);

@@ -131,6 +131,14 @@ describe('brightnessContrast', () => {
     expect(pixelAt(brightnessContrast(grey(0), { brightness: 100 }), 0, 0)).toEqual([255, 255, 255, 255]);
   });
 
+  it('applies the classic contrast factor F = 259(C + 255) / (255(259 − C)), C = 2.55·contrast', () => {
+    // contrast 50: C = 127.5, F = 2.95444; 100 → F·(−28) + 128 = 45.28, 150 → F·22 + 128 = 193.0
+    const out = brightnessContrast(pixelsFrom(2, 1, [100, 100, 100, 255, 150, 150, 150, 9]), { contrast: 50 });
+    expect([...out.data]).toEqual([45, 45, 45, 255, 193, 193, 193, 9]);
+    // brightness is added after contrast: 45.28 + 25.5 = 70.8
+    expect(pixelAt(brightnessContrast(grey(100), { contrast: 50, brightness: 10 }), 0, 0)[0]).toBe(71);
+  });
+
   it('contrast pivots around 128', () => {
     expect(pixelAt(brightnessContrast(grey(128), { contrast: 70 }), 0, 0)[0]).toBe(128);
     expect(pixelAt(brightnessContrast(grey(129), { contrast: 100 }), 0, 0)[0]).toBe(255);
@@ -162,6 +170,20 @@ describe('hueSaturation', () => {
 
   it('keeps greys grey when saturating', () => {
     expect(pixelAt(hueSaturation(grey(90), { saturation: 100, hue: 45 }), 0, 0)).toEqual([90, 90, 90, 255]);
+  });
+
+  it('scales HSL saturation (hand-computed)', () => {
+    // rgb(191, 64, 64): l = 0.5, s = 0.49804 → ×1.5 = 0.74706; q = l(1 + s) = 0.87353 → 222.75, p = 2l − q → 32.25
+    expect(pixelAt(hueSaturation(one(191, 64, 64), { saturation: 50 }), 0, 0)).toEqual([223, 32, 32, 255]);
+    // lightness +50 moves l halfway to white: rgb(0, 0, 128) (h = 240, s = 1, l = 0.251) → l = 0.6255;
+    // q = l + s − ls = 1, p = 2l − q = 0.251 → rgb(64, 64, 255)
+    expect(pixelAt(hueSaturation(one(0, 0, 128), { lightness: 50 }), 0, 0)).toEqual([64, 64, 255, 255]);
+  });
+
+  it('rotating by +h then −h round-trips arbitrary colours (±1)', () => {
+    const src = randomPixels(32, 32, 77);
+    const back = hueSaturation(hueSaturation(src, { hue: 73 }), { hue: -73 });
+    for (let i = 0; i < src.data.length; i++) expect(Math.abs(back.data[i] - src.data[i])).toBeLessThanOrEqual(1);
   });
 });
 
@@ -289,6 +311,16 @@ describe('identity parameters', () => {
     const out = levels(src);
     expect(out).not.toBe(src);
     expect(out.data).not.toBe(src.data);
+  });
+
+  it('invert applied twice is the identity (through the LUT path)', () => {
+    expect(invert(invert(src)).data).toEqual(src.data);
+  });
+
+  it('mask of all 255 equals the unmasked result', () => {
+    const full = makeMask(7, 5, () => 255);
+    expect(sepia(src, {}, full).data).toEqual(sepia(src).data);
+    expect(hueSaturation(src, { hue: 90 }, full).data).toEqual(hueSaturation(src, { hue: 90 }).data);
   });
 
   it('mask of all zeros leaves any filter unchanged', () => {

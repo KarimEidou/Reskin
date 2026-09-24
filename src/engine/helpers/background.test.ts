@@ -89,6 +89,31 @@ describe('removeBackground', () => {
     expect(removeBackground(noisy, { tolerance: 0 }).data).not.toEqual(out.data);
   });
 
+  it('does not erode an icon whose background is already transparent (default feather)', () => {
+    // Anti-aliased disc on transparency: nothing to cut, so nothing may change.
+    const disc = makePixels(40, 40, (x, y): Px => {
+      let c = 0;
+      for (let sy = 0; sy < 4; sy++) for (let sx = 0; sx < 4; sx++) if (Math.hypot(x + (sx + 0.5) / 4 - C, y + (sy + 0.5) / 4 - C) < 12) c++;
+      return c ? [200, 40, 40, Math.round((255 * c) / 16)] : [0, 0, 0, 0];
+    });
+    expect(removeBackground(disc).data).toEqual(disc.data);
+    expect(removeBackground(disc, { feather: 5 }).data).toEqual(disc.data);
+    // Cutting an opaque background twice: the second pass only clears the faintest edge
+    // pixels (alpha within the 12 % tolerance of the now transparent background).
+    const once = removeBackground(icon());
+    const twice = removeBackground(once);
+    let cleared = 0;
+    for (let i = 0; i < once.data.length; i += 4) {
+      const same = [0, 1, 2, 3].every((c) => twice.data[i + c] === once.data[i + c]);
+      if (!same) {
+        expect(once.data[i + 3]).toBeLessThanOrEqual(0.12 * 255);
+        expect(twice.data[i + 3]).toBe(0);
+        cleared++;
+      }
+    }
+    expect(cleared).toBeLessThan(20);
+  });
+
   it('leaves already-transparent icons and unselected pixels alone', () => {
     const cut = removeBackground(icon(), { feather: 0 });
     const again = removeBackground(cut, { feather: 0 });

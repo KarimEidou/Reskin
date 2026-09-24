@@ -8,7 +8,7 @@
 import { blurPremultiplied, fromPremultiplied, gaussianBlur, toPremultiplied } from './blur-core';
 import { colorOr, luma } from './colormath';
 import { color, resolveParams, select, slider, toggle, type ParamRecord, type ParamSpec } from './params';
-import { hash01, seedOf } from './prng';
+import { hash01, NORMAL_TABLE_SIZE, normalTable, seedOf } from './prng';
 import type { Mask, Pixels } from './types';
 import { beginOutput, finishOutput, identityOutput, smoothstep } from './util';
 
@@ -233,34 +233,36 @@ export function noise(src: Pixels, params?: In<NoiseParams>, mask?: Mask | null,
   const { amount, distribution, monochrome, seed } = resolveParams<NoiseParams>(NOISE_PARAMS, params);
   if (amount === 0) return identityOutput(src, mask, out);
   const sigma = amount / 2;
-  const gaussian = distribution === 'gaussian';
-  const uniformScale = sigma * Math.sqrt(3) * 2; // uniform on ±σ√3 has std σ
   const sd = seedOf(seed);
-  const w = src.width;
+  const { width: w, height: h } = src;
   const dst = beginOutput(src, mask, out);
   const s = src.data;
   const d = dst.data;
-  const sampleAt = (x: number, y: number, salt: number): number => {
-    if (!gaussian) return (hash01(x, y, sd, salt) - 0.5) * uniformScale;
-    // Box–Muller from two independent hashes.
-    const u1 = hash01(x, y, sd, salt * 2 + 101) || 1e-12;
-    const u2 = hash01(x, y, sd, salt * 2 + 102);
-    return Math.sqrt(-2 * Math.log(u1)) * Math.cos(2 * Math.PI * u2) * sigma;
-  };
-  for (let p = 0, i = 0; i < s.length; p++, i += 4) {
-    const x = p % w;
-    const y = (p - x) / w;
-    if (monochrome) {
-      const n = sampleAt(x, y, 0);
-      d[i] = s[i] + n;
-      d[i + 1] = s[i + 1] + n;
-      d[i + 2] = s[i + 2] + n;
-    } else {
-      d[i] = s[i] + sampleAt(x, y, 1);
-      d[i + 1] = s[i + 1] + sampleAt(x, y, 2);
-      d[i + 2] = s[i + 2] + sampleAt(x, y, 3);
+  // One hash per sample, mapped to the distribution through a lookup
+  // table: uniform on ±σ√3 (std σ), or unit-variance Gaussian quantiles × σ.
+  const size = NORMAL_TABLE_SIZE;
+  const table = new Float32Array(size);
+  if (distribution === 'gaussian') {
+    const q = normalTable();
+    for (let k = 0; k < size; k++) table[k] = q[k] * sigma;
+  } else {
+    const span = 2 * Math.sqrt(3) * sigma;
+    for (let k = 0; k < size; k++) table[k] = ((k + 0.5) / size - 0.5) * span;
+  }
+  for (let y = 0, i = 0; y < h; y++) {
+    for (let x = 0; x < w; x++, i += 4) {
+      if (monochrome) {
+        const n = table[(hash01(x, y, sd, 0) * size) | 0];
+        d[i] = s[i] + n;
+        d[i + 1] = s[i + 1] + n;
+        d[i + 2] = s[i + 2] + n;
+      } else {
+        d[i] = s[i] + table[(hash01(x, y, sd, 1) * size) | 0];
+        d[i + 1] = s[i + 1] + table[(hash01(x, y, sd, 2) * size) | 0];
+        d[i + 2] = s[i + 2] + table[(hash01(x, y, sd, 3) * size) | 0];
+      }
+      d[i + 3] = s[i + 3];
     }
-    d[i + 3] = s[i + 3];
   }
   return finishOutput(src, dst, mask, out);
 }

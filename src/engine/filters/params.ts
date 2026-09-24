@@ -126,7 +126,8 @@ export function defaultsOf<P extends object>(specs: readonly ParamSpec[]): P {
  * keys are dropped. Accepts partial / untyped input.
  */
 export function resolveParams<P extends object>(specs: readonly ParamSpec[], input?: Partial<P> | ParamRecord | null): P {
-  const src = (input ?? {}) as Record<string, unknown>;
+  // Anything but a plain object (e.g. a stray string from a message) counts as "no params".
+  const src = (input && typeof input === 'object' ? input : {}) as Record<string, unknown>;
   const out: Record<string, ParamValue> = {};
   for (const s of specs) out[s.key] = s.key in src ? normalizeParam(s, src[s.key]) : cloneDefault(s);
   return out as P;

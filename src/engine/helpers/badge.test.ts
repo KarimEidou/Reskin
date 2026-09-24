@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { makeMask, pixelAt } from '../filters/test-utils';
 import { solidPixels } from '../filters/types';
 import { addBadge, badgeLayout } from './badge';
@@ -29,6 +29,82 @@ describe('bitmap text rasterizer', () => {
 
   it('canvas rasterizer is unavailable in node', () => {
     expect(createCanvasTextRasterizer()).toBeNull();
+  });
+});
+
+/**
+ * Minimal OffscreenCanvas stand-in: capitals are 0.7 × the font size tall
+ * and sit on the baseline; '-' is a bar 0.3–0.4 × the size above it.
+ */
+class FakeContext {
+  font = '';
+  fillStyle = '';
+  textBaseline = '';
+  private ink: { x0: number; x1: number; y0: number; y1: number } | null = null;
+
+  private size(): number {
+    const m = /([\d.]+)px/.exec(this.font);
+    return m ? Number(m[1]) : 10;
+  }
+
+  measureText(text: string) {
+    const s = this.size();
+    const bar = text === '-';
+    return {
+      actualBoundingBoxAscent: bar ? 0.4 * s : 0.7 * s,
+      actualBoundingBoxDescent: bar ? -0.3 * s : 0,
+      actualBoundingBoxLeft: 0,
+      actualBoundingBoxRight: 0.6 * s * text.length,
+    };
+  }
+
+  fillText(text: string, x: number, y: number): void {
+    const m = this.measureText(text);
+    this.ink = { x0: x, x1: x + m.actualBoundingBoxRight, y0: y - m.actualBoundingBoxAscent, y1: y + m.actualBoundingBoxDescent };
+  }
+
+  getImageData(_sx: number, _sy: number, w: number, h: number) {
+    const data = new Uint8ClampedArray(w * h * 4);
+    const k = this.ink;
+    if (k) {
+      for (let y = 0; y < h; y++) {
+        for (let x = 0; x < w; x++) if (x + 0.5 >= k.x0 && x + 0.5 < k.x1 && y + 0.5 >= k.y0 && y + 0.5 < k.y1) data[(y * w + x) * 4 + 3] = 255;
+      }
+    }
+    return { data };
+  }
+}
+
+class FakeOffscreenCanvas {
+  constructor(
+    public width: number,
+    public height: number,
+  ) {}
+
+  getContext() {
+    return new FakeContext();
+  }
+}
+
+describe('canvas text rasterizer (with a stubbed OffscreenCanvas)', () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it('crops to the ink horizontally but keeps the cap-height box vertically', () => {
+    vi.stubGlobal('OffscreenCanvas', FakeOffscreenCanvas);
+    const r = createCanvasTextRasterizer()!;
+    expect(r).not.toBeNull();
+    // cap 14 px → 20 px font: 'H' is 12 × 14 px of ink.
+    const h = r.rasterize('H', 14);
+    expect([h.width, h.height]).toEqual([12, 14]);
+    expect([...h.coverage].every((v) => v === 255)).toBe(true);
+    // '-' is 6–8 px above the baseline: it stays there inside a 14 px tall box instead of being cropped to 2 rows.
+    const dash = r.rasterize('-', 14);
+    expect([dash.width, dash.height]).toEqual([12, 14]);
+    const inkRows = [];
+    for (let y = 0; y < dash.height; y++) if (dash.coverage[y * dash.width] > 0) inkRows.push(y);
+    expect(inkRows).toEqual([6, 7]);
   });
 });
 

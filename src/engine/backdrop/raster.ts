@@ -167,11 +167,15 @@ export function insideMask(contours: readonly Contour[], width: number, height: 
 /**
  * Signed distance (px) from each pixel centre to the contours' outline,
  * negative inside, clamped to ±`band`. Distances are exact within the band
- * (closest point on any edge); each edge only visits pixels within `band`
- * of its bounding box.
+ * (closest point on any edge). Each edge only visits the pixels of its
+ * band-wide capsule (per row: the x-range within `band` of the edge's
+ * extent), and compares squared distances, so cost is about
+ * edges × (π·band² + 2·band·length) cheap evaluations.
  */
 export function polygonSdf(contours: readonly Contour[], width: number, height: number, band: number): Float32Array {
-  const dist = new Float32Array(width * height).fill(band);
+  const n = width * height;
+  const b2 = band * band;
+  const d2 = new Float64Array(n).fill(b2);
   for (const c of contours) {
     const m = c.length >> 1;
     for (let k = 0; k < m; k++) {
@@ -180,30 +184,46 @@ export function polygonSdf(contours: readonly Contour[], width: number, height: 
       const j = k + 1 === m ? 0 : k + 1;
       const bx = c[j * 2];
       const by = c[j * 2 + 1];
+      if (!Number.isFinite(ax + ay + bx + by)) continue;
       const dx = bx - ax;
       const dy = by - ay;
       const len2 = dx * dx + dy * dy;
-      const x0 = Math.max(0, Math.floor(Math.min(ax, bx) - band - 0.5));
-      const x1 = Math.min(width - 1, Math.ceil(Math.max(ax, bx) + band - 0.5));
-      const y0 = Math.max(0, Math.floor(Math.min(ay, by) - band - 0.5));
-      const y1 = Math.min(height - 1, Math.ceil(Math.max(ay, by) + band - 0.5));
+      const inv = len2 > 0 ? 1 / len2 : 0;
+      const exMin = ax < bx ? ax : bx;
+      const exMax = ax < bx ? bx : ax;
+      const eyMin = ay < by ? ay : by;
+      const eyMax = ay < by ? by : ay;
+      const y0 = Math.max(0, Math.floor(eyMin - band - 0.5));
+      const y1 = Math.min(height - 1, Math.ceil(eyMax + band - 0.5));
       for (let py = y0; py <= y1; py++) {
         const cy = py + 0.5;
+        // Every point within `band` of the edge lies within `reach` (horizontally) of its x-extent on this row.
+        const gy = cy < eyMin ? eyMin - cy : cy > eyMax ? cy - eyMax : 0;
+        const rem = b2 - gy * gy;
+        if (rem < 0) continue;
+        const reach = Math.sqrt(rem);
+        const x0 = Math.max(0, Math.floor(exMin - reach - 0.5));
+        const x1 = Math.min(width - 1, Math.ceil(exMax + reach - 0.5));
+        const qy = cy - ay;
         const row = py * width;
-        for (let px = x0; px <= x1; px++) {
-          const cx = px + 0.5;
-          let t = len2 > 0 ? ((cx - ax) * dx + (cy - ay) * dy) / len2 : 0;
+        let qx = x0 + 0.5 - ax;
+        for (let px = x0; px <= x1; px++, qx++) {
+          let t = (qx * dx + qy * dy) * inv;
           t = t < 0 ? 0 : t > 1 ? 1 : t;
-          const ex = ax + t * dx - cx;
-          const ey = ay + t * dy - cy;
-          const d = Math.sqrt(ex * ex + ey * ey);
-          if (d < dist[row + px]) dist[row + px] = d;
+          const ex = qx - t * dx;
+          const ey = qy - t * dy;
+          const e2 = ex * ex + ey * ey;
+          if (e2 < d2[row + px]) d2[row + px] = e2;
         }
       }
     }
   }
   const inside = insideMask(contours, width, height);
-  for (let i = 0; i < dist.length; i++) if (inside[i]) dist[i] = -dist[i];
+  const dist = new Float32Array(n);
+  for (let i = 0; i < n; i++) {
+    const d = Math.sqrt(d2[i]);
+    dist[i] = inside[i] ? -d : d;
+  }
   return dist;
 }
 

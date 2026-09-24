@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { alphaMass, pixelAt } from '../filters/test-utils';
 import { backdropCoverage, backdropShapeMask, renderBackdrop, shapeBox } from './render';
-import { blobControlPoints, hexagonPolygon, roundPolygon, superellipseSdf } from './shapes';
+import { blobControlPoints, geometrySdf, hexagonPolygon, roundPolygon, shapeGeometry, shieldPolygon, superellipseSdf } from './shapes';
 import { BACKDROP_STYLES, DEFAULT_BACKDROP, backdropStyle, resolveBackdropSpec, type BackdropSpecInput } from './spec';
 
 const sum = (a: ArrayLike<number>) => {
@@ -113,6 +113,57 @@ describe('shape coverage', () => {
     expect(round.length).toBeGreaterThan(40);
     const tiny = roundPolygon([0, 0, 1, 0, 1, 1, 0, 1], 100);
     for (const v of tiny) expect(v).toBeGreaterThanOrEqual(-1e-9);
+  });
+
+  it('mirrored SDF sampling equals direct evaluation at odd and even sizes', () => {
+    for (const size of [41, 64]) {
+      for (const shape of ['circle', 'rounded', 'squircle'] as const) {
+        const spec = resolveBackdropSpec({ shape, inset: 0.07, cornerRadius: 0.3, squircleExponent: 4.5 });
+        const geom = shapeGeometry(spec, shapeBox(spec.inset, size, size));
+        if (geom.kind !== 'sdf') throw new Error('expected an SDF shape');
+        const fast = geometrySdf(geom, size, size, 6);
+        for (let y = 0; y < size; y++) {
+          for (let x = 0; x < size; x++) {
+            const direct = Math.max(-6, Math.min(6, geom.sdf(x + 0.5, y + 0.5, 6)));
+            expect(Math.abs(fast[y * size + x] - direct)).toBeLessThan(1e-5);
+          }
+        }
+      }
+    }
+  });
+
+  it('flattens the shield curves within 0.05 px with few segments', () => {
+    const box = { x: 0, y: 0, w: 860, h: 1000 };
+    const poly = shieldPolygon(box, 0);
+    expect(poly.length / 2).toBeLessThan(200);
+    // The first bottom curve: P0 = (860, 460), P1 = (860, 780), P2 = (653.6, 930), P3 = (430, 1000).
+    const P = [860, 460, 860, 780, 653.6, 930, 430, 1000];
+    const bez = (t: number) => {
+      const u = 1 - t;
+      const a = u * u * u;
+      const b = 3 * u * u * t;
+      const c = 3 * u * t * t;
+      const d = t * t * t;
+      return [a * P[0] + b * P[2] + c * P[4] + d * P[6], a * P[1] + b * P[3] + c * P[5] + d * P[7]];
+    };
+    // Distance from dense curve samples to the polygon outline.
+    let worst = 0;
+    for (let i = 0; i <= 2000; i++) {
+      const [qx, qy] = bez(i / 2000);
+      let best = Infinity;
+      for (let k = 0; k < poly.length / 2; k++) {
+        const ax = poly[k * 2];
+        const ay = poly[k * 2 + 1];
+        const bx = poly[((k + 1) % (poly.length / 2)) * 2];
+        const by = poly[((k + 1) % (poly.length / 2)) * 2 + 1];
+        const dx = bx - ax;
+        const dy = by - ay;
+        const t = Math.max(0, Math.min(1, ((qx - ax) * dx + (qy - ay) * dy) / (dx * dx + dy * dy || 1)));
+        best = Math.min(best, Math.hypot(ax + t * dx - qx, ay + t * dy - qy));
+      }
+      worst = Math.max(worst, best);
+    }
+    expect(worst).toBeLessThanOrEqual(0.05);
   });
 
   it('superellipse distance estimate is exact on the axes', () => {

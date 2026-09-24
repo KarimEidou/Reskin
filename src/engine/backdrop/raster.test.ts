@@ -50,4 +50,37 @@ describe('insideMask / polygonSdf', () => {
     const far = polygonSdf(sq, 30, 30, 3);
     expect(far[25 * 30 + 25]).toBe(3);
   });
+
+  it('matches a brute-force distance on an irregular polygon', () => {
+    // A 23-point star (concave, many short and long edges) partly outside the canvas.
+    const pts: number[] = [];
+    for (let k = 0; k < 23; k++) {
+      const a = (k / 23) * 2 * Math.PI;
+      const r = k % 2 ? 14 : 30 + (k % 5);
+      pts.push(34 + Math.cos(a) * r, 30 + Math.sin(a) * r);
+    }
+    const w = 64;
+    const h = 60;
+    for (const band of [2.5, 12, Infinity]) {
+      const sdf = polygonSdf([pts], w, h, band);
+      const inside = insideMask([pts], w, h);
+      for (let y = 0; y < h; y++) {
+        for (let x = 0; x < w; x++) {
+          let best = Infinity;
+          for (let k = 0; k < 23; k++) {
+            const ax = pts[k * 2];
+            const ay = pts[k * 2 + 1];
+            const bx = pts[((k + 1) % 23) * 2];
+            const by = pts[((k + 1) % 23) * 2 + 1];
+            const dx = bx - ax;
+            const dy = by - ay;
+            const t = Math.max(0, Math.min(1, ((x + 0.5 - ax) * dx + (y + 0.5 - ay) * dy) / (dx * dx + dy * dy)));
+            best = Math.min(best, Math.hypot(ax + t * dx - x - 0.5, ay + t * dy - y - 0.5));
+          }
+          const expected = Math.min(best, band) * (inside[y * w + x] ? -1 : 1);
+          expect(Math.abs(sdf[y * w + x] - expected)).toBeLessThan(1e-4);
+        }
+      }
+    }
+  });
 });

@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { hslToRgb, lumaInt, parseColor, rgbToHsl, toHex } from './colormath';
 import { gradientLutRgba8, normalizeStops, resolveStops } from './gradient';
-import { hash01, mulberry32 } from './prng';
+import { hash01, inverseNormalCdf, mulberry32, NORMAL_TABLE_SIZE, normalTable } from './prng';
 
 describe('parseColor', () => {
   it('parses hex forms', () => {
@@ -107,6 +107,32 @@ describe('prng', () => {
     expect([b(), b(), b()]).toEqual(sa);
     expect([c(), c(), c()]).not.toEqual(sa);
     for (const v of sa) expect(v >= 0 && v < 1).toBe(true);
+  });
+
+  it('inverseNormalCdf matches reference quantiles', () => {
+    expect(inverseNormalCdf(0.5)).toBeCloseTo(0, 12);
+    expect(inverseNormalCdf(0.975)).toBeCloseTo(1.959963985, 7);
+    expect(inverseNormalCdf(0.8413447461)).toBeCloseTo(1, 7);
+    expect(inverseNormalCdf(0.001)).toBeCloseTo(-3.090232306, 7);
+    expect(inverseNormalCdf(0.02)).toBeCloseTo(-2.053748911, 7);
+    expect(inverseNormalCdf(0)).toBe(-Infinity);
+    expect(inverseNormalCdf(1)).toBe(Infinity);
+  });
+
+  it('normalTable has zero mean, unit variance and is antisymmetric', () => {
+    const t = normalTable();
+    expect(t).toHaveLength(NORMAL_TABLE_SIZE);
+    let sum = 0;
+    let sq = 0;
+    for (let i = 0; i < t.length; i++) {
+      sum += t[i];
+      sq += t[i] * t[i];
+      expect(t[i]).toBeCloseTo(-t[t.length - 1 - i], 5);
+      if (i > 0) expect(t[i]).toBeGreaterThan(t[i - 1]);
+    }
+    expect(sum / t.length).toBeCloseTo(0, 6);
+    expect(sq / t.length).toBeCloseTo(1, 5);
+    expect(normalTable()).toBe(t);
   });
 
   it('hash01 is stable and roughly uniform', () => {

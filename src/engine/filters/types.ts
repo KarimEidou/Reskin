@@ -10,6 +10,11 @@
  *   may alias the input).
  * - A `Mask` is one byte per pixel (0 = untouched, 255 = fully affected);
  *   results are blended with the original by mask coverage.
+ * - Colour maths works on the gamma-encoded (sRGB) channel values, as
+ *   image editors and CSS filters do; nothing is linearised. Averaging
+ *   operations (blur, resampling, mask blending, gradients) work on
+ *   premultiplied values so transparent pixels never tint their neighbours.
+ * - Neighbourhood operations extend the border pixel past the image edge.
  */
 
 /** RGBA8, straight alpha, row-major, top-down. */

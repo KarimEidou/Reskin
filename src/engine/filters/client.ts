@@ -262,6 +262,7 @@ export class FilterClient {
   }
 
   private onResponse(res: WorkerResponse): void {
+    if (!res || typeof res !== 'object' || typeof res.reqId !== 'number') return;
     const job = this.inflight.get(res.reqId);
     if (!job) return;
     this.inflight.delete(res.reqId);

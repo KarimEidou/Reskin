@@ -21,7 +21,8 @@ function context(w: number, h: number): Ctx | null {
  * Creates a canvas text rasterizer, or returns null when OffscreenCanvas
  * 2D is unavailable (e.g. node). Glyphs are sized so capitals are
  * `capHeight` px tall (calibrated by measuring "H"), drawn in white, and
- * the alpha channel is returned cropped to the ink.
+ * the alpha channel is returned cropped to the ink horizontally and to the
+ * union of the ink and the cap-height box vertically.
  */
 export function createCanvasTextRasterizer(defaultFamily: string = DEFAULT_FONT_FAMILY): TextRasterizer | null {
   if (typeof OffscreenCanvas === 'undefined') return null;
@@ -64,6 +65,13 @@ export function createCanvasTextRasterizer(defaultFamily: string = DEFAULT_FONT_
         }
       }
       if (x1 < 0) return { width: 1, height: 1, coverage: new Uint8Array(1) };
+      // Crop horizontally to the ink, but keep at least the cap-height box
+      // vertically (baseline at the bottom), so short glyphs such as "-" or
+      // "." keep their height above the baseline instead of being centred
+      // on their own ink.
+      const capTop = Math.max(0, ascent - Math.ceil(capHeight));
+      if (capTop < y0) y0 = capTop;
+      if (ascent - 1 > y1) y1 = Math.min(h - 1, ascent - 1);
       const cw = x1 - x0 + 1;
       const ch = y1 - y0 + 1;
       const coverage = new Uint8Array(cw * ch);

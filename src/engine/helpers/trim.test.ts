@@ -1,7 +1,10 @@
 import { describe, expect, it } from 'vitest';
 import { alphaMass, makePixels, pixelAt, premulMass } from '../filters/test-utils';
 import { createPixels } from '../filters/types';
+import { removeBackground } from './background';
+import { addBadge } from './badge';
 import { cropPixels, resizePixels } from './resample';
+import { fitToShape, roundCorners } from './shape';
 import { alphaBounds, autoTrim, computeFit, fitAndCenter } from './trim';
 
 /** 10×10 transparent with an opaque blue block at x 2..5, y 3..7. */
@@ -117,5 +120,31 @@ describe('resizePixels / cropPixels', () => {
     expect(pixelAt(c, 2, 0)[3]).toBe(0);
     expect(pixelAt(c, 7, 7)[3]).toBe(0);
     expect(cropPixels(block(), { x: 50, y: 50, width: 3, height: 3 }).data.every((v) => v === 0)).toBe(true);
+  });
+});
+
+describe('helpers on degenerate images', () => {
+  it('handle 0×0, 0×n and 1×1 inputs without throwing or producing NaN', () => {
+    const one = makePixels(1, 1, () => [10, 20, 30, 200]);
+    const outs = [
+      removeBackground(one),
+      roundCorners(one, 0.5),
+      addBadge(one, { text: '9' }),
+      fitToShape(one, { shape: 'circle' }),
+      fitAndCenter(one, 1),
+      fitAndCenter(one, 7),
+      resizePixels(one, 3, 2),
+    ];
+    for (const p of outs) expect([...p.data].every((v) => Number.isInteger(v) && v >= 0 && v <= 255)).toBe(true);
+    expect(pixelAt(removeBackground(one), 0, 0)[3]).toBe(0); // a 1×1 image is all border
+    expect(autoTrim(one)!.rect).toEqual({ x: 0, y: 0, width: 1, height: 1 });
+    for (const empty of [createPixels(0, 0), createPixels(0, 4), createPixels(4, 0)]) {
+      expect(removeBackground(empty).data).toHaveLength(0);
+      expect(roundCorners(empty, 0.3).data).toHaveLength(0);
+      expect(addBadge(empty, { text: '1' }).data).toHaveLength(0);
+      expect(fitToShape(empty, { shape: 'hexagon' }).data).toHaveLength(0);
+      expect(autoTrim(empty)).toBeNull();
+      expect(alphaMass(fitAndCenter(empty, 8))).toBe(0);
+    }
   });
 });

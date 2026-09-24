@@ -123,6 +123,8 @@ describe('filter registry', () => {
     expect(normalizeFilterParams('vignette', { color: 'not a colour' }).color).toBe('#000000');
     expect(normalizeFilterParams('sketch', { invert: 'yes' } as never).invert).toBe(true);
     expect(normalizeFilterParams('blur', { radius: Number.NaN })).toEqual({ radius: 4 });
+    expect(normalizeFilterParams('blur', 'junk' as never)).toEqual({ radius: 4 });
+    expect(normalizeFilterParams('gradientMap', { stops: [{ offset: 0.5, color: '#fff' }] }).stops).toEqual(FILTERS.gradientMap.defaults.stops);
   });
 
   it('defaultParams returns fresh, mutable copies', () => {
@@ -139,15 +141,54 @@ describe('filter registry', () => {
     expect(() => applyFilter('nope' as FilterId, randomPixels(2, 2))).toThrow(RangeError);
   });
 
+  /** Best of `runs` wall-clock timings (ms), after one warm-up call. */
+  const bestOf = (runs: number, fn: () => unknown): number => {
+    fn();
+    let best = Infinity;
+    for (let i = 0; i < runs; i++) {
+      const t = performance.now();
+      fn();
+      best = Math.min(best, performance.now() - t);
+    }
+    return best;
+  };
+
   it('is fast enough for live preview at 512×512', () => {
     const big = randomPixels(512, 512, 1);
-    const times: Record<string, number> = {};
+    // Non-identity settings so no filter takes its early-out path.
+    const busy: { [K in FilterId]?: Record<string, unknown> } = {
+      brightnessContrast: { brightness: 10, contrast: 20 },
+      hueSaturation: { hue: 40, saturation: 20, lightness: 10 },
+      levels: { gamma: 1.4 },
+      opacity: { amount: 50 },
+      noise: { monochrome: false },
+      glow: { threshold: 0, radius: 64 },
+      blur: { radius: 64 },
+      sharpen: { radius: 20 },
+    };
+    const mask = new Uint8Array(512 * 512).fill(128);
     for (const id of FILTER_IDS) {
-      const t = performance.now();
-      applyFilter(id, big, defaultParams(id));
-      times[id] = performance.now() - t;
+      const params = { ...defaultParams(id), ...busy[id] };
+      // Typically 1–60 ms here; the bound only has to catch O(n·r) loops or
+      // per-pixel allocations on a slow, shared CI machine.
+      expect(bestOf(2, () => applyFilter(id, big, params, mask)), id).toBeLessThan(400);
     }
-    // Generous guard against accidental O(n·r) or per-pixel allocation regressions.
-    for (const [id, ms] of Object.entries(times)) expect(ms, id).toBeLessThan(2500);
+  });
+
+  it('spatial filters cost the same at any radius (no O(r) per-pixel work)', () => {
+    const img = randomPixels(256, 256, 2);
+    const cases: [FilterId, string, number, number][] = [
+      ['blur', 'radius', 1, 64],
+      ['sharpen', 'radius', 0.5, 20],
+      ['glow', 'radius', 1, 64],
+      ['pixelate', 'size', 2, 128],
+      ['emboss', 'height', 1, 10],
+    ];
+    for (const [id, key, small, large] of cases) {
+      const tSmall = bestOf(4, () => applyFilter(id, img, { [key]: small, threshold: 0 }));
+      const tLarge = bestOf(4, () => applyFilter(id, img, { [key]: large, threshold: 0 }));
+      // An O(r) implementation would be ~20–60× slower at the large radius.
+      expect(tLarge, `${id} ${key}=${large} took ${tLarge.toFixed(1)} ms vs ${tSmall.toFixed(1)} ms`).toBeLessThan(tSmall * 3 + 5);
+    }
   });
 });

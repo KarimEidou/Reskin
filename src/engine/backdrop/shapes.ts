@@ -3,8 +3,10 @@
  *
  * Circle, rounded square and squircle are signed distance functions
  * (analytic, or a first-order distance estimate for the superellipse);
- * hexagon, shield and blob are polygons (curves flattened finely enough for
- * sub-0.05 px error) rendered by the scanline rasterizer.
+ * hexagon, shield and blob are polygons rendered by the scanline
+ * rasterizer. Fillet arcs and the shield's Bézier curves are flattened to
+ * within 0.05 px; the blob is sampled at 48 points per control span
+ * (≈ 5 px segments at 512 px, well under a pixel of deviation).
  */
 import { mulberry32 } from '../filters/prng';
 import { insideMask, polygonSdf, rasterizePolygon, type Contour } from './raster';
@@ -55,7 +57,12 @@ export interface BlobOptions {
  */
 export type Sdf = (x: number, y: number, band: number) => number;
 
-export type ShapeGeometry = { kind: 'sdf'; sdf: Sdf } | { kind: 'polygon'; contours: Float64Array[] };
+/**
+ * A shape as an SDF or as polygon contours. `mirror` (SDF shapes) is the
+ * point the SDF is mirror-symmetric about in both axes; samplers use it to
+ * evaluate one quadrant and mirror the rest when it is the canvas centre.
+ */
+export type ShapeGeometry = { kind: 'sdf'; sdf: Sdf; mirror?: { x: number; y: number } } | { kind: 'polygon'; contours: Float64Array[] };
 
 // ---------------------------------------------------------------------------
 // SDF shapes
@@ -222,9 +229,15 @@ export function roundPolygon(pts: readonly number[], r: number): number[] {
   return out;
 }
 
+/**
+ * Appends a cubic Bézier (excluding its start point), flattened uniformly
+ * into the fewest segments whose chord error stays within FLATNESS: for n
+ * segments the error is at most max|B''| / (8n²), with max|B''| = 6 · the
+ * largest second difference of the control points.
+ */
 function pushCubic(out: number[], x0: number, y0: number, c1x: number, c1y: number, c2x: number, c2y: number, x1: number, y1: number): void {
-  const len = Math.hypot(c1x - x0, c1y - y0) + Math.hypot(c2x - c1x, c2y - c1y) + Math.hypot(x1 - c2x, y1 - c2y);
-  const n = Math.max(8, Math.min(256, Math.ceil(len / 2)));
+  const dd = Math.max(Math.hypot(x0 - 2 * c1x + c2x, y0 - 2 * c1y + c2y), Math.hypot(c1x - 2 * c2x + x1, c1y - 2 * c2y + y1));
+  const n = Math.max(4, Math.min(512, Math.ceil(Math.sqrt((0.75 * dd) / FLATNESS))));
   for (let i = 1; i <= n; i++) {
     const t = i / n;
     const u = 1 - t;
@@ -361,13 +374,14 @@ export function shapeGeometry(opts: ShapeOptions, box: ShapeBox): ShapeGeometry 
   const cx = box.x + box.w / 2;
   const cy = box.y + box.h / 2;
   const minSide = Math.min(box.w, box.h);
+  const mirror = { x: cx, y: cy };
   switch (opts.shape) {
     case 'circle':
-      return { kind: 'sdf', sdf: circleSdf(cx, cy, minSide / 2) };
+      return { kind: 'sdf', sdf: circleSdf(cx, cy, minSide / 2), mirror };
     case 'rounded':
-      return { kind: 'sdf', sdf: roundedRectSdf(cx, cy, box.w / 2, box.h / 2, opts.cornerRadius * minSide) };
+      return { kind: 'sdf', sdf: roundedRectSdf(cx, cy, box.w / 2, box.h / 2, opts.cornerRadius * minSide), mirror };
     case 'squircle':
-      return { kind: 'sdf', sdf: superellipseSdf(cx, cy, box.w / 2, box.h / 2, opts.squircleExponent) };
+      return { kind: 'sdf', sdf: superellipseSdf(cx, cy, box.w / 2, box.h / 2, opts.squircleExponent), mirror };
     case 'hexagon':
       return { kind: 'polygon', contours: [Float64Array.from(hexagonPolygon(box, opts.hexOrientation, opts.cornerRadius))] };
     case 'shield':
@@ -377,14 +391,30 @@ export function shapeGeometry(opts: ShapeOptions, box: ShapeBox): ShapeGeometry 
   }
 }
 
-/** Evaluates an SDF at every pixel centre (clamped to ±band when given). */
-export function sampleSdf(sdf: Sdf, width: number, height: number, band = Infinity): Float32Array {
+/**
+ * Evaluates an SDF at every pixel centre (clamped to ±band when given).
+ * When `mirror` is the canvas centre (the SDF is symmetric about it in both
+ * axes), only the top-left quadrant is evaluated and mirrored.
+ */
+export function sampleSdf(sdf: Sdf, width: number, height: number, band = Infinity, mirror?: { x: number; y: number }): Float32Array {
   const out = new Float32Array(width * height);
-  for (let y = 0, i = 0; y < height; y++) {
+  const sym = mirror !== undefined && Math.abs(2 * mirror.x - width) < 1e-9 && Math.abs(2 * mirror.y - height) < 1e-9;
+  const w = sym ? (width + 1) >> 1 : width;
+  const h = sym ? (height + 1) >> 1 : height;
+  for (let y = 0; y < h; y++) {
     const cy = y + 0.5;
-    for (let x = 0; x < width; x++, i++) {
-      const d = sdf(x + 0.5, cy, band);
-      out[i] = d > band ? band : d < -band ? -band : d;
+    const row = y * width;
+    const mrow = (height - 1 - y) * width;
+    for (let x = 0; x < w; x++) {
+      let d = sdf(x + 0.5, cy, band);
+      d = d > band ? band : d < -band ? -band : d;
+      out[row + x] = d;
+      if (sym) {
+        const mx = width - 1 - x;
+        out[row + mx] = d;
+        out[mrow + x] = d;
+        out[mrow + mx] = d;
+      }
     }
   }
   return out;
@@ -393,7 +423,7 @@ export function sampleSdf(sdf: Sdf, width: number, height: number, band = Infini
 /** Anti-aliased area coverage (0..1) of a geometry. */
 export function geometryCoverage(g: ShapeGeometry, width: number, height: number): Float32Array {
   if (g.kind === 'polygon') return rasterizePolygon(g.contours as Contour[], width, height);
-  const cov = sampleSdf(g.sdf, width, height, 2);
+  const cov = sampleSdf(g.sdf, width, height, 2, g.mirror);
   for (let i = 0; i < cov.length; i++) {
     const c = 0.5 - cov[i];
     cov[i] = c < 0 ? 0 : c > 1 ? 1 : c;
@@ -404,7 +434,7 @@ export function geometryCoverage(g: ShapeGeometry, width: number, height: number
 /** Signed distance field of a geometry, accurate within ±band px. */
 export function geometrySdf(g: ShapeGeometry, width: number, height: number, band: number): Float32Array {
   if (g.kind === 'polygon') return polygonSdf(g.contours as Contour[], width, height, band);
-  return sampleSdf(g.sdf, width, height, band);
+  return sampleSdf(g.sdf, width, height, band, g.mirror);
 }
 
 /** 1 where the pixel centre lies inside the geometry. */

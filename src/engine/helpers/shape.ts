@@ -9,23 +9,24 @@ import { assertPixels, type Mask, type Pixels } from '../filters/types';
 import { beginOutput, finishOutput, identityOutput } from '../filters/util';
 
 /**
- * What to clip to: a byte mask (0..255), a float coverage (0..1) — both
- * width × height — or a backdrop shape description (shape, inset,
- * cornerRadius, …) rendered at the image's size.
+ * What to clip to: a byte mask (0..255, `Uint8Array` or
+ * `Uint8ClampedArray`), a float coverage (0..1) — all width × height — or a
+ * backdrop shape description (shape, inset, cornerRadius, …) rendered at
+ * the image's size.
  */
-export type ShapeClip = Uint8Array | Float32Array | BackdropSpecInput;
+export type ShapeClip = Uint8Array | Uint8ClampedArray | Float32Array | BackdropSpecInput;
 
 /** Multiplies alpha by the coverage of `shape`. */
 export function fitToShape(src: Pixels, shape: ShapeClip, mask?: Mask | null): Pixels {
   assertPixels(src, 'src');
   const { width: w, height: h } = src;
   const n = w * h;
-  let cov: Float32Array | Uint8Array;
+  let cov: Float32Array | Uint8Array | Uint8ClampedArray;
   let scale: number;
-  if (shape instanceof Uint8Array || shape instanceof Float32Array) {
+  if (shape instanceof Uint8Array || shape instanceof Uint8ClampedArray || shape instanceof Float32Array) {
     if (shape.length !== n) throw new RangeError(`shape mask has ${shape.length} entries, expected ${n}`);
     cov = shape;
-    scale = shape instanceof Uint8Array ? 1 / 255 : 1;
+    scale = shape instanceof Float32Array ? 1 : 1 / 255;
   } else {
     if (n === 0) return identityOutput(src, mask, undefined);
     cov = backdropCoverage({ inset: 0, ...shape }, w, h);

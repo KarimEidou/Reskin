@@ -194,6 +194,24 @@ describe('noise', () => {
       if (distribution === 'uniform') expect(maxDev).toBeLessThanOrEqual(Math.ceil(20 * Math.sqrt(3)));
     });
   }
+
+  it('gaussian and uniform noise have their distribution shapes', () => {
+    // Share of samples within ±σ (±20.5 after rounding to integers): 69.5 % for a Gaussian,
+    // 20.5 / (20√3) = 59.2 % for a uniform of the same σ; 12 288 samples → ±0.5 % standard error.
+    const within = (distribution: 'uniform' | 'gaussian') => {
+      const out = noise(grey(), { amount: 40, distribution, monochrome: false, seed: 3 });
+      let inside = 0;
+      let n = 0;
+      for (let i = 0; i < out.data.length; i += 4) {
+        for (let c = 0; c < 3; c++, n++) if (Math.abs(out.data[i + c] - 128) <= 20) inside++;
+      }
+      return inside / n;
+    };
+    expect(within('gaussian')).toBeGreaterThan(0.675);
+    expect(within('gaussian')).toBeLessThan(0.715);
+    expect(within('uniform')).toBeGreaterThan(0.572);
+    expect(within('uniform')).toBeLessThan(0.612);
+  });
 });
 
 describe('vignette', () => {
@@ -221,6 +239,16 @@ describe('emboss', () => {
     expect(emboss(src, { keepColor: true }).data).toEqual(src.data);
   });
 
+  it('relief = amount · 255 · (height(p − l) − height(p + l)) on a hand-computed step', () => {
+    // Opaque black (height ½) left of x = 3, opaque white (height 1) from x = 3.
+    const src = makePixels(6, 1, (x) => (x < 3 ? [0, 0, 0, 255] : [255, 255, 255, 255]));
+    const row = (angle: number) => [0, 1, 2, 3, 4, 5].map((x) => pixelAt(emboss(src, { angle, height: 1, amount: 50 }), x, 0)[0]);
+    // Light from the east (0°): x = 2 and 3 see ½ − 1 = −½ → 128 − 63.75 = 64.25.
+    expect(row(0)).toEqual([128, 128, 64, 64, 128, 128]);
+    // Light from the west (180°): +½ → 191.75.
+    expect(row(180)).toEqual([128, 128, 192, 192, 128, 128]);
+  });
+
   it('lights the edge facing the light', () => {
     const src = makePixels(20, 20, (x, y) => (x >= 6 && x < 14 && y >= 6 && y < 14 ? [255, 255, 255, 255] : [0, 0, 0, 255]));
     const out = emboss(src, { angle: 180, height: 1 }); // light from the left
@@ -242,6 +270,20 @@ describe('sketch', () => {
     const inv = sketch(src, { invert: false });
     expect(pixelAt(inv, 5, 1)[0]).toBeGreaterThan(215);
     expect(pixelAt(inv, 0, 1)[0]).toBe(0);
+  });
+
+  it('Sobel magnitude on a hand-computed step: |G| / 4 at 100 %', () => {
+    // Left half luma 0, right half luma 128: |Gx| = 4 · 128/255 at the two columns beside the step.
+    const src = makePixels(6, 3, (x) => (x < 3 ? [0, 0, 0, 255] : [128, 128, 128, 255]));
+    const light = sketch(src, { invert: false });
+    expect([0, 1, 2, 3, 4, 5].map((x) => pixelAt(light, x, 1)[0])).toEqual([0, 0, 128, 128, 0, 0]);
+    expect([0, 1, 2, 3, 4, 5].map((x) => pixelAt(sketch(src), x, 1)[0])).toEqual([255, 255, 127, 127, 255, 255]);
+    // 200 % saturates at full strength; a diagonal step combines Gx and Gy.
+    expect(pixelAt(sketch(src, { invert: false, strength: 200 }), 2, 1)[0]).toBe(255);
+    const diag = makePixels(3, 3, (x, y) => (x + y >= 3 ? [255, 255, 255, 255] : [0, 0, 0, 255]));
+    // centre: Gx = tr + 2r + br − (tl + 2l + bl) = 0 + 2 + 1 − 0 = 3, Gy = 3 → |G| = 3√2 → /4 = 1.06 → clipped to 1
+    expect(pixelAt(sketch(diag, { invert: false }), 1, 1)[0]).toBe(255);
+    expect(pixelAt(sketch(diag, { invert: false, strength: 50 }), 1, 1)[0]).toBe(Math.round(255 * ((3 * Math.SQRT2) / 8)));
   });
 
   it('draws the silhouette of an icon on transparency', () => {

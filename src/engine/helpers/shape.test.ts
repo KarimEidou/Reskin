@@ -100,9 +100,18 @@ describe('fitToShape', () => {
     expect(pixelAt(hex, 32, 1)[3]).toBe(255);
   });
 
-  it('accepts float coverage', () => {
+  it('accepts float coverage and clamped byte masks', () => {
     const cov = new Float32Array(4).fill(0.5);
     expect(pixelAt(fitToShape(solidPixels(2, 2, 0, 0, 0, 200), cov), 0, 0)[3]).toBe(100);
+    const clamped = new Uint8ClampedArray([255, 0, 51, 255]);
+    const out = fitToShape(solidPixels(2, 2, 9, 9, 9, 200), clamped);
+    expect([0, 1, 2, 3].map((i) => out.data[i * 4 + 3])).toEqual([200, 0, 40, 200]);
+  });
+
+  it('respects a selection mask', () => {
+    const src = solidPixels(2, 1, 9, 9, 9, 255);
+    const out = fitToShape(src, new Uint8Array([0, 0]), new Uint8Array([255, 0]));
+    expect([out.data[3], out.data[7]]).toEqual([0, 255]);
   });
 });
 
