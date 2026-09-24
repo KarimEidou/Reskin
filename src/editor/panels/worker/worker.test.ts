@@ -2,7 +2,8 @@ import { describe, expect, it } from 'vitest';
 import { Engine, createEffect, renderSizes } from '$engine/index';
 import { layerThumbnail } from '$engine/doc/thumbnails';
 import { getSticker, renderSticker } from '$engine/stickers';
-import { PanelsClient, isCancelled } from './client';
+import { PanelsClient, isCancelled, type WorkerLike } from './client';
+import type { PanelMessage } from './protocol';
 import { handlePanelMessage } from './protocol';
 import { docFromSnapshot, snapshotDoc, snapshotLayer } from './snapshot';
 
@@ -99,6 +100,48 @@ describe('PanelsClient', () => {
     client.cancel('c');
     await expect(later).rejects.toSatisfy(isCancelled);
     await expect(client.request({ op: 'sticker', id: 'nope', size: 16, box: 12, color: null, outline: null })).rejects.toThrow('unknown sticker');
+    client.dispose();
+  });
+
+  it('hands the worker one request at a time, user requests before background work', async () => {
+    const posted: PanelMessage[] = [];
+    const fake: WorkerLike = {
+      onmessage: null,
+      onerror: null,
+      postMessage: (m) => posted.push(m as PanelMessage),
+      terminate: () => {},
+    };
+    const client = new PanelsClient(fake);
+    const sent = () => posted.map((m) => (m as { id: string }).id);
+    const reply = (i: number) => fake.onmessage!({ data: { reqId: posted[i]!.reqId, result: (posted[i] as { id: string }).id } } as MessageEvent);
+    const sticker = (id: string) => ({ op: 'sticker' as const, id, size: 16, box: 12, color: null, outline: null });
+
+    const a = client.request(sticker('a'), { channel: 'thumb-a', priority: 'low' });
+    const b = client.request(sticker('b'), { channel: 'thumb-b', priority: 'low' });
+    const c = client.request(sticker('c'));
+    expect(sent()).toEqual(['a']);
+    expect(client.pending).toBe(3);
+    reply(0);
+    await expect(a).resolves.toBe('a');
+    expect(sent()).toEqual(['a', 'c']);
+    reply(1);
+    await expect(c).resolves.toBe('c');
+    expect(sent()).toEqual(['a', 'c', 'b']);
+
+    // While b runs: a newer request replaces its channel's unstarted one,
+    // and cancelling drops a waiting request without computing it.
+    const e = client.request(sticker('e'), { channel: 'thumb-e', priority: 'low' });
+    const f = client.request(sticker('f'), { channel: 'thumb-e', priority: 'low' });
+    await expect(e).rejects.toSatisfy(isCancelled);
+    client.cancel('thumb-e');
+    await expect(f).rejects.toSatisfy(isCancelled);
+    const g = client.request(sticker('g'), { channel: 'thumb-e', priority: 'low' });
+    reply(2);
+    await expect(b).resolves.toBe('b');
+    expect(sent()).toEqual(['a', 'c', 'b', 'g']);
+    reply(3);
+    await expect(g).resolves.toBe('g');
+    expect(client.pending).toBe(0);
     client.dispose();
   });
 });

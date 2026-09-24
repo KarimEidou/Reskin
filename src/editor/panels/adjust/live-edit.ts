@@ -8,8 +8,9 @@
 // restores the exact original bytes (the engine's pixel commands swap
 // tiles). Cancel undoes that entry and drops it from the redo stack.
 //
-// If anything else touches the history meanwhile (the user paints, undoes…)
-// the edit becomes `stale` and stops writing.
+// If anything else touches the history meanwhile (the user paints, undoes…),
+// a tool holds uncommitted work (a pending transform), or the layer is locked
+// or removed, the edit becomes `stale` and stops writing.
 
 import type { Engine } from '$engine/index';
 
@@ -64,7 +65,9 @@ export class LiveLayerEdit {
   get stale(): boolean {
     const e = this.engine;
     const layer = e.getLayer(this.layerId);
-    if (!layer || layer.kind !== 'raster') return true;
+    if (!layer || layer.kind !== 'raster' || layer.locked) return true;
+    // Undo would cancel that pending work instead of removing our preview.
+    if (e.hasPending) return true;
     if (this.cmd) return e.history.peek() !== this.cmd || e.historyIndex !== this.anchorIndex + 1;
     return e.history.peek() !== this.anchor || e.historyIndex !== this.anchorIndex;
   }
@@ -82,7 +85,8 @@ export class LiveLayerEdit {
     if (!this.active) return false;
     if (pixels.length !== this.original.length) throw new RangeError('preview size does not match the layer');
     const e = this.engine;
-    if (this.cmd) {
+    const hadPreview = this.cmd !== null;
+    if (hadPreview) {
       e.undo();
       this.cmd = null;
     }
@@ -92,8 +96,10 @@ export class LiveLayerEdit {
       // A fresh edit history: anchor on what lies under our entry.
       this.anchorIndex = e.historyIndex - 1;
     } else {
-      // Identical to the original: nothing to record, forget the undone preview.
-      discardRedo(e);
+      // Identical to the original: nothing to record. Forget our undone
+      // preview (the only redo entry left: recording it dropped any older
+      // tail); without one, the user's redo steps stay untouched.
+      if (hadPreview) discardRedo(e);
       this.anchor = e.history.peek();
       this.anchorIndex = e.historyIndex;
     }

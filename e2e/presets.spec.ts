@@ -66,6 +66,23 @@ test('applying a preset is one undo step and becomes the batch recipe', async ({
   await expect(page.locator('[data-preset="neon"]')).toHaveAttribute('aria-pressed', 'false');
 });
 
+test('after a tab switch the applied look is still marked and re-styles in place', async ({ page }) => {
+  await openHarness(page, url);
+  await openTab(page, 'styles');
+  await page.locator('[data-preset="clay"]').click();
+  await expect(page.locator('[data-preset="clay"]')).toHaveAttribute('aria-pressed', 'true');
+  await openTab(page, 'layers');
+  await openTab(page, 'styles');
+  await expect(page.locator('[data-preset="clay"]')).toHaveAttribute('aria-pressed', 'true');
+  const clay = await compositeHash(page);
+  const intensity = page.getByTestId('styles-panel').getByRole('slider', { name: 'Depth' });
+  await intensity.focus();
+  await page.keyboard.press('PageUp');
+  await expect.poll(() => compositeHash(page), { timeout: 10_000 }).not.toBe(clay);
+  expect((await history(page)).labels).toEqual(['Style: Clay']);
+  await expect(page.locator('[data-preset="clay"]')).toHaveAttribute('aria-pressed', 'true');
+});
+
 test('the recipe replays on another icon ("Apply style to all")', async ({ page }) => {
   await openHarness(page, url);
   await openTab(page, 'styles');

@@ -116,6 +116,7 @@
         return;
     }
     e.preventDefault();
+    e.stopPropagation();
     set({ s: Math.min(1, Math.max(0, s)), v: Math.min(1, Math.max(0, v)) });
   }
 

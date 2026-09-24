@@ -40,6 +40,16 @@ describe('style recipes', () => {
     expect(engine.doc.layers.filter((l) => l.name === BACKDROP_LAYER_NAME)).toHaveLength(1);
   });
 
+  it('keeps one backdrop step when the backdrop is updated again', () => {
+    let recipe = chainRecipes(null, presetRecipe('glass', 'Glass', {}, syncBuilder));
+    recipe = chainRecipes(recipe, backdropRecipe(resolveBackdropSpec({ shape: 'circle' })));
+    recipe = chainRecipes(recipe, backdropRecipe(resolveBackdropSpec({ shape: 'hexagon' })));
+    expect(recipe.label).toBe('Glass + Backdrop');
+    const only = chainRecipes(backdropRecipe(resolveBackdropSpec({ shape: 'circle' })), backdropRecipe(resolveBackdropSpec({ shape: 'blob' })));
+    expect(only.label).toBe('Backdrop');
+    expect((only as { steps?: unknown }).steps).toBeUndefined();
+  });
+
   it('adds a backdrop under everything when there is none', () => {
     const { engine } = scratch();
     const id = placeBackdrop(engine, { data: new Uint8ClampedArray(512 * 512 * 4).fill(200) });

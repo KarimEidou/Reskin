@@ -50,7 +50,8 @@
   async function addSticker(def: StickerDef): Promise<void> {
     if (adding) return;
     adding = def.id;
-    const doc = engine.doc.width;
+    const target = engine.doc;
+    const doc = target.width;
     const box = (doc * size) / 100;
     try {
       const px = await panelsWorker().request({
@@ -61,6 +62,8 @@
         color: colorFor(def),
         outline: outline ? { color: outlineColor, width: Math.max(0.5, (box * outlineWidth) / 100) } : null,
       });
+      // Another design was opened (or resized) meanwhile: not meant for it.
+      if (engine.doc !== target || target.width !== px.width) return;
       place(def.label, px);
     } catch (e) {
       if (!isCancelled(e)) toast({ message: `Could not add the sticker: ${e instanceof Error ? e.message : String(e)}`, kind: 'error' });

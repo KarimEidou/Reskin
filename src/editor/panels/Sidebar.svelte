@@ -9,7 +9,7 @@
   remembers its scroll position.
 -->
 <script lang="ts">
-  import { onMount, tick, type Component } from 'svelte';
+  import { onMount, tick, untrack, type Component } from 'svelte';
   import Tabs from '$lib/ui/Tabs.svelte';
   import Spinner from '$lib/ui/Spinner.svelte';
   import { getSession } from '../state/context';
@@ -60,17 +60,24 @@
   });
 
   // ---- scroll position per tab ----------------------------------------------------
+  // Tracked on session.sidebarTab itself, so tab changes made elsewhere
+  // (command palette, other views) keep the positions too. A pre-effect runs
+  // before the DOM switches panels: the old panel's position is still there.
   let scroller: HTMLDivElement | undefined = $state();
   const scrollTops = new Map<SidebarTab, number>();
   let shownTab: SidebarTab = session.sidebarTab;
 
-  function onTabChange(next: string): void {
-    if (scroller) scrollTops.set(shownTab, scroller.scrollTop);
-    shownTab = next as SidebarTab;
-    void tick().then(() => {
-      if (scroller) scroller.scrollTop = scrollTops.get(shownTab) ?? 0;
+  $effect.pre(() => {
+    const next = session.sidebarTab;
+    if (next === shownTab) return;
+    untrack(() => {
+      if (scroller) scrollTops.set(shownTab, scroller.scrollTop);
     });
-  }
+    shownTab = next;
+    void tick().then(() => {
+      if (scroller && shownTab === next) scroller.scrollTop = scrollTops.get(next) ?? 0;
+    });
+  });
 
   // Icon-only tabs still get a tooltip: their label.
   let tabsHost: HTMLDivElement | undefined = $state();
@@ -87,7 +94,7 @@
 
 <aside class="sidebar" data-testid="sidebar" aria-label="Design panels">
   <div class="tabs-host" bind:this={tabsHost}>
-    <Tabs tabs={SIDEBAR_TABS} bind:value={session.sidebarTab} label="Panels" size="sm" onchange={onTabChange}>
+    <Tabs tabs={SIDEBAR_TABS} bind:value={session.sidebarTab} label="Panels" size="sm">
       {#snippet children(id)}
         <div class="scroll" bind:this={scroller} data-testid="panel-{id}">
           {#if Current}

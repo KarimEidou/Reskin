@@ -158,8 +158,11 @@
     if (applying) return;
     applying = true;
     const s = $state.snapshot(spec) as BackdropSpec;
+    const doc = engine.doc;
     try {
-      const px = await session.filters.backdrop(s, engine.doc.width, { channel: 'backdrop-apply' });
+      const px = await session.filters.backdrop(s, doc.width, { channel: 'backdrop-apply' });
+      // Another design was opened (or resized) meanwhile: not meant for it.
+      if (engine.doc !== doc || doc.width !== px.width) return;
       const id = placeBackdrop(engine, px);
       if (id) session.recipe = chainRecipes(session.recipe, backdropRecipe(s));
     } catch (e) {
@@ -208,17 +211,17 @@
         <NumField label="Seed" value={spec.blob.seed} min={0} max={99999} width="80px" onchange={(v) => update({ blob: { ...spec.blob, seed: v } })} />
         <IconButton label="New random shape" icon={Dices} onclick={() => update({ blob: { ...spec.blob, seed: Math.floor(Math.random() * 99999) } })} />
         <div class="grow">
-          <Slider label="Wobble" value={Math.round(spec.blob.variance * 100)} min={0} max={100} unit="%" onchange={(v) => update({ blob: { ...spec.blob, variance: v / 100 } })} />
+          <Slider label="Wobble" value={Math.round(spec.blob.variance * 100)} min={0} max={100} unit="%" oninput={(v) => update({ blob: { ...spec.blob, variance: v / 100 } })} onchange={(v) => update({ blob: { ...spec.blob, variance: v / 100 } })} />
         </div>
       </div>
     {/if}
     {#if spec.shape === 'rounded' || spec.shape === 'hexagon' || spec.shape === 'shield'}
-      <Slider label="Corner radius" value={Math.round(spec.cornerRadius * 100)} min={0} max={50} unit="%" onchange={(v) => update({ cornerRadius: v / 100 })} />
+      <Slider label="Corner radius" value={Math.round(spec.cornerRadius * 100)} min={0} max={50} unit="%" oninput={(v) => update({ cornerRadius: v / 100 })} onchange={(v) => update({ cornerRadius: v / 100 })} />
     {/if}
     {#if spec.shape === 'squircle'}
-      <Slider label="Squareness" value={spec.squircleExponent} min={2} max={12} step={0.5} onchange={(v) => update({ squircleExponent: v })} />
+      <Slider label="Squareness" value={spec.squircleExponent} min={2} max={12} step={0.5} oninput={(v) => update({ squircleExponent: v })} onchange={(v) => update({ squircleExponent: v })} />
     {/if}
-    <Slider label="Margin" value={Math.round(spec.inset * 100)} min={0} max={30} unit="%" onchange={(v) => update({ inset: v / 100 })} />
+    <Slider label="Margin" value={Math.round(spec.inset * 100)} min={0} max={30} unit="%" oninput={(v) => update({ inset: v / 100 })} onchange={(v) => update({ inset: v / 100 })} />
   </Section>
 
   <Section title="Fill">
@@ -237,7 +240,7 @@
         }}
       />
       {#if fill.type === 'radial'}
-        <Slider label="Radius" value={Math.round(fill.radius * 100)} min={20} max={200} unit="%" onchange={(v) => update({ fill: { ...fill, radius: v / 100 } })} />
+        <Slider label="Radius" value={Math.round(fill.radius * 100)} min={20} max={200} unit="%" oninput={(v) => update({ fill: { ...fill, radius: v / 100 } })} onchange={(v) => update({ fill: { ...fill, radius: v / 100 } })} />
       {/if}
     {/if}
   </Section>
@@ -246,8 +249,8 @@
     <Toggle label="Top highlight" size="sm" checked={spec.gloss !== null} onchange={(on) => update({ gloss: on ? { ...DEFAULT_GLOSS } : null })} />
     {#if spec.gloss}
       {@const gloss = spec.gloss}
-      <Slider label="Strength" value={Math.round(gloss.opacity * 100)} min={0} max={100} unit="%" onchange={(v) => update({ gloss: { ...gloss, opacity: v / 100 } })} />
-      <Slider label="Size" value={Math.round(gloss.size * 100)} min={20} max={100} unit="%" onchange={(v) => update({ gloss: { ...gloss, size: v / 100 } })} />
+      <Slider label="Strength" value={Math.round(gloss.opacity * 100)} min={0} max={100} unit="%" oninput={(v) => update({ gloss: { ...gloss, opacity: v / 100 } })} onchange={(v) => update({ gloss: { ...gloss, opacity: v / 100 } })} />
+      <Slider label="Size" value={Math.round(gloss.size * 100)} min={20} max={100} unit="%" oninput={(v) => update({ gloss: { ...gloss, size: v / 100 } })} onchange={(v) => update({ gloss: { ...gloss, size: v / 100 } })} />
     {/if}
   </Section>
 
@@ -255,7 +258,7 @@
     <Toggle label="Border" size="sm" checked={spec.border !== null} onchange={(on) => update({ border: on ? { ...DEFAULT_BORDER } : null })} />
     {#if spec.border}
       {@const border = spec.border}
-      <Slider label="Width" value={Math.round(border.width * 1000) / 10} min={0.5} max={10} step={0.5} unit="%" onchange={(v) => update({ border: { ...border, width: v / 100 } })} />
+      <Slider label="Width" value={Math.round(border.width * 1000) / 10} min={0.5} max={10} step={0.5} unit="%" oninput={(v) => update({ border: { ...border, width: v / 100 } })} onchange={(v) => update({ border: { ...border, width: v / 100 } })} />
       <ColorField label="Colour" value={border.color} onchange={(c) => update({ border: { ...border, color: c } })} />
       <SegmentedControl label="Border position" size="sm" fullWidth options={BORDER_POS} value={border.position} onchange={(v) => update({ border: { ...border, position: v as typeof border.position } })} />
     {/if}
@@ -265,9 +268,9 @@
     <Toggle label="Drop shadow" size="sm" checked={spec.shadow !== null} onchange={(on) => update({ shadow: on ? { ...DEFAULT_SHADOW } : null })} />
     {#if spec.shadow}
       {@const shadow = spec.shadow}
-      <Slider label="Blur" value={Math.round(shadow.blur * 1000) / 10} min={0} max={10} step={0.5} unit="%" onchange={(v) => update({ shadow: { ...shadow, blur: v / 100 } })} />
-      <Slider label="Offset" value={Math.round(shadow.offsetY * 1000) / 10} min={-10} max={10} step={0.5} unit="%" onchange={(v) => update({ shadow: { ...shadow, offsetY: v / 100 } })} />
-      <Slider label="Opacity" value={Math.round(shadow.opacity * 100)} min={0} max={100} unit="%" onchange={(v) => update({ shadow: { ...shadow, opacity: v / 100 } })} />
+      <Slider label="Blur" value={Math.round(shadow.blur * 1000) / 10} min={0} max={10} step={0.5} unit="%" oninput={(v) => update({ shadow: { ...shadow, blur: v / 100 } })} onchange={(v) => update({ shadow: { ...shadow, blur: v / 100 } })} />
+      <Slider label="Offset" value={Math.round(shadow.offsetY * 1000) / 10} min={-10} max={10} step={0.5} unit="%" oninput={(v) => update({ shadow: { ...shadow, offsetY: v / 100 } })} onchange={(v) => update({ shadow: { ...shadow, offsetY: v / 100 } })} />
+      <Slider label="Opacity" value={Math.round(shadow.opacity * 100)} min={0} max={100} unit="%" oninput={(v) => update({ shadow: { ...shadow, opacity: v / 100 } })} onchange={(v) => update({ shadow: { ...shadow, opacity: v / 100 } })} />
       <ColorField label="Colour" value={shadow.color} alpha={false} onchange={(c) => update({ shadow: { ...shadow, color: c } })} />
     {/if}
   </Section>

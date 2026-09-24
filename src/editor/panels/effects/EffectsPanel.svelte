@@ -5,6 +5,7 @@
   parameters. Slider drags coalesce into one undo step per control.
 -->
 <script lang="ts">
+  import { onDestroy } from 'svelte';
   import ChevronRight from '@lucide/svelte/icons/chevron-right';
   import Plus from '@lucide/svelte/icons/plus';
   import Sparkles from '@lucide/svelte/icons/sparkles';
@@ -70,17 +71,24 @@
     commit(l.effects.filter((_, k) => k !== i));
   }
 
-  function patch(i: number, change: Partial<Record<string, unknown>>, key: string): void {
+  /**
+   * Changes one effect. `key` names a continuous control (slider, colour
+   * drag) whose updates merge into one undo step; discrete changes (switch,
+   * choice) pass null and are always their own step.
+   */
+  function patch(i: number, change: Partial<Record<string, unknown>>, key: string | null): void {
     const l = layer;
     if (!l || !l.effects[i]) return;
     const next = cloneEffects(l.effects);
     next[i] = { ...next[i], ...change } as LayerEffect;
-    commit(next, `fx:${i}:${key}`);
+    commit(next, key === null ? undefined : `fx:${i}:${key}`);
   }
 
   // Slider drags: effects re-render the whole layer, so update the engine at
   // most every 90 ms while dragging (the final value is always applied).
   const live = throttle((i: number, change: Partial<Record<string, unknown>>, key: string) => patch(i, change, key), 90);
+  // Leaving the panel mid-drag applies the latest value now, not after the component is gone.
+  onDestroy(() => live.flush());
 
   function valueOf(e: LayerEffect, key: string): unknown {
     return (e as unknown as Record<string, unknown>)[key];
@@ -143,9 +151,9 @@
       }}
     />
   {:else if f.kind === 'segment'}
-    <SegmentedControl label={f.label} size="sm" fullWidth options={f.options} value={String(valueOf(e, f.key))} onchange={(v) => patch(i, { [f.key]: v }, f.key)} />
+    <SegmentedControl label={f.label} size="sm" fullWidth options={f.options} value={String(valueOf(e, f.key))} onchange={(v) => patch(i, { [f.key]: v }, null)} />
   {:else if f.kind === 'select'}
-    <Select label={f.label} size="sm" options={f.options} value={String(valueOf(e, f.key))} onchange={(v) => patch(i, { [f.key]: v }, f.key)} />
+    <Select label={f.label} size="sm" options={f.options} value={String(valueOf(e, f.key))} onchange={(v) => patch(i, { [f.key]: v }, null)} />
   {/if}
 {/snippet}
 
@@ -188,7 +196,7 @@
                 <span class="chev" class:open={!collapsed[key]} aria-hidden="true"><ChevronRight size={14} /></span>
                 <span class="fx-name">{info.label}</span>
               </button>
-              <Toggle label="{info.label} enabled" hideLabel size="sm" checked={e.enabled} onchange={(on) => patch(i, { enabled: on }, 'enabled')} />
+              <Toggle label="{info.label} enabled" hideLabel size="sm" checked={e.enabled} onchange={(on) => patch(i, { enabled: on }, null)} />
               <IconButton label="Remove {info.label.toLowerCase()}" icon={Trash2} size="sm" onclick={() => remove(i)} data-testid="remove-effect" />
             </div>
             {#if !collapsed[key]}

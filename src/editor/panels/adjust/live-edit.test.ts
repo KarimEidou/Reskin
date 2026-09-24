@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { Engine } from '$engine/index';
+import { Engine, pointerInput } from '$engine/index';
 import { LiveLayerEdit, discardRedo } from './live-edit';
 
 function setup() {
@@ -70,6 +70,45 @@ describe('LiveLayerEdit', () => {
     expect(engine.canRedo).toBe(false);
     expect(live.showing).toBe(false);
     expect(live.commit()).toBe(false);
+  });
+
+  it('keeps the redo steps while the preview matches the original', () => {
+    const { engine, id } = setup();
+    engine.undo();
+    expect(engine.canRedo).toBe(true);
+    const live = new LiveLayerEdit(engine, id, 'Adjust: Test');
+    // Default parameters that change nothing (e.g. brightness 0).
+    expect(live.show(live.original.slice())).toBe(true);
+    live.cancel();
+    expect(engine.canRedo).toBe(true);
+    expect(engine.historyEntries.map((e) => e.label)).toEqual(['Paint']);
+  });
+
+  it('goes stale while a transform is pending (undo would cancel it instead)', () => {
+    const { engine, id, layer } = setup();
+    const live = new LiveLayerEdit(engine, id, 'Adjust: Test');
+    live.show(variant(live.original, 10));
+    engine.setTool('move');
+    engine.pointerDown(pointerInput({ x: 200, y: 200 }));
+    engine.pointerMove(pointerInput({ x: 240, y: 200 }));
+    engine.pointerUp(pointerInput({ x: 240, y: 200 }));
+    expect(engine.hasPending).toBe(true);
+    expect(live.stale).toBe(true);
+    const shown = layer().surface.data.slice();
+    expect(live.show(variant(live.original, 30))).toBe(false);
+    expect(same(layer().surface.data, shown)).toBe(true);
+    expect(engine.hasPending).toBe(true);
+  });
+
+  it('goes stale when the layer is locked', () => {
+    const { engine, id, layer } = setup();
+    const live = new LiveLayerEdit(engine, id, 'Adjust: Test');
+    live.show(variant(live.original, 10));
+    engine.setLayerProps(id, { locked: true });
+    expect(live.stale).toBe(true);
+    const shown = layer().surface.data.slice();
+    expect(live.show(variant(live.original, 30))).toBe(false);
+    expect(same(layer().surface.data, shown)).toBe(true);
   });
 
   it('goes stale when something else edits the document', () => {

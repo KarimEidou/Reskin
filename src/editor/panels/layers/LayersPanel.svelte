@@ -6,7 +6,7 @@
   with merge down, flatten and rasterize text.
 -->
 <script lang="ts">
-  import { onMount, tick } from 'svelte';
+  import { onDestroy, onMount, tick } from 'svelte';
   import Copy from '@lucide/svelte/icons/copy';
   import Ellipsis from '@lucide/svelte/icons/ellipsis';
   import Eye from '@lucide/svelte/icons/eye';
@@ -125,6 +125,7 @@
     if (editing) return;
     if ((e.key === 'ArrowUp' || e.key === 'ArrowDown') && e.altKey) {
       e.preventDefault();
+      e.stopPropagation();
       move(row, e.key === 'ArrowUp' ? -1 : 1);
       return;
     }
@@ -135,14 +136,17 @@
     else if (e.key === 'End') next = rows.length - 1;
     else if (e.key === 'F2') {
       e.preventDefault();
+      e.stopPropagation();
       startRename(row);
       return;
     } else if (e.key === 'Delete') {
       e.preventDefault();
+      e.stopPropagation();
       remove(row.id);
       return;
     } else return;
     e.preventDefault();
+    e.stopPropagation();
     const target = rows[Math.max(0, Math.min(rows.length - 1, next))];
     if (target) {
       select(target.id);
@@ -157,6 +161,8 @@
 
   function onPointerDown(e: PointerEvent, row: Row, i: number): void {
     if (e.button !== 0 || editing === row.id) return;
+    // A drag whose release produced no click must not swallow this one.
+    suppressClick = false;
     drag = { id: row.id, from: i, startY: e.clientY, dy: 0, started: false };
     (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId);
   }
@@ -254,6 +260,8 @@
 
   // Opacity drags coalesce into one history entry (merge key) and one engine update per frame.
   const setOpacity = rafThrottle((id: string, v: number) => engine.setLayerProps(id, { opacity: v / 100 }, { merge: 'opacity' }));
+  // Leaving the panel mid-drag applies the latest value now.
+  onDestroy(() => setOpacity.flush());
 </script>
 
 <div class="layers" data-testid="layers-panel">
@@ -372,6 +380,7 @@
             onkeydown={(e) => {
               if (e.key === 'Enter') {
                 e.preventDefault();
+                e.stopPropagation();
                 finishRename(true);
               } else if (e.key === 'Escape') {
                 e.preventDefault();

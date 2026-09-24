@@ -7,23 +7,48 @@
 -->
 <script module lang="ts">
   import type { Pixels } from '$engine/filters/types';
+  import type { PresetId } from '$engine/presets';
+  import type { BackdropShape } from '$engine/backdrop/shapes';
 
   /** Thumbnails by icon + preset + size + options (kept across tab switches). */
   const thumbCache = new Map<string, Pixels>();
-  const MAX_CACHE = 240;
+  /** A few option sets' worth of grids (12 each), a few MB at most. */
+  const MAX_CACHE = 96;
 
   function remember(key: string, px: Pixels): void {
     thumbCache.set(key, px);
     while (thumbCache.size > MAX_CACHE) thumbCache.delete(thumbCache.keys().next().value!);
   }
+
+  /**
+   * Designs without an original icon are styled from their composite. Once
+   * a look is applied, that composite is the styled one, so the unstyled
+   * source is kept per document together with the history step of the look
+   * built from it: while that look is still the latest change, reopening the
+   * panel styles the same source again (not a style of a style).
+   */
+  const designSources = new WeakMap<object, { source: Pixels; look: unknown }>();
+
+  /** The look last applied to each document (its preset and history step), so the panel shows it again after a tab switch. */
+  const appliedLooks = new WeakMap<object, { id: PresetId; cmd: unknown }>();
+
+  interface Tuning {
+    matchIcon: boolean;
+    hue: number;
+    intensity: number;
+    shape: 'auto' | BackdropShape;
+  }
+
+  /** The Tune settings per document: re-styling after a tab switch keeps the earlier choices. */
+  const tunings = new WeakMap<object, Tuning>();
 </script>
 
 <script lang="ts">
-  import { onMount, untrack } from 'svelte';
+  import { onDestroy, onMount, untrack } from 'svelte';
   import Check from '@lucide/svelte/icons/check';
   import WandSparkles from '@lucide/svelte/icons/wand-sparkles';
-  import { BACKDROP_SHAPES, type BackdropShape } from '$engine/backdrop/shapes';
-  import { applyPresetResult, DEFAULT_PRESET_OPTIONS, PRESETS, getPreset, type PresetId, type PresetOptions } from '$engine/presets';
+  import { BACKDROP_SHAPES } from '$engine/backdrop/shapes';
+  import { applyPresetResult, DEFAULT_PRESET_OPTIONS, PRESETS, getPreset, type PresetOptions } from '$engine/presets';
   import EmptyState from '$lib/ui/EmptyState.svelte';
   import Select from '$lib/ui/Select.svelte';
   import Slider from '$lib/ui/Slider.svelte';
@@ -48,12 +73,22 @@
   const thumbSize = $derived(Math.min(192, Math.round(TILE * dpr)));
 
   // ---- the source icon -----------------------------------------------------------------
+  /**
+   * Content key of an icon: every pixel counts, since the worker caches the
+   * icon analysis under it (a sampled hash could hand one icon another's
+   * analysis). Two FNV-style lanes over 32-bit words: ~1 ms for 256².
+   */
   function hashPixels(p: { width: number; height: number; data: Uint8ClampedArray }): string {
-    let h = 2166136261;
     const d = p.data;
-    const step = Math.max(1, Math.floor(d.length / 65536)) * 4 + 1;
-    for (let i = 0; i < d.length; i += step) h = Math.imul(h ^ d[i]!, 16777619);
-    return `${p.width}x${p.height}:${(h >>> 0).toString(36)}`;
+    const words = d.byteOffset % 4 === 0 ? new Uint32Array(d.buffer, d.byteOffset, d.byteLength >> 2) : new Uint32Array(d.slice().buffer);
+    let h1 = 2166136261;
+    let h2 = 0x9e3779b9;
+    for (let i = 0; i < words.length; i++) {
+      const w = words[i]!;
+      h1 = Math.imul(h1 ^ w, 16777619);
+      h2 = Math.imul(h2 ^ w, 0x85ebca6b) ^ (h2 >>> 13);
+    }
+    return `${p.width}x${p.height}:${(h1 >>> 0).toString(36)}${(h2 >>> 0).toString(36)}`;
   }
 
   let designSource = $state.raw<Pixels | null>(null);
@@ -61,7 +96,10 @@
   const iconKey = $derived(icon ? hashPixels(icon) : '');
 
   onMount(() => {
-    if (!session.original) {
+    const kept = designSources.get(engine.doc);
+    if (!session.original && kept && kept.look === engine.history.peek()) {
+      designSource = kept.source;
+    } else if (!session.original) {
       // No original icon (a blank design or an image): style the current
       // design, composited in the worker through the export path.
       const snap = snapshotDoc(engine.doc);
@@ -78,10 +116,15 @@
   });
 
   // ---- options -----------------------------------------------------------------------------
-  let matchIcon = $state(true);
-  let hue = $state(DEFAULT_PRESET_OPTIONS.hue ?? 220);
-  let intensity = $state(50);
-  let shape = $state<'auto' | BackdropShape>('auto');
+  const tuned = tunings.get(engine.doc);
+  let matchIcon = $state(tuned?.matchIcon ?? true);
+  let hue = $state(tuned?.hue ?? DEFAULT_PRESET_OPTIONS.hue ?? 220);
+  let intensity = $state(tuned?.intensity ?? 50);
+  let shape = $state<'auto' | BackdropShape>(tuned?.shape ?? 'auto');
+
+  $effect(() => {
+    tunings.set(engine.doc, { matchIcon, hue, intensity, shape });
+  });
 
   const options = $derived<Partial<PresetOptions>>({
     hue: matchIcon ? null : hue,
@@ -110,7 +153,7 @@
       next[p.id] = thumbs[p.id];
       const copy = { width: src.width, height: src.height, data: src.data.slice() };
       panelsWorker()
-        .request({ op: 'presetThumb', iconKey: key, icon: copy, id: p.id, size, options: opts }, { channel: `preset-thumb-${p.id}`, transfer: [copy.data.buffer] })
+        .request({ op: 'presetThumb', iconKey: key, icon: copy, id: p.id, size, options: opts }, { channel: `preset-thumb-${p.id}`, transfer: [copy.data.buffer], priority: 'low' })
         .then((px) => {
           remember(cacheKey, px);
           if (key === iconKey) thumbs = { ...thumbs, [p.id]: px };
@@ -132,41 +175,61 @@
   });
 
   // ---- applying ----------------------------------------------------------------------------
+  const lastLook = appliedLooks.get(engine.doc);
+  const lookIsLatest = lastLook !== undefined && lastLook.cmd === engine.history.peek();
   let applying = $state<PresetId | null>(null);
-  let applied = $state<PresetId | null>(null);
+  let applied = $state<PresetId | null>(lookIsLatest ? lastLook.id : null);
   /** History command of our last apply (to re-style it in place). */
-  let appliedCmd: unknown = null;
+  let appliedCmd: unknown = lookIsLatest ? lastLook.cmd : null;
 
   const builder: PresetBuilder = (id, src, size, opts) => {
     const copy = { width: src.width, height: src.height, data: new Uint8ClampedArray(src.data) };
     return panelsWorker().request({ op: 'presetBuild', iconKey: hashPixels(copy), icon: copy, id, size, options: opts }, { transfer: [copy.data.buffer] });
   };
 
-  async function apply(id: PresetId, restyle = false): Promise<void> {
+  /** Options changed while a look was being applied: re-style once it lands. */
+  let restyleAgain = false;
+
+  async function apply(id: PresetId, inPlace = false): Promise<void> {
     const src = icon;
-    if (!src || applying) return;
+    if (!src) return;
+    if (applying) {
+      if (inPlace) restyleAgain = true;
+      return;
+    }
     applying = id;
     const opts = $state.snapshot(options) as Partial<PresetOptions>;
     const label = getPreset(id).label;
+    const doc = engine.doc;
     try {
       const copy = { width: src.width, height: src.height, data: src.data.slice() };
       const result = await panelsWorker().request(
-        { op: 'presetBuild', iconKey, icon: copy, id, size: engine.doc.width, options: opts },
+        { op: 'presetBuild', iconKey, icon: copy, id, size: doc.width, options: opts },
         { channel: 'preset-apply', transfer: [copy.data.buffer] },
       );
-      if (restyle && appliedCmd && engine.history.peek() === appliedCmd) {
-        // Replace the previous look instead of stacking another undo step.
+      // Another design was opened meanwhile: this look was not meant for it.
+      if (engine.doc !== doc) return;
+      if (inPlace) {
+        // Only while the look is still the latest change (the user may have
+        // edited meanwhile): replace it instead of stacking another step.
+        if (!appliedCmd || engine.history.peek() !== appliedCmd) return;
         engine.undo();
         discardRedo(engine);
       }
       applyPresetResult(engine, result, `Style: ${label}`);
       appliedCmd = engine.history.peek();
       applied = id;
+      appliedLooks.set(doc, { id, cmd: appliedCmd });
+      if (!session.original) designSources.set(doc, { source: src, look: appliedCmd });
       session.recipe = presetRecipe(id, label, opts, builder);
     } catch (e) {
       if (!isCancelled(e)) toast({ message: `Could not apply ${label}: ${e instanceof Error ? e.message : String(e)}`, kind: 'error' });
     } finally {
       applying = null;
+      if (restyleAgain && !destroyed) {
+        restyleAgain = false;
+        restyle();
+      }
     }
   }
 
@@ -175,8 +238,19 @@
     if (applied && appliedCmd && engine.history.peek() === appliedCmd) void apply(applied, true);
   }, 280);
 
+  let destroyed = false;
+  onDestroy(() => {
+    destroyed = true;
+    refreshThumbs.cancel();
+    restyle.cancel();
+  });
+
+  // Only real option changes re-style (not the panel opening).
+  let seenOptions = untrack(() => optionsKey);
   $effect(() => {
-    void optionsKey;
+    const key = optionsKey;
+    if (key === seenOptions) return;
+    seenOptions = key;
     untrack(() => restyle());
   });
 
@@ -205,8 +279,9 @@
             class:on={stillApplied && applied === p.id}
             aria-pressed={stillApplied && applied === p.id}
             aria-busy={applying === p.id}
+            aria-disabled={applying !== null && applying !== p.id}
             title={p.description}
-            disabled={applying !== null}
+            class:waiting={applying !== null}
             data-testid="preset-tile"
             data-preset={p.id}
             data-ready={px !== null}
@@ -273,11 +348,11 @@
       background-color var(--fade-1) linear,
       border-color var(--fade-1) linear;
   }
-  .tile:hover:not(:disabled) {
+  .tile:hover:not(.waiting) {
     background: var(--surface-hover);
     color: var(--text);
   }
-  .tile:disabled {
+  .tile.waiting {
     cursor: progress;
   }
   .tile.on {
@@ -294,10 +369,10 @@
     display: grid;
     transition: transform var(--dur-2) var(--ease-overshoot);
   }
-  .tile:hover:not(:disabled) .thumb {
+  .tile:hover:not(.waiting) .thumb {
     transform: scale(1.04);
   }
-  .tile:active:not(:disabled) .thumb {
+  .tile:active:not(.waiting) .thumb {
     transform: scale(0.97);
   }
   .busy {

@@ -368,7 +368,9 @@ const retroPixel: Builder = (ctx) => {
 /** A die-cut vinyl sticker: thick white border, soft shadow, laminate sheen. */
 const sticker: Builder = (ctx) => {
   const { size } = ctx;
-  const icon = placeIcon(ctx.a, size, 0.19);
+  // The die-cut sticker (icon + paper border) fills about as much of the
+  // canvas as the other presets' plates (~85 %), not a shrunken badge.
+  const icon = placeIcon(ctx.a, size, 0.135);
   const border = px(ctx, amt(ctx, 0.028, 0.045, 0.065));
   const cut = smoothShape(dilatePlane(alphaPlane(icon), size, border), size, px(ctx, 0.012));
   const b = box(ctx, cut);

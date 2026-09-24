@@ -15,6 +15,12 @@ import { runHelper, type HelperId } from '../adjust/helper-defs';
 /** Recipe steps keep their own label so chains can describe themselves. */
 export interface RecipeStep extends StyleRecipe {
   steps?: readonly StyleRecipe[];
+  /**
+   * Steps that set up the same thing again (a backdrop re-designed and
+   * updated) replace the previous one of that kind at the end of a chain
+   * instead of piling up.
+   */
+  replaces?: string;
 }
 
 /** Builds a preset at `size` from an icon image (the panels worker in the app). */
@@ -85,6 +91,7 @@ export function backdropRecipe(spec: BackdropSpec): RecipeStep {
   const s = structuredClone(spec);
   return {
     label: 'Backdrop',
+    replaces: 'backdrop',
     apply(engine: Engine) {
       placeBackdrop(engine, renderBackdrop(s, engine.doc.width));
     },
@@ -94,7 +101,11 @@ export function backdropRecipe(spec: BackdropSpec): RecipeStep {
 /** `prev` then `next` (a preset always starts afresh). */
 export function chainRecipes(prev: StyleRecipe | null, next: RecipeStep): StyleRecipe {
   if (!prev) return next;
-  const steps = [...((prev as RecipeStep).steps ?? [prev]), ...(next.steps ?? [next])];
+  const before = [...((prev as RecipeStep).steps ?? [prev])];
+  const last = before[before.length - 1] as RecipeStep | undefined;
+  if (next.replaces !== undefined && last?.replaces === next.replaces) before.pop();
+  if (before.length === 0) return next;
+  const steps = [...before, ...(next.steps ?? [next])];
   const names = steps.map((s) => s.label);
   return {
     label: names.length > 3 ? `${names.slice(0, 2).join(' + ')} + ${names.length - 2} more` : names.join(' + '),

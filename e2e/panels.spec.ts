@@ -146,6 +146,13 @@ test.describe('color', () => {
     // Swap, then a palette swatch goes to the colour being edited.
     await page.getByTestId('swap-colors').click();
     await expect.poll(primary).toEqual({ r: 255, g: 255, b: 255, a: 1 });
+    // The wells are a radio group: arrow keys switch between them.
+    await page.getByTestId('primary-well').focus();
+    await page.keyboard.press('ArrowRight');
+    await expect(page.getByTestId('secondary-well')).toBeFocused();
+    await expect(page.getByTestId('secondary-well')).toHaveAttribute('aria-checked', 'true');
+    await page.keyboard.press('ArrowLeft');
+    await expect(page.getByTestId('primary-well')).toHaveAttribute('aria-checked', 'true');
     await page.getByTestId('secondary-well').click();
     await page.getByTestId('palette').getByRole('button').first().click();
     const secondary = await page.evaluate(() => (globalThis as any).__reskinSession.engine.secondary);
@@ -203,6 +210,21 @@ test.describe('adjust', () => {
     expect(await history(page)).toEqual({ labels: [], index: 0, canRedo: false });
   });
 
+  test('Ctrl+Z while previewing ends the adjustment and restores the layer exactly', async ({ page }) => {
+    const before = await startInvert(page);
+    await page.locator('body').click({ position: { x: 5, y: 5 } });
+    await page.keyboard.press('Control+z');
+    await expect(page.getByTestId('adjust-editor')).toHaveCount(0);
+    expect(await layerHash(page)).toBe(before);
+    expect((await history(page)).index).toBe(0);
+    // Opening an adjustment whose defaults change nothing keeps the redo step.
+    await page.locator('[data-filter="brightnessContrast"]').click();
+    await expect(page.getByTestId('adjust-editor')).toBeVisible();
+    await page.getByTestId('adjust-cancel').click();
+    expect((await history(page)).canRedo).toBe(true);
+    expect(await layerHash(page)).toBe(before);
+  });
+
   test('Reset returns to the defaults; icon helpers preview too', async ({ page }) => {
     await openHarness(page, url);
     await openTab(page, 'adjust');
@@ -244,6 +266,17 @@ test.describe('effects', () => {
     await page.getByRole('menuitem', { name: 'Outline' }).click();
     await expect(page.getByTestId('effect-card')).toHaveCount(2);
     expect((await layers(page))[0]!.effects).toEqual(['dropShadow', 'outline']);
+
+    // Switching an effect off and on again is two undo steps (never merged).
+    const steps = (await history(page)).labels.length;
+    await page.getByTestId('effect-card').first().getByRole('switch').click();
+    await page.getByTestId('effect-card').first().getByRole('switch').click();
+    expect((await history(page)).labels.length).toBe(steps + 2);
+    // A slider's keyboard steps merge into one.
+    const opacity = page.getByTestId('effect-card').first().getByRole('slider', { name: 'Opacity' });
+    await opacity.focus();
+    for (let i = 0; i < 4; i++) await page.keyboard.press('ArrowRight');
+    await expect.poll(async () => (await history(page)).labels.length).toBe(steps + 3);
 
     // Disable the shadow, then remove both.
     await page.getByTestId('effect-card').first().getByRole('switch').click();
@@ -343,6 +376,17 @@ test.describe('previews', () => {
     const sizes = await page.evaluate(() => window.__e2e!.settings.icoSizes);
     const previews = page.getByTestId('previews');
     await expect(previews.locator('li.size.ready')).toHaveCount(sizes.length);
+    // The design (not an empty first render) has landed.
+    await expect
+      .poll(() =>
+        previews.locator('canvas[data-size="16"]').evaluate((c: HTMLCanvasElement) => {
+          const d = c.getContext('2d')!.getImageData(0, 0, c.width, c.height).data;
+          let opaque = 0;
+          for (let i = 3; i < d.length; i += 4) if (d[i]! > 200) opaque++;
+          return opaque;
+        }),
+      )
+      .toBeGreaterThan(16 * 16 * 0.3);
     for (const size of sizes) {
       const canvas = previews.locator(`canvas[data-size="${size}"]`);
       const info = await canvas.evaluate((c: HTMLCanvasElement) => {
@@ -422,6 +466,21 @@ test.describe('sidebar', () => {
     for (const name of ['Layers', 'Color', 'Adjust', 'Effects', 'Styles', 'Backdrop', 'Stickers', 'History']) {
       await expect(sidebar(page).getByRole('tab', { name })).toHaveCount(1);
     }
+  });
+
+  test('each tab keeps its scroll position, also when switched from elsewhere', async ({ page }) => {
+    await openHarness(page, url);
+    await openTab(page, 'adjust');
+    await expect(page.getByTestId('adjust-panel')).toBeVisible();
+    const scroller = page.getByTestId('panel-adjust');
+    await scroller.evaluate((el) => (el.scrollTop = 240));
+    const kept = await scroller.evaluate((el) => el.scrollTop);
+    expect(kept).toBeGreaterThan(100);
+    await openTab(page, 'layers');
+    await expect.poll(() => page.getByTestId('panel-layers').evaluate((el) => el.scrollTop)).toBe(0);
+    // Switched by code (command palette, other views) rather than a tab click.
+    await page.evaluate(() => ((globalThis as any).__reskinSession.sidebarTab = 'adjust'));
+    await expect.poll(() => page.getByTestId('panel-adjust').evaluate((el) => el.scrollTop)).toBe(kept);
   });
 });
 

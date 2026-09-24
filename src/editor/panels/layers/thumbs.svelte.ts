@@ -109,7 +109,7 @@ export class LayerThumbs {
     try {
       const out = await panelsWorker().request(
         { op: 'layerThumbs', layers: snaps, size: this.size, crisp: this.engine.doc.pixelArt !== null },
-        { transfer: snaps.map((s) => s.data.buffer) },
+        { transfer: snaps.map((s) => s.data.buffer), priority: 'low' },
       );
       if (this.disposed) return;
       const next = { ...this.thumbs };

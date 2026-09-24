@@ -54,7 +54,7 @@
     const list = [...sizes];
     rendering = true;
     try {
-      const out = await panelsWorker().request({ op: 'renderSizes', doc: snap, sizes: list }, { channel: 'previews', transfer: snapshotTransfer(snap) });
+      const out = await panelsWorker().request({ op: 'renderSizes', doc: snap, sizes: list }, { channel: 'previews', transfer: snapshotTransfer(snap), priority: 'low' });
       rendered = new Map(out.map((r) => [r.size, r.pixels]));
       failed = null;
       rendering = false;
@@ -67,13 +67,24 @@
 
   const schedule = debounce(() => void render(), 250);
 
+  // Edits re-render ~250 ms after they settle; a different design (another
+  // item, a loaded project) renders at once instead of showing the old one.
+  let renderedDoc = -1;
   $effect(() => {
     void session.rev.pixels;
     void session.rev.layers;
-    void session.rev.document;
+    const doc = session.rev.document;
     void sizes;
     if (!open) return;
-    untrack(() => (rendered.size === 0 ? void render() : schedule()));
+    untrack(() => {
+      if (rendered.size === 0 || doc !== renderedDoc) {
+        renderedDoc = doc;
+        schedule.cancel();
+        void render();
+      } else {
+        schedule();
+      }
+    });
   });
 
   onMount(() => {

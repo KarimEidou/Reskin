@@ -143,10 +143,12 @@
     else if (e.key === 'End') o = 1;
     else if (e.key === 'Delete' || e.key === 'Backspace') {
       e.preventDefault();
+      e.stopPropagation();
       remove(i);
       return;
     } else return;
     e.preventDefault();
+    e.stopPropagation();
     local[i] = { ...local[i]!, offset: Math.round(clamp(o) * 1000) / 1000 };
     selected = i;
     commit();
@@ -213,6 +215,7 @@
           aria-valuemax={100}
           aria-valuenow={Math.round(stop.offset * 100)}
           aria-valuetext="{Math.round(stop.offset * 100)}%, {stop.color}"
+          aria-describedby="{uid}-hint"
           onpointerdown={(e) => onStopDown(e, i)}
           onpointermove={(e) => onStopMove(e, i)}
           onpointerup={(e) => onStopUp(e, i)}

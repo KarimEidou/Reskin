@@ -65,6 +65,7 @@
     else if (e.key === 'End') next = hist.rows.length - 1;
     else return;
     e.preventDefault();
+    e.stopPropagation();
     next = Math.max(0, Math.min(hist.rows.length - 1, next));
     jump(next);
     buttons[next]?.focus();

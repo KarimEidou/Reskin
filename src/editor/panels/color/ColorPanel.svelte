@@ -36,6 +36,17 @@
   });
   const current = $derived(colors[target]);
 
+  // The two wells are a radio group: arrow keys switch (and focus) the other one.
+  let wells: Partial<Record<'primary' | 'secondary', HTMLButtonElement>> = {};
+
+  function onWellKey(e: KeyboardEvent): void {
+    if (!['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown'].includes(e.key)) return;
+    e.preventDefault();
+    e.stopPropagation();
+    target = target === 'primary' ? 'secondary' : 'primary';
+    wells[target]?.focus();
+  }
+
   function set(c: Rgba, commit: boolean): void {
     engine.setColor(target, c);
     if (commit) rememberColor(c);
@@ -116,11 +127,15 @@
       <IconButton label={ScreenDropper ? 'Pick a colour from the screen' : 'Pick a colour from the canvas'} icon={Pipette} size="sm" shortcut="I" onclick={pickFromScreen} data-testid="eyedropper" />
     {/snippet}
     <div class="wells">
-      <div class="pair" role="radiogroup" aria-label="Colour being edited">
+      <!-- Focus moves between the radios (roving tabindex), not onto the group. -->
+      <!-- svelte-ignore a11y_interactive_supports_focus -->
+      <div class="pair" role="radiogroup" aria-label="Colour being edited" onkeydown={onWellKey}>
         <button
+          bind:this={wells.secondary}
           type="button"
           role="radio"
           class="well secondary"
+          tabindex={target === 'secondary' ? 0 : -1}
           aria-checked={target === 'secondary'}
           aria-label="Secondary colour {nice(colors.secondary)}"
           style:--c={hexOf(colors.secondary)}
@@ -128,9 +143,11 @@
           data-testid="secondary-well"
         ></button>
         <button
+          bind:this={wells.primary}
           type="button"
           role="radio"
           class="well primary"
+          tabindex={target === 'primary' ? 0 : -1}
           aria-checked={target === 'primary'}
           aria-label="Primary colour {nice(colors.primary)}"
           style:--c={hexOf(colors.primary)}

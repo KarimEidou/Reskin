@@ -7,7 +7,7 @@
   restores the layer byte for byte, Reset returns to the defaults.
 -->
 <script lang="ts">
-  import { onDestroy, tick } from 'svelte';
+  import { onDestroy, tick, untrack } from 'svelte';
   import ChevronLeft from '@lucide/svelte/icons/chevron-left';
   import ImageOff from '@lucide/svelte/icons/image-off';
   import Lock from '@lucide/svelte/icons/lock';
@@ -39,6 +39,8 @@
     description: string;
     params: readonly ControlSpec[];
     usesSelection: boolean;
+    /** Name of the layer being adjusted (the active layer may change meanwhile). */
+    layerName: string;
   }
 
   const layer = $derived.by(() => {
@@ -60,13 +62,13 @@
   let seq = 0;
   let latest: Promise<void> = Promise.resolve();
 
-  function describe(t: Target): Editing {
+  function describe(t: Target, layerName: string): Editing {
     if (t.kind === 'filter') {
       const f = getFilter(t.id);
-      return { target: t, label: f.label, description: f.description, params: f.params, usesSelection: true };
+      return { target: t, label: f.label, description: f.description, params: f.params, usesSelection: true, layerName };
     }
     const h = getHelper(t.id);
-    return { target: t, label: h.label, description: h.description, params: h.params, usesSelection: h.usesSelection };
+    return { target: t, label: h.label, description: h.description, params: h.params, usesSelection: h.usesSelection, layerName };
   }
 
   function initial(t: Target): ControlValues {
@@ -85,7 +87,10 @@
     const l = engine.activeLayer;
     if (!l || l.kind !== 'raster' || l.locked) return;
     finish(true);
-    const info = describe(t);
+    // A pending transform is the user's finished move: keep it (one step)
+    // before the adjustment starts on top of it.
+    engine.commitPending();
+    const info = describe(t, l.name);
     try {
       live = new LiveLayerEdit(engine, l.id, info.label);
     } catch (e) {
@@ -134,11 +139,30 @@
   function staleEnd(): void {
     // Someone else changed the layer (painting, undo): keep what is there.
     park();
+    session.filters.cancel('adjust');
+    panelsWorker().cancel('adjust-helper');
+    seq++;
     live?.commit();
     live = null;
     editing = null;
     busy = false;
   }
+
+  // Close the editor as soon as the edit goes stale (Ctrl+Z, painting, a
+  // pending transform, the layer locked or deleted), not only on the next
+  // slider change.
+  $effect(() => {
+    void session.rev.history;
+    void session.rev.layers;
+    void session.rev.pixels;
+    void session.rev.document;
+    void session.rev.tool;
+    void session.rev.overlay;
+    void session.rev.interaction;
+    untrack(() => {
+      if (editing && live && !live.active) staleEnd();
+    });
+  });
 
   function setValue(key: string, v: ControlValue): void {
     values[key] = v;
@@ -199,9 +223,11 @@
   function onEditorKey(e: KeyboardEvent): void {
     if (e.key === 'Escape' && !e.defaultPrevented) {
       e.preventDefault();
+      e.stopPropagation();
       cancel();
     } else if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) {
       e.preventDefault();
+      e.stopPropagation();
       void apply();
     }
   }
@@ -233,7 +259,7 @@
         {#if hasSelection && editing.usesSelection}
           <span class="chip"><SquareDashedMousePointer size={13} aria-hidden="true" /> Only the selection changes</span>
         {:else}
-          <span class="chip">On “{layer?.name ?? ''}”</span>
+          <span class="chip">On “{editing.layerName}”</span>
         {/if}
       </div>
       {#if editing.params.length > 0}
