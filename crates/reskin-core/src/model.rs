@@ -473,6 +473,11 @@ pub struct ItemInfo {
     pub system_icon: Option<SystemIconId>,
     /// Human-readable notes for the UI (e.g. "Public desktop — needs admin").
     pub notes: Vec<String>,
+    /// Set on the first item `inspect_paths` returns when it was given more
+    /// paths than it inspects in one call: how many it left out.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts", ts(optional))]
+    pub skipped: Option<u32>,
 }
 
 /// One frame of an icon.
@@ -577,6 +582,12 @@ pub struct HistoryEntry {
     pub restored_at: Option<f64>,
     /// Entry that this one was applied on top of (same target), if any.
     pub supersedes: Option<String>,
+    /// Set on the extra entries of one apply (matching Start-menu and
+    /// taskbar-pin shortcuts): the id of the apply's main entry. Undoing
+    /// the main entry undoes them too.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts", ts(optional))]
+    pub group: Option<String>,
 }
 
 /// Where the applied icon sits on screen, for the fly-to-icon flourish.
@@ -598,9 +609,16 @@ pub struct DesktopSpot {
 )]
 pub enum ApplyOutcome {
     Applied {
+        /// The main entry first, then one per matching pin that was updated.
         entries: Vec<HistoryEntry>,
         /// The box flew to the icon on the desktop (false = celebrated in place).
         landed: bool,
+        /// How many matching Start-menu / taskbar-pin shortcuts were left
+        /// unchanged because Windows won't let Reskin change them (e.g. in
+        /// the all-users Start menu); absent when there were none.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[cfg_attr(feature = "ts", ts(optional))]
+        skipped_pins: Option<u32>,
     },
     /// The target needs admin rights. Call `apply_icon_elevated(ticket)`
     /// after the user agrees, or retry with `PersonalCopy`.

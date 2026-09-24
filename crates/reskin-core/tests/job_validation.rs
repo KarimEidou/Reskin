@@ -5,6 +5,7 @@ use std::collections::HashSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU32, Ordering};
+use std::time::Duration;
 
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD;
@@ -142,8 +143,8 @@ fn good_shortcut_and_url_on_the_public_desktop() {
         }
     );
     let op = assert_ok(set_url(r"C:\Users\Public\Desktop\Steam Game.url"));
-    assert_eq!(op.link(), LinkKind::Url);
-    assert_eq!(op.target(), r"C:\Users\Public\Desktop\Steam Game.url");
+    assert_eq!(op.link(), Some(LinkKind::Url));
+    assert_eq!(op.target(), Some(r"C:\Users\Public\Desktop\Steam Game.url"));
 }
 
 #[test]
@@ -195,7 +196,7 @@ fn restore_ops_are_validated() {
         location: Some(r"C:\Games\game.exe".into()),
         index: 0,
     });
-    assert_eq!(url.link(), LinkKind::Url);
+    assert_eq!(url.link(), Some(LinkKind::Url));
 }
 
 #[test]
@@ -620,7 +621,7 @@ fn op_constructors_pick_the_kind_by_extension() {
         }
         other => panic!("{other:?}"),
     }
-    assert_eq!(op.target(), r"C:\Users\Public\Desktop\App.LNK");
+    assert_eq!(op.target(), Some(r"C:\Users\Public\Desktop\App.LNK"));
     assert_ok(op);
     assert!(matches!(
         JobOp::set_icon(r"C:\Users\Public\Desktop\Site.url", "Site", &ico).unwrap(),
@@ -644,6 +645,12 @@ fn op_constructors_pick_the_kind_by_extension() {
         }
     );
     assert!(JobOp::restore_icon("C:\\x\\folder", &original).is_err());
+    let delete = JobOp::delete_icon(ICON_NAME);
+    assert_eq!(delete.target(), None);
+    assert_eq!(
+        serde_json::to_string(&delete).unwrap(),
+        format!(r#"{{"type":"deleteIcon","iconName":"{ICON_NAME}"}}"#)
+    );
 }
 
 #[test]
@@ -667,6 +674,9 @@ struct FakeExec {
     calls: Vec<String>,
     fail_write: HashSet<String>,
     fail_set: HashSet<String>,
+    fail_delete: HashSet<String>,
+    /// Icons a Public Desktop shortcut still uses.
+    in_use: HashSet<String>,
 }
 
 fn fmt_icon(icon: Option<(&str, i32)>) -> String {
@@ -699,6 +709,14 @@ impl JobExec for FakeExec {
             return Err(Error::Other(format!("{target} is locked")));
         }
         Ok(())
+    }
+
+    fn delete_icon(&mut self, dest: &str) -> Result<bool> {
+        self.calls.push(format!("delete {dest}"));
+        if self.fail_delete.contains(dest) {
+            return Err(Error::Other(format!("{dest} is locked")));
+        }
+        Ok(!self.in_use.contains(dest))
     }
 
     fn notify(&mut self, target: &str) {
@@ -787,74 +805,432 @@ fn all_ok_exits_zero() {
 // ---------------------------------------------------------------------------
 
 #[test]
-fn result_path_sits_next_to_the_job() {
-    let job_path = Path::new("jobs").join("abc.json");
-    assert_eq!(
-        job::result_path(&job_path),
-        Path::new("jobs").join("abc.result.json")
-    );
-    assert_eq!(
-        job::result_path(Path::new("abc")),
-        Path::new("abc.result.json")
-    );
-}
-
-#[test]
-fn helper_round_trip_through_files() {
-    let tmp = TempDir::new("roundtrip");
+fn job_files_are_named_after_their_id() {
+    let tmp = TempDir::new("names");
     let j = job::new_job(vec![set_lnk(r"C:\Users\Public\Desktop\App.lnk")]);
     let path = job::write_job(tmp.path(), &j).unwrap();
     assert_eq!(path, tmp.path().join(format!("{}.json", j.id)));
-    assert_eq!(job::read_job(&path).unwrap(), j);
-    assert_eq!(job::read_result(&path).unwrap(), None);
-
-    let mut exec = FakeExec::default();
-    assert_eq!(job::run_job_file(&path, DESKTOP, ICONS, &mut exec), EXIT_OK);
-    assert_eq!(exec.calls.len(), 3);
-    let result = job::read_result(&path).unwrap().unwrap();
-    assert_eq!(result.id, j.id);
-    assert!(result.ok);
-    assert_eq!(result.results.len(), 1);
-}
-
-#[test]
-fn helper_rejects_invalid_and_unreadable_jobs() {
-    let tmp = TempDir::new("invalid");
-    // Valid JSON, invalid job: nothing runs, the reason is reported.
-    let j = job::new_job(vec![set_lnk(r"C:\Users\Bob\Desktop\App.lnk")]);
-    let path = job::write_job(tmp.path(), &j).unwrap();
-    let mut exec = FakeExec::default();
     assert_eq!(
-        job::run_job_file(&path, DESKTOP, ICONS, &mut exec),
-        EXIT_INVALID
+        job::parse_job(&fs::read(&path).unwrap()).unwrap(),
+        j,
+        "write_job writes what parse_job reads"
     );
-    assert!(exec.calls.is_empty());
-    let result: JobResult = job::read_result(&path).unwrap().unwrap();
-    assert!(!result.ok);
-    assert_eq!(result.exit_code(), EXIT_INVALID);
-    assert!(result.error.unwrap().contains("Public Desktop"));
-
-    // Garbage.
-    let garbage = tmp.path().join("garbage.json");
-    fs::write(&garbage, b"{ not json").unwrap();
-    assert_eq!(
-        job::run_job_file(&garbage, DESKTOP, ICONS, &mut exec),
-        EXIT_INVALID
-    );
-    let result = job::read_result(&garbage).unwrap().unwrap();
-    assert_eq!(result.id, "garbage");
-    assert!(result.error.is_some());
-
-    // Missing.
-    let missing = tmp.path().join("missing.json");
-    assert_eq!(
-        job::run_job_file(&missing, DESKTOP, ICONS, &mut exec),
-        EXIT_INVALID
-    );
-    assert!(exec.calls.is_empty());
-
     // Bad ids are refused before touching the file system.
     let mut bad = job::new_job(Vec::new());
     bad.id = "../escape".into();
     assert!(job::write_job(tmp.path(), &bad).is_err());
+}
+
+#[test]
+fn the_helper_takes_its_job_only_from_a_local_job_file_path() {
+    let jobs = r"C:\Users\Kim\AppData\Local\com.karimeidou.reskin\jobs";
+    assert_eq!(
+        job::job_id_of(&format!(r"{jobs}\0123abcd-job.json")).unwrap(),
+        "0123abcd-job"
+    );
+    assert_eq!(job::job_id_of("c:/jobs/abc.json").unwrap(), "abc");
+    for name in [
+        "Job.json",
+        "a b.json",
+        "abc.txt",
+        "abc",
+        ".json",
+        "abc.json.lnk",
+    ] {
+        let path = format!(r"{jobs}\{name}");
+        let err = job::job_id_of(&path).unwrap_err().to_string();
+        assert!(err.contains("not a job file name"), "{path}: {err}");
+    }
+    for path in [
+        r"\\server\share\jobs\abc.json",
+        r"//server/share/jobs/abc.json",
+        r"\\?\C:\jobs\abc.json",
+        r"\\.\pipe\abc.json",
+        r"C:\jobs\..\abc.json",
+        r"C:\jobs\.. \abc.json",
+        r"jobs\abc.json",
+        r"C:abc.json",
+        "",
+    ] {
+        let err = job::job_id_of(path).unwrap_err().to_string();
+        assert!(err.contains("not an absolute path"), "{path}: {err}");
+    }
+}
+
+#[test]
+fn plain_file_names_are_single_safe_components() {
+    for name in [
+        ICON_NAME,
+        "0123abcd.json",
+        "Reskin",
+        "icons",
+        "a b.txt",
+        "Café.lnk",
+        ".hidden",
+    ] {
+        assert!(job::is_plain_file_name(name), "{name:?}");
+    }
+    assert!(job::is_plain_file_name(&"a".repeat(255)));
+    let long = "a".repeat(256);
+    for name in [
+        "",
+        ".",
+        "..",
+        r"a\b",
+        "a/b",
+        "C:x",
+        "x.ico.",
+        "x ",
+        "con",
+        "NUL.ico",
+        "com1.json",
+        "a*b",
+        "a?b",
+        "a\"b",
+        "a<b",
+        "a|b",
+        "a\u{1}b",
+        &long,
+    ] {
+        assert!(!job::is_plain_file_name(name), "{name:?}");
+    }
+}
+
+#[test]
+fn the_helper_runs_a_job_from_the_bytes_it_read() {
+    let j = job::new_job(vec![set_lnk(r"C:\Users\Public\Desktop\App.lnk")]);
+    let bytes = serde_json::to_vec(&j).unwrap();
+    let mut exec = FakeExec::default();
+    let result = job::run_job(&j.id, Ok(bytes.clone()), DESKTOP, ICONS, &mut exec);
+    assert_eq!(result.id, j.id);
+    assert!(result.ok);
+    assert_eq!(result.results.len(), 1);
+    assert_eq!(result.exit_code(), EXIT_OK);
+    assert_eq!(exec.calls.len(), 3);
+
+    // A byte-order mark (hand-edited files) is fine.
+    let with_bom = [b"\xEF\xBB\xBF".as_slice(), &bytes].concat();
+    let result = job::run_job(
+        &j.id,
+        Ok(with_bom),
+        DESKTOP,
+        ICONS,
+        &mut FakeExec::default(),
+    );
+    assert!(result.ok);
+
+    // The job must carry the id its file is named after.
+    let mut exec = FakeExec::default();
+    let result = job::run_job("another-job", Ok(bytes), DESKTOP, ICONS, &mut exec);
+    assert_eq!(result.id, "another-job");
+    assert_eq!(result.exit_code(), EXIT_INVALID);
+    assert!(result.error.unwrap().contains("has id"));
+    assert!(exec.calls.is_empty());
+}
+
+#[test]
+fn the_helper_rejects_invalid_unreadable_and_oversize_jobs() {
+    let mut exec = FakeExec::default();
+    // Valid JSON, invalid job: nothing runs, the reason is reported.
+    let j = job::new_job(vec![set_lnk(r"C:\Users\Bob\Desktop\App.lnk")]);
+    let bytes = serde_json::to_vec(&j).unwrap();
+    let result: JobResult = job::run_job(&j.id, Ok(bytes), DESKTOP, ICONS, &mut exec);
+    assert!(!result.ok);
+    assert!(result.results.is_empty());
+    assert_eq!(result.exit_code(), EXIT_INVALID);
+    assert!(result.error.unwrap().contains("Public Desktop"));
+
+    // Not a job: reported by position, without echoing what the file says
+    // (the report goes back to the unelevated app).
+    for body in [
+        b"{ not json".as_slice(),
+        br#"{"version":1,"id":"x","createdAt":0,"ops":[{"type":"secret-words"}]}"#,
+        br#"{"version":"secret-words","id":"x","createdAt":0,"ops":[]}"#,
+    ] {
+        let result = job::run_job("x", Ok(body.to_vec()), DESKTOP, ICONS, &mut exec);
+        let error = result.error.unwrap();
+        assert!(error.contains("malformed (line 1, column"), "{error}");
+        assert!(!error.contains("secret"), "{error}");
+    }
+
+    // Unreadable: the reading error is the reason.
+    let result = job::run_job(
+        "x",
+        Err(Error::NotFound("jobs\\x.json".into())),
+        DESKTOP,
+        ICONS,
+        &mut exec,
+    );
+    assert_eq!(result.exit_code(), EXIT_INVALID);
+    assert!(result.error.unwrap().contains("jobs\\x.json"));
+    assert!(exec.calls.is_empty());
+
+    // More than any valid job can be is refused unparsed.
+    let huge = vec![b' '; job::MAX_JOB_FILE_BYTES as usize + 1];
+    let err = job::parse_job(&huge).unwrap_err().to_string();
+    assert!(err.contains("too large"), "{err}");
+}
+
+#[test]
+fn the_app_trusts_a_result_file_only_when_it_agrees_with_the_exit_code() {
+    assert_eq!(
+        job::result_file(Path::new("results"), "abc"),
+        Path::new("results").join("abc.json")
+    );
+    assert_eq!(job::result_file_name("abc"), "abc.json");
+    let a = r"C:\Users\Public\Desktop\A.lnk";
+    let b = r"C:\Users\Public\Desktop\B.lnk";
+    let validated = validate(vec![set_lnk(a), restore_lnk(b, None, 0)]).unwrap();
+    let mut exec = FakeExec {
+        fail_set: [b.to_owned()].into(),
+        ..FakeExec::default()
+    };
+    let result = job::execute_job(&validated, &mut exec);
+    assert_eq!(result.exit_code(), EXIT_FAILED);
+    let bytes = job::encode_result(&result).unwrap();
+    assert_eq!(
+        job::result_for("job-1", EXIT_FAILED, 2, Some(&bytes)),
+        result
+    );
+    let with_bom = [b"\xEF\xBB\xBF".as_slice(), &bytes].concat();
+    assert_eq!(
+        job::result_for("job-1", EXIT_FAILED, 2, Some(&with_bom)),
+        result
+    );
+
+    // Without a file it can trust, the exit code decides.
+    let mut forged = result.clone();
+    forged.ok = true;
+    let forged = job::encode_result(&forged).unwrap();
+    let cases: [(&str, i32, usize, Option<&[u8]>); 6] = [
+        ("job-1", EXIT_FAILED, 2, None),
+        // Another job's result.
+        ("job-2", EXIT_FAILED, 2, Some(&bytes)),
+        // Another outcome than the helper exited with.
+        ("job-1", EXIT_OK, 2, Some(&bytes)),
+        // Another number of ops than the job had.
+        ("job-1", EXIT_FAILED, 3, Some(&bytes)),
+        // Claims success for a failed op.
+        ("job-1", EXIT_OK, 2, Some(&forged)),
+        ("job-1", EXIT_FAILED, 2, Some(b"{ not json")),
+    ];
+    for (id, code, ops, file) in cases {
+        assert_eq!(
+            job::result_for(id, code, ops, file),
+            JobResult::from_exit_code(id, code, ops),
+            "{id} {code} {ops}"
+        );
+    }
+
+    // A refused job's reason comes through.
+    let refused = JobResult::rejected("job-1", &Error::Other("bad target".into()));
+    let bytes = job::encode_result(&refused).unwrap();
+    assert_eq!(
+        job::result_for("job-1", EXIT_INVALID, 2, Some(&bytes)),
+        refused
+    );
+    let mut padded = refused.clone();
+    padded.results = result.results.clone();
+    let bytes = job::encode_result(&padded).unwrap();
+    assert_eq!(
+        job::result_for("job-1", EXIT_INVALID, 2, Some(&bytes)),
+        JobResult::from_exit_code("job-1", EXIT_INVALID, 2)
+    );
+}
+
+#[test]
+fn stale_results_and_redirected_paths_are_recognised() {
+    let old = job::RESULT_TTL;
+    assert!(job::is_stale_result("0123abcd-x.json", old));
+    assert!(!job::is_stale_result(
+        "0123abcd-x.json",
+        old - Duration::from_secs(1)
+    ));
+    for name in ["Job.json", "a b.json", "abc.tmp", "desktop.ini", ".json"] {
+        assert!(!job::is_stale_result(name, old * 10), "{name}");
+    }
+
+    let expected = r"C:\ProgramData\Reskin\results\abc.json";
+    assert!(job::final_path_matches(
+        expected,
+        r"\\?\C:\ProgramData\Reskin\results\abc.json"
+    ));
+    assert!(job::final_path_matches(
+        expected,
+        r"\\?\c:\programdata\reskin\RESULTS\abc.json"
+    ));
+    for elsewhere in [
+        r"\\?\C:\Windows\System32\abc.json",
+        r"\\?\C:\ProgramData\Reskin\results\abc.json\x",
+        r"\\?\D:\ProgramData\Reskin\results\abc.json",
+        r"\\?\UNC\server\share\abc.json",
+        "",
+    ] {
+        assert!(!job::final_path_matches(expected, elsewhere), "{elsewhere}");
+    }
+    assert!(!job::final_path_matches("", ""));
+}
+
+#[test]
+fn the_exit_code_stands_in_for_a_missing_result() {
+    let ok = JobResult::from_exit_code("a", EXIT_OK, 2);
+    assert!(ok.ok);
+    assert_eq!(ok.results.len(), 2);
+    assert!(ok.results.iter().all(|r| r.ok));
+    assert_eq!(ok.exit_code(), EXIT_OK);
+
+    let refused = JobResult::from_exit_code("a", EXIT_INVALID, 2);
+    assert!(!refused.ok && refused.results.is_empty());
+    assert_eq!(refused.exit_code(), EXIT_INVALID);
+
+    // A failure, or a crash, says nothing about which op got through.
+    for code in [EXIT_FAILED, -1_073_741_819] {
+        let failed = JobResult::from_exit_code("a", code, 2);
+        assert!(!failed.ok);
+        assert_eq!(failed.exit_code(), EXIT_FAILED);
+        assert_eq!(failed.results.len(), 2);
+        assert!(failed.results.iter().all(|r| !r.ok));
+        assert!(
+            failed.results[0]
+                .message
+                .contains(&format!("exit code {code}"))
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Elevation targets and icon deletion
+// ---------------------------------------------------------------------------
+
+#[test]
+fn the_access_probe_and_the_helper_agree_on_elevation_targets() {
+    // What the app's probe routes to elevation (`is_elevation_target`) is
+    // exactly what the helper then accepts, so an approved UAC prompt never
+    // ends in a rejected job.
+    let long = format!(r"{DESKTOP}\{}.lnk", "a".repeat(1100));
+    let targets = [
+        r"C:\Users\Public\Desktop\App.lnk",
+        r"C:\Users\Public\Desktop\Steam Game.url",
+        r"c:\users\PUBLIC\desktop\App.LNK",
+        "C:/Users/Public/Desktop/App.lnk",
+        "C:\\Users\\Public\\Desktop\\Café.lnk",
+        r"C:\Users\Public\Desktop\Games\App.lnk",
+        r"C:\Users\Public\Desktop",
+        r"C:\Users\Public\Desktop\Folder",
+        r"C:\Users\Public\Desktop\App.exe",
+        r"C:\Users\Public\Desktop\notes.txt",
+        r"C:\Users\Bob\Desktop\App.lnk",
+        r"C:\ProgramData\Microsoft\Windows\Start Menu\Programs\App.lnk",
+        r"C:\ProgramData\Reskin\icons\x.lnk",
+        r"C:\Users\Public\Desktop\..\Desktop\App.lnk",
+        r"\\server\share\Users\Public\Desktop\App.lnk",
+        r"\\?\C:\Users\Public\Desktop\App.lnk",
+        r"C:\Users\Public\Desktop\CON.lnk",
+        r"C:\Users\Public\Desktop\App?.lnk",
+        "C:\\Users\\Public\\Des\u{212A}top\\App.lnk",
+        r"Desktop\App.lnk",
+        &long,
+    ];
+    let mut routed = 0;
+    for target in targets {
+        let accepted = match LinkKind::of(target) {
+            Some(LinkKind::Shortcut) => {
+                validate(vec![set_lnk(target)]).is_ok()
+                    && validate(vec![restore_lnk(target, None, 0)]).is_ok()
+            }
+            Some(LinkKind::Url) => validate(vec![set_url(target)]).is_ok(),
+            None => false,
+        };
+        let elevated = job::is_elevation_target(target, DESKTOP);
+        assert_eq!(elevated, accepted, "{target}");
+        routed += usize::from(elevated);
+    }
+    assert_eq!(routed, 5, "both outcomes are covered");
+    // Without a trustworthy Public Desktop folder nothing is routed.
+    assert!(!job::is_elevation_target(r"Desktop\App.lnk", "Desktop"));
+}
+
+#[test]
+fn icon_deletions_are_validated_like_icon_writes() {
+    let v = validate(vec![JobOp::delete_icon(ICON_NAME)]).unwrap();
+    assert_eq!(
+        v.ops,
+        [ValidatedOp::DeleteIcon {
+            dest: format!(r"{ICONS}\{ICON_NAME}")
+        }]
+    );
+    assert_eq!(v.ops[0].target(), None);
+    assert_eq!(v.ops[0].link(), None);
+    for name in [
+        "App.ico",
+        "../x.ico",
+        r"..\x.ico",
+        "a/b.ico",
+        "icon.png",
+        "",
+    ] {
+        assert_rejected(JobOp::delete_icon(name), "icon name");
+    }
+    assert_rejected(JobOp::delete_icon("nul.ico"), "reserved device name");
+    // Deleting one icon twice is harmless; writing and deleting it is not.
+    assert!(
+        validate(vec![
+            JobOp::delete_icon(ICON_NAME),
+            JobOp::delete_icon(ICON_NAME)
+        ])
+        .is_ok()
+    );
+    let lnk = r"C:\Users\Public\Desktop\App.lnk";
+    for ops in [
+        vec![set_lnk(lnk), JobOp::delete_icon(ICON_NAME)],
+        vec![JobOp::delete_icon(ICON_NAME), set_lnk(lnk)],
+    ] {
+        let err = validate(ops).unwrap_err().to_string();
+        assert!(err.contains("both written and deleted"), "{err}");
+        assert!(err.contains("operation 2"), "{err}");
+    }
+    assert!(
+        validate(vec![
+            set_lnk(lnk),
+            JobOp::delete_icon("other-0123456789ab.ico")
+        ])
+        .is_ok()
+    );
+}
+
+#[test]
+fn icon_deletions_run_after_every_other_op() {
+    let lnk = r"C:\Users\Public\Desktop\App.lnk";
+    let icon = |name: &str| format!(r"{ICONS}\{name}");
+    let validated = validate(vec![
+        JobOp::delete_icon("old-aaaaaaaaaaaa.ico"),
+        restore_lnk(lnk, None, 0),
+        JobOp::delete_icon("locked-bbbbbbbbbbbb.ico"),
+        JobOp::delete_icon("used-cccccccccccc.ico"),
+    ])
+    .unwrap();
+    let mut exec = FakeExec {
+        fail_delete: [icon("locked-bbbbbbbbbbbb.ico")].into(),
+        in_use: [icon("used-cccccccccccc.ico")].into(),
+        ..FakeExec::default()
+    };
+    let result = job::execute_job(&validated, &mut exec);
+    assert_eq!(
+        exec.calls,
+        [
+            format!("lnk {lnk} none"),
+            format!("notify {lnk}"),
+            format!("delete {}", icon("old-aaaaaaaaaaaa.ico")),
+            format!("delete {}", icon("locked-bbbbbbbbbbbb.ico")),
+            format!("delete {}", icon("used-cccccccccccc.ico")),
+        ]
+    );
+    // Results stay in op order.
+    let oks: Vec<bool> = result.results.iter().map(|r| r.ok).collect();
+    assert_eq!(oks, [true, true, false, true]);
+    assert_eq!(result.results[0].message, "icon deleted");
+    assert_eq!(result.results[1].message, "icon restored");
+    assert!(result.results[2].message.contains("locked"));
+    assert!(result.results[3].message.contains("still uses it"));
+    assert!(!result.ok);
 }

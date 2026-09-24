@@ -45,4 +45,9 @@ storeApp: boolean, systemIcon: SystemIconId | null,
 /**
  * Human-readable notes for the UI (e.g. "Public desktop — needs admin").
  */
-notes: Array<string>, };
+notes: Array<string>, 
+/**
+ * Set on the first item `inspect_paths` returns when it was given more
+ * paths than it inspects in one call: how many it left out.
+ */
+skipped?: number, };
