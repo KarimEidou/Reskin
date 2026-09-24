@@ -16,6 +16,7 @@
     "check": "svelte-check --tsconfig ./tsconfig.json --fail-on-warnings",
     "test": "vitest run && node --test \"scripts/*.test.mjs\"",
     "e2e": "playwright test",
+    "docs:screenshots": "node -e \"const r = require('node:child_process').spawnSync('playwright test e2e/docs-screenshots.spec.ts', { stdio: 'inherit', shell: true, env: { ...process.env, RESKIN_DOCS_SCREENSHOTS: '1' } }); process.exit(r.status ?? 1)\"",
     "tauri": "tauri",
     "bundle:budget": "node scripts/check-bundle-budget.mjs",
     "notices": "node scripts/third-party-notices.mjs",
