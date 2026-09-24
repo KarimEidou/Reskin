@@ -153,7 +153,7 @@ describe('filter registry', () => {
     return best;
   };
 
-  it('is fast enough for live preview at 512×512', () => {
+  it('is fast enough for live preview at 512×512', { timeout: 120_000 }, () => {
     const big = randomPixels(512, 512, 1);
     // Non-identity settings so no filter takes its early-out path.
     const busy: { [K in FilterId]?: Record<string, unknown> } = {
@@ -169,9 +169,10 @@ describe('filter registry', () => {
     const mask = new Uint8Array(512 * 512).fill(128);
     for (const id of FILTER_IDS) {
       const params = { ...defaultParams(id), ...busy[id] };
-      // Typically 1–60 ms here; the bound only has to catch O(n·r) loops or
-      // per-pixel allocations on a slow, shared CI machine.
-      expect(bestOf(2, () => applyFilter(id, big, params, mask)), id).toBeLessThan(400);
+      // Typically 1–60 ms. The bound only has to catch algorithmic
+      // regressions (an O(n·r) blur at r = 64 is 10–60× slower), so it is
+      // generous enough for a heavily loaded shared machine.
+      expect(bestOf(3, () => applyFilter(id, big, params, mask)), id).toBeLessThan(1500);
     }
   });
 

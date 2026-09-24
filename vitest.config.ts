@@ -19,5 +19,8 @@ export default defineConfig({
     environment: 'node',
     pool: 'threads',
     passWithNoTests: true,
+    // Export / serialisation tests do real 512² work; leave headroom for
+    // slow, shared CI runners.
+    testTimeout: 30_000,
   },
 });
