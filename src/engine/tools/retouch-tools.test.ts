@@ -307,6 +307,21 @@ describe('blur / sharpen', () => {
     expectExactUndo(e, 'Sharpen', before);
   });
 
+  it('sharpening a silhouette neither brightens its edge nor changes its alpha', () => {
+    const e = engine(64);
+    const s = surfaceOf(e);
+    s.fill(128, 128, 128, 255, { x: 0, y: 0, w: 32, h: 64 });
+    s.fill(128, 128, 128, 100, { x: 32, y: 0, w: 2, h: 64 });
+    e.setTool('blurSharpen');
+    e.setToolOptions('blurSharpen', { mode: 'sharpen', size: 16, hardness: 1, strength: 1 });
+    const before = s.clone();
+    stroke(e, [[32, 20], [32, 44]]);
+    // Transparent neighbours do not count as black: a flat colour stays flat.
+    for (const x of [29, 30, 31, 32, 33]) expect(pixel(s, x, 32), `x=${x}`).toEqual(pixel(before, x, 32));
+    expect(pixel(s, 36, 32)).toEqual([0, 0, 0, 0]);
+    expect(e.history.length).toBe(0);
+  });
+
   it('blurring a transparent edge does not darken it (premultiplied)', () => {
     const e = engine(64);
     surfaceOf(e).fill(255, 255, 0, 255, { x: 0, y: 0, w: 32, h: 64 });
@@ -513,6 +528,91 @@ describe('sticker stamp', () => {
 });
 
 describe('dab tools share the painting rules', () => {
+  const PAINTERS = ['spray', 'smudge', 'blurSharpen', 'dodgeBurn', 'stamp'] as const;
+
+  /** A busy picture every tool visibly changes, small footprints. */
+  function textured(): Engine {
+    const e = engine(64);
+    const s = surfaceOf(e);
+    for (let y = 0; y < 64; y++) for (let x = 0; x < 64; x++) s.setPixel(x, y, (x * 37) & 255, (y * 23) & 255, 120, 255);
+    const sticker = new Surface(6, 6);
+    sticker.fill(255, 255, 255, 255);
+    e.setToolOptions('stamp', { stamp: sticker });
+    e.setToolOptions('spray', { radius: 4, density: 1, dotSize: 2 });
+    e.setToolOptions('smudge', { size: 8, strength: 0.9 });
+    e.setToolOptions('blurSharpen', { size: 8, strength: 1 });
+    e.setToolOptions('dodgeBurn', { size: 8 });
+    return e;
+  }
+
+  it('refuse hidden and text layers with a message and no entry', () => {
+    for (const tool of PAINTERS) {
+      const e = textured();
+      const messages: string[] = [];
+      e.subscribe((ev) => ev.kind === 'message' && messages.push(ev.text));
+      e.setLayerProps(e.doc.activeLayerId!, { visible: false });
+      e.setTool(tool);
+      stroke(e, [[20, 20], [40, 30]]);
+      expect(messages, tool).toHaveLength(1);
+      expect(e.history.length, tool).toBe(1);
+      e.addTextLayer({ text: 'Hi' });
+      stroke(e, [[20, 20], [40, 30]]);
+      expect(messages, tool).toHaveLength(2);
+      expect(e.history.length, tool).toBe(2);
+    }
+  });
+
+  it('Escape mid-stroke restores the layer and records nothing', () => {
+    for (const tool of PAINTERS) {
+      const e = textured();
+      e.setTool(tool);
+      const before = surfaceOf(e).clone();
+      e.pointerDown(pointer(20, 20, { time: 1 }));
+      for (let i = 1; i <= 10; i++) e.pointerMove(pointer(20 + i * 2, 20 + i, { time: 1 + i }));
+      expect(surfaceOf(e).equals(before), tool).toBe(false);
+      expect(e.keyDown('Escape', { shift: false, alt: false, ctrl: false, meta: false })).toBe(true);
+      expect(surfaceOf(e).equals(before), tool).toBe(true);
+      expect(e.history.length, tool).toBe(0);
+    }
+  });
+
+  it('a stroke entirely outside the selection changes nothing and records nothing', () => {
+    for (const tool of PAINTERS) {
+      const e = textured();
+      e.setSelection(rectMask(64, 64, { x: 50, y: 50, w: 14, h: 14 }));
+      e.setTool(tool);
+      const before = surfaceOf(e).clone();
+      stroke(e, [[10, 10], [20, 14]]);
+      expect(surfaceOf(e).equals(before), tool).toBe(true);
+      expect(e.history.length, tool).toBe(1); // just the selection
+    }
+  });
+
+  it('smudge, blur and dodge mirror through symmetry', () => {
+    for (const tool of ['smudge', 'blurSharpen', 'dodgeBurn'] as const) {
+      const e = engine(64);
+      const s = surfaceOf(e);
+      // A left/right symmetric picture.
+      for (let y = 0; y < 64; y++) {
+        for (let x = 0; x < 32; x++) {
+          const v = ((x >> 2) + (y >> 2)) % 2 ? 220 : 40;
+          s.setPixel(x, y, v, 255 - v, 90, 255);
+          s.setPixel(63 - x, y, v, 255 - v, 90, 255);
+        }
+      }
+      e.setSymmetry({ mode: 'x' });
+      e.setTool(tool);
+      e.setToolOptions('smudge', { size: 12, strength: 0.8 });
+      e.setToolOptions('blurSharpen', { size: 12, strength: 0.8 });
+      e.setToolOptions('dodgeBurn', { size: 12 });
+      const before = s.clone();
+      stroke(e, [[10.3, 20.6], [18.2, 26.1], [25.7, 30.4]]);
+      expect(s.equals(before), tool).toBe(false);
+      expect(mirrored(s, 1), tool).toBe(true);
+      expect(e.historyEntries, tool).toHaveLength(1);
+    }
+  });
+
   it('refuse locked layers and paint pixel-art with whole-pixel footprints', () => {
     for (const tool of ['spray', 'smudge', 'blurSharpen', 'dodgeBurn'] as const) {
       const e = engine(16);

@@ -20,7 +20,6 @@ import type { ToolContext } from './types';
 import type { DabShape } from './paint';
 import type { DabStroke } from './dab-tool';
 import { DabTool, dabPixelCoverage, optionIn } from './dab-tool';
-import { apply } from '../geometry/affine';
 import { clipRect } from '../util/rect';
 
 export interface SmudgeOptions {
@@ -84,8 +83,8 @@ export class SmudgeTool extends DabTool<SmudgeOptions, SmudgeStroke> {
     for (const d of dabs) {
       const strength = o.pressureStrength ? base * optionIn(d.pressure, 0, 1, 1) : base;
       for (let t = 0; t < s.transforms.length; t++) {
-        const q = apply(s.transforms[t], d.x, d.y);
-        this.dab(s, t, q.x, q.y, shape, strength);
+        const m = s.transforms[t];
+        this.dab(s, t, m[0] * d.x + m[2] * d.y + m[4], m[1] * d.x + m[3] * d.y + m[5], shape, strength);
       }
     }
   }

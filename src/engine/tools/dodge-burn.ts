@@ -21,7 +21,6 @@ import type { DabShape } from './paint';
 import { stampDab } from './paint';
 import type { DabStroke } from './dab-tool';
 import { DabTool, optionIn } from './dab-tool';
-import { apply } from '../geometry/affine';
 import type { ToneRange } from '../raster/tone';
 import { luminance01, setLuminance, toneRangeWeight } from '../raster/tone';
 import type { Rect } from '../util/rect';
@@ -64,6 +63,9 @@ interface ToneStroke extends DabStroke {
   exposure: number;
 }
 
+/** Work buffer of `recompute` (one colour). */
+const RGB = new Float64Array(3);
+
 export class DodgeBurnTool extends DabTool<DodgeBurnOptions, ToneStroke> {
   readonly id = 'dodgeBurn' as const;
   readonly label = 'Dodge / Burn';
@@ -105,8 +107,10 @@ export class DodgeBurnTool extends DabTool<DodgeBurnOptions, ToneStroke> {
     for (const d of dabs) {
       const ceiling = o.pressureExposure ? optionIn(d.pressure, 0, 1, 1) : 1;
       for (let t = 0; t < s.transforms.length; t++) {
-        const q = apply(s.transforms[t], d.x, d.y);
-        rects[t] = unionRect(rects[t], stampDab(s.alpha, w, h, q.x, q.y, shape, 1, ceiling));
+        const m = s.transforms[t];
+        const x = m[0] * d.x + m[2] * d.y + m[4];
+        const y = m[1] * d.x + m[3] * d.y + m[5];
+        rects[t] = unionRect(rects[t], stampDab(s.alpha, w, h, x, y, shape, 1, ceiling));
       }
     }
     for (const r of rects) if (r) this.recompute(s, r);
@@ -126,7 +130,7 @@ export class DodgeBurnTool extends DabTool<DodgeBurnOptions, ToneStroke> {
     const out = tx.surface.data;
     const sel = s.selection?.data ?? null;
     const dodge = s.mode === 'dodge';
-    const rgb = new Float64Array(3);
+    const rgb = RGB;
     for (let y = c.y; y < c.y + c.h; y++) {
       for (let x = c.x; x < c.x + c.w; x++) {
         const i = y * w + x;

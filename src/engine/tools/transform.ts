@@ -6,7 +6,9 @@
 // selection) is shown with its handles, so the very first drag can already
 // move (inside), scale (from the opposite handle, or from the centre with
 // Alt; Shift keeps the aspect ratio on corners) or rotate (outside a corner
-// or the top handle; Shift snaps to 15°); a press anywhere else moves. The
+// or the top handle; Shift snaps to 15°); a press anywhere else moves, and
+// so does a press inside a box too small for its handles (they are then
+// grabbed from just outside; the nearest handle always wins). The
 // first press lifts the content and starts a transform session; further
 // drags adjust it and arrow keys nudge by 1 px (10 with Shift). The session
 // commits as ONE history entry on Enter or when another tool/command runs;
@@ -30,7 +32,7 @@ import { apply, compose, invert, isIdentity, rotation, scaling, translation } fr
 import type { PixelTransaction } from '../history/pixel-transaction';
 import type { FloatImage } from '../raster/float-image';
 import { createFloatImage } from '../raster/float-image';
-import type { Pixels } from '../raster/surface';
+import type { Pixels, Surface } from '../raster/surface';
 import { sampleBilinear, sampleNearest } from '../raster/sample';
 import type { SelectionMask } from '../selection/mask';
 import { transformMask } from '../selection/mask';
@@ -43,7 +45,6 @@ import { lineStartX } from '../text/text';
 import type { Rect } from '../util/rect';
 import { clipRect, coverRect, unionRect } from '../util/rect';
 import type { OverlayPainter } from '../render/overlay';
-
 
 // ---------------------------------------------------------------------------
 // Pure transform math (exported for tests and for UI numeric fields)
@@ -157,10 +158,23 @@ export function hitTestTransform(
   rotateOffset: number,
 ): TransformHandle | null {
   const h = handlePositions(t, rotateOffset);
-  const near = (p: Point, r: number) => Math.hypot(p.x - x, p.y - y) <= r;
+  const dist = (p: Point) => Math.hypot(p.x - x, p.y - y);
+  const near = (p: Point, r: number) => dist(p) <= r;
   if (near(h.rotate, tolerance)) return 'rotate';
-  for (const k of ['nw', 'ne', 'se', 'sw'] as const) if (near(h[k], tolerance)) return k;
-  for (const k of ['n', 'e', 's', 'w'] as const) if (near(h[k], tolerance)) return k;
+  // The nearest corner, then the nearest edge handle (on a small box
+  // several are within reach).
+  for (const group of [['nw', 'ne', 'se', 'sw'], ['n', 'e', 's', 'w']] as const) {
+    let best: TransformHandle | null = null;
+    let bestD = tolerance;
+    for (const k of group) {
+      const d = dist(h[k]);
+      if (d <= bestD) {
+        best = k;
+        bestD = d;
+      }
+    }
+    if (best) return best;
+  }
   const corners = transformCorners(t);
   if (pointInQuad(corners, x, y)) return 'move';
   for (const c of corners) if (near(c, tolerance * 3)) return 'rotate';
@@ -248,6 +262,29 @@ export function transformedBounds(t: TransformParams, width: number, height: num
   const ys = c.map((p) => p.y);
   const r = coverRect(Math.min(...xs) - 1, Math.min(...ys) - 1, Math.max(...xs) + 1, Math.max(...ys) + 1);
   return r ? clipRect(r, width, height) : null;
+}
+
+/**
+ * Bounds of what the move tool lifts from `surface`: pixels with alpha > 0
+ * that are inside `selection` (any coverage), or null when there are none.
+ */
+export function liftableBounds(surface: Surface, selection: SelectionMask | null): Rect | null {
+  if (!selection || selection.width !== surface.width || selection.height !== surface.height) {
+    return surface.alphaBounds();
+  }
+  const { width: w, height: h, data } = surface;
+  const m = selection.data;
+  let minX = w, minY = h, maxX = -1, maxY = -1;
+  for (let y = 0; y < h; y++) {
+    for (let x = 0, i = y * w; x < w; x++, i++) {
+      if (m[i] === 0 || data[i * 4 + 3] === 0) continue;
+      if (x < minX) minX = x;
+      if (x > maxX) maxX = x;
+      if (y < minY) minY = y;
+      maxY = y;
+    }
+  }
+  return maxX < 0 ? null : { x: minX, y: minY, w: maxX - minX + 1, h: maxY - minY + 1 };
 }
 
 // ---------------------------------------------------------------------------
@@ -451,7 +488,8 @@ export class TransformTool implements Tool<TransformOptions> {
    * tool could move: no content, a hidden or a locked layer).
    */
   previewParams(ctx: ToolContext): TransformParams | null {
-    return this.target(ctx)?.params ?? null;
+    const t = this.target(ctx);
+    return t ? { ...t.params, box: { ...t.params.box } } : null;
   }
 
   hover(ctx: ToolContext, p: PointerInput | null, o: TransformOptions): void {
@@ -614,13 +652,24 @@ export class TransformTool implements Tool<TransformOptions> {
       if (layer.text.trim() === '') return null;
       return { params: textTransformParams(layer, ctx.textLayout(layer)), text: true };
     }
-    const bounds = ctx.contentBounds(layer);
+    const bounds = ctx.contentBounds ? ctx.contentBounds(layer) : liftableBounds(layer.surface, ctx.doc.selection);
     return bounds ? { params: initialTransform(bounds), text: false } : null;
   }
 
   private hit(ctx: ToolContext, t: Target, p: PointerInput, o: TransformOptions): TransformHandle | null {
     const scale = Math.max(ctx.viewScale, 1e-6);
-    const h = hitTestTransform(t.params, p.x, p.y, o.handleTolerance / scale, ROTATE_HANDLE_PX / scale);
+    const tolerance = o.handleTolerance / scale;
+    const h = hitTestTransform(t.params, p.x, p.y, tolerance, ROTATE_HANDLE_PX / scale);
+    if (h === null || h === 'move' || h === 'rotate') return h;
+    // On a box too small for its handles (they would cover all of it), a
+    // press inside moves; its handles are still reachable from outside.
+    const { box, sx, sy } = t.params;
+    if (
+      Math.min(Math.abs(box.w * sx), Math.abs(box.h * sy)) < 4 * tolerance &&
+      pointInQuad(transformCorners(t.params), p.x, p.y)
+    ) {
+      return 'move';
+    }
     // Text has no edge handles (it only scales uniformly).
     if (t.text && (h === 'n' || h === 's' || h === 'e' || h === 'w')) return 'move';
     return h;

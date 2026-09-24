@@ -107,6 +107,21 @@ describe('lasso (freehand)', () => {
     expect(e.historyEntries.map((h) => h.label)).toEqual(['Rectangle select', 'Deselect']);
   });
 
+  it('a figure-eight selects both lobes (nonzero rule), not a deselect', () => {
+    const e = engine(64);
+    e.selectShape('rect', { x: 50, y: 50, w: 5, h: 5 });
+    e.setTool('lasso');
+    e.setToolOptions('lasso', { antialias: false });
+    // Two triangles of opposite winding meeting at (20, 20): signed area 0.
+    lasso(e, [[10, 10], [30, 30], [30, 10], [10, 30]]);
+    const sel = e.doc.selection!;
+    expect(e.historyEntries.map((h) => h.label)).toEqual(['Rectangle select', 'Lasso select']);
+    expect(sel.data[20 * 64 + 12]).toBe(255); // left lobe
+    expect(sel.data[20 * 64 + 28]).toBe(255); // right lobe
+    expect(sel.data[12 * 64 + 20]).toBe(0); // between the lobes
+    expect(coverage(sel)).toBeCloseTo(200, -1);
+  });
+
   it('feathers when asked', () => {
     const e = engine();
     e.setTool('lasso');
@@ -196,6 +211,18 @@ describe('lasso (polygon)', () => {
     expect(maskBounds(sel)).toEqual({ x: 10, y: 10, w: 30, h: 30 });
     const q = snap45({ x: 0, y: 0 }, { x: 10, y: 9 }, true);
     expect(q.x).toBeCloseTo(q.y, 9);
+  });
+
+  it('Backspace during a press drops that corner; the rest of the press is ignored', () => {
+    const e = polygonEngine();
+    click(e, 10, 10);
+    click(e, 50, 10);
+    e.pointerDown(pointer(50, 50, { time: (clock += 1000) }));
+    e.pointerMove(pointer(52, 50, { time: clock + 10 }));
+    expect(e.keyDown('Backspace', NO_MODIFIERS)).toBe(true);
+    e.pointerMove(pointer(60, 60, { time: clock + 20 }));
+    e.pointerUp(pointer(60, 60, { time: clock + 30 }));
+    expect(e.tools.lasso.polygon).toEqual([10, 10, 50, 10]);
   });
 
   it('an Escape during a press drops only that corner', () => {

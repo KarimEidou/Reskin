@@ -8,7 +8,9 @@ import { blockTextRasterizer, pointer } from '../test-helpers';
 import { Viewport } from '../viewport/viewport';
 import type { OverlayPainter } from '../render/overlay';
 import { textQuad } from '../text/text';
-import { dragText, handlePositions, textTransformParams } from './transform';
+import { dragText, handlePositions, liftableBounds, textTransformParams } from './transform';
+import { Surface } from '../raster/surface';
+import { rectMask } from '../selection/mask';
 
 interface Recorded {
   polylines: number[][];
@@ -97,6 +99,45 @@ describe('move tool: handles before the first press', () => {
     expect(e.tools.move.params!.angle).toBeCloseTo(Math.PI / 2, 9);
     e.commitPending();
     expect((e.activeLayer as RasterLayer).surface.alphaBounds()).toEqual({ x: 10, y: 10, w: 8, h: 8 });
+  });
+
+  it('a press inside content too small for its handles moves it', () => {
+    // 3 px of content at 1 screen px per document px: the handles would cover it all.
+    const e = new Engine({ doc: createDocument() });
+    const vp = new Viewport({ docWidth: 512, docHeight: 512 });
+    vp.setZoom(1);
+    e.attachViewport(vp);
+    (e.activeLayer as RasterLayer).surface.fill(255, 0, 0, 255, { x: 100, y: 100, w: 3, h: 3 });
+    e.setTool('move');
+    e.pointerHover(pointer(102.9, 102.9));
+    expect(e.cursor.css).toBe('move');
+    drag(e, [102.9, 102.9], [122.9, 112.9]);
+    e.commitPending();
+    expect((e.activeLayer as RasterLayer).surface.alphaBounds()).toEqual({ x: 120, y: 110, w: 3, h: 3 });
+    // Its corner handle is still reachable from just outside.
+    e.pointerHover(pointer(126, 116));
+    expect(e.cursor.css).toBe('nwse-resize');
+  });
+
+  it('liftableBounds: pixels with alpha inside any selection coverage', () => {
+    const s = new Surface(16, 16);
+    s.fill(0, 0, 0, 255, { x: 2, y: 3, w: 8, h: 4 });
+    s.setPixel(12, 12, 0, 0, 0, 1);
+    expect(liftableBounds(s, null)).toEqual({ x: 2, y: 3, w: 11, h: 10 });
+    const sel = rectMask(16, 16, { x: 0, y: 0, w: 6, h: 16 });
+    sel.data[5 * 16 + 9] = 1; // a barely selected pixel still counts
+    expect(liftableBounds(s, sel)).toEqual({ x: 2, y: 3, w: 8, h: 4 });
+    expect(liftableBounds(s, rectMask(16, 16, { x: 13, y: 0, w: 3, h: 16 }))).toBeNull();
+  });
+
+  it('transformBox is a snapshot, not the live session', () => {
+    const e = rasterEngine();
+    drag(e, [14, 14], [16, 14]);
+    const box = e.transformBox!;
+    box.cx += 100;
+    box.box.x += 100;
+    expect(e.tools.move.params!.cx).toBe(16);
+    expect(e.transformBox!.box.x).toBe(10);
   });
 
   it('follows the selection and later paint (cached bounds are refreshed)', () => {

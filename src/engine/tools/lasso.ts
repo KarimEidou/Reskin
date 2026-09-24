@@ -16,11 +16,11 @@
 import type { CursorHint, Tool, ToolContext } from './types';
 import type { Modifiers, PointerInput } from '../input/pointer';
 import type { Point } from '../geometry/affine';
-import { signedArea } from '../geometry/rasterize';
-import type { SelectionOp } from '../selection/mask';
+import type { SelectionMask, SelectionOp } from '../selection/mask';
 import { combineMasks, featherMask, polygonMask } from '../selection/mask';
 import type { OverlayPainter } from '../render/overlay';
 import { selectionOpFor } from './select';
+import { optionIn } from './dab-tool';
 
 export type LassoKind = 'freehand' | 'polygon';
 
@@ -43,6 +43,16 @@ export const DOUBLE_CLICK_MS = 500;
 export const DOUBLE_CLICK_PX = 5;
 /** Screen px around the first corner that close the polygon. */
 const CLOSE_PX = 7;
+/** Largest feather radius the lasso applies, document px. */
+const MAX_FEATHER = 1024;
+
+/** Selected area of a mask in px² (coverage-weighted). */
+function maskArea(m: SelectionMask): number {
+  let n = 0;
+  const d = m.data;
+  for (let i = 0; i < d.length; i++) n += d[i];
+  return n / 255;
+}
 
 interface Freehand {
   op: SelectionOp;
@@ -191,6 +201,9 @@ export class LassoTool implements Tool<LassoOptions> {
       return true;
     }
     if (key === 'Backspace') {
+      // During a press this drops the corner being placed; the rest of
+      // that press then does nothing (it must not drag an older corner).
+      d.pressing = false;
       if (d.points.length <= 2) this.poly = null;
       else d.points.length -= 2;
       ctx.overlayChanged();
@@ -263,13 +276,17 @@ export class LassoTool implements Tool<LassoOptions> {
   /** Turns an outline into the selection. */
   private finish(ctx: ToolContext, points: number[], op: SelectionOp, o: LassoOptions, freehand: boolean): void {
     const { doc } = ctx;
-    if (points.length < 6 || Math.abs(signedArea(points)) < 1) {
+    // The enclosed area decides, not the signed area: a figure-eight
+    // outline encloses two lobes of opposite winding (nonzero rule).
+    let shape =
+      points.length >= 6 ? polygonMask(doc.width, doc.height, [points], o.antialias && doc.pixelArt === null) : null;
+    if (!shape || maskArea(shape) < 1) {
       // A freehand click (or a sliver) acts like a marquee click.
       if (freehand && op === 'replace' && doc.selection) ctx.setSelection(null, 'Deselect');
       return;
     }
-    let shape = polygonMask(doc.width, doc.height, [points], o.antialias && doc.pixelArt === null);
-    if (o.feather > 0) shape = featherMask(shape, o.feather) ?? shape;
+    const feather = optionIn(o.feather, 0, MAX_FEATHER, 0);
+    if (feather > 0) shape = featherMask(shape, feather) ?? shape;
     ctx.setSelection(combineMasks(doc.selection, shape, op), this.label);
   }
 }

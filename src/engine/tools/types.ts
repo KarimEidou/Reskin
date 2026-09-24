@@ -122,8 +122,9 @@ export interface ToolContext {
    * Bounds of the pixels the move tool would lift from a raster layer
    * (alpha > 0 and inside the selection), cached until the layer's pixels,
    * the layer list or the selection change. Null when there are none.
+   * Optional (added later): tools fall back to `liftableBounds`, uncached.
    */
-  contentBounds(layer: RasterLayer): Rect | null;
+  contentBounds?(layer: RasterLayer): Rect | null;
 }
 
 export interface Tool<O extends object = object> {

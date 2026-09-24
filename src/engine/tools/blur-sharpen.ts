@@ -3,12 +3,14 @@
 // filters' Gaussian core (premultiplied, edges extend the border pixel like
 // the Blur filter) and blends the result back under the footprint:
 //
-//   blur:    P ← P + (B − P) · c
-//   sharpen: P ← P + (P − B) · c        (an unsharp mask, clamped to valid
-//                                         premultiplied colour — no halos
-//                                         outside the alpha range)
+//   blur:    P ← P + (B − P) · c         (premultiplied, like the Blur filter)
+//   sharpen: C ← C + (C − B̂) · c,  α kept (like the Sharpen filter)
 //
-// with c = dab coverage × selection × strength (× pen pressure). The effect
+// where P / B are the premultiplied pixel and its blur, C the straight
+// colour and B̂ = B.rgb / B.α the alpha-weighted average colour around it,
+// so transparent neighbours never count as black: sharpening a shape's
+// silhouette does not brighten its edge, and blurring it does not darken
+// it. c = dab coverage × selection × strength (× pen pressure). The effect
 // is cumulative, like the classic tools: scrubbing over an area keeps
 // softening (or crisping) it. Only each dab's padded footprint is read and
 // only its footprint is written, whatever the document size.
@@ -18,7 +20,6 @@ import type { ToolContext } from './types';
 import type { DabShape } from './paint';
 import type { DabStroke } from './dab-tool';
 import { DabTool, dabFootprint, dabPixelCoverage, optionIn } from './dab-tool';
-import { apply } from '../geometry/affine';
 import { gaussianBlur } from '../filters/blur-core';
 import { clipRect, inflateRect } from '../util/rect';
 
@@ -99,8 +100,7 @@ export class BlurSharpenTool extends DabTool<BlurSharpenOptions, BlurStroke> {
       const strength = o.pressureStrength ? base * optionIn(d.pressure, 0, 1, 1) : base;
       if (strength <= 0) continue;
       for (const m of s.transforms) {
-        const q = apply(m, d.x, d.y);
-        this.dab(s, q.x, q.y, shape, sigma, strength);
+        this.dab(s, m[0] * d.x + m[2] * d.y + m[4], m[1] * d.x + m[3] * d.y + m[5], shape, sigma, strength);
       }
     }
   }
@@ -148,40 +148,34 @@ export class BlurSharpenTool extends DabTool<BlurSharpenOptions, BlurStroke> {
         const c = dabPixelCoverage(px, py, x, y, shape, sel, w) * strength;
         if (c <= 0) continue;
         const k = ((py - region.y) * region.w + (px - region.x)) * 4;
-        let a: number;
-        let r: number;
-        let g: number;
-        let b: number;
-        if (sharpen) {
-          a = orig[k + 3] + (orig[k + 3] - blurred[k + 3]) * c;
-          a = a < 0 ? 0 : a > 255 ? 255 : a;
-          r = clampTo(orig[k] + (orig[k] - blurred[k]) * c, a);
-          g = clampTo(orig[k + 1] + (orig[k + 1] - blurred[k + 1]) * c, a);
-          b = clampTo(orig[k + 2] + (orig[k + 2] - blurred[k + 2]) * c, a);
-        } else {
-          a = orig[k + 3] + (blurred[k + 3] - orig[k + 3]) * c;
-          r = orig[k] + (blurred[k] - orig[k]) * c;
-          g = orig[k + 1] + (blurred[k + 1] - orig[k + 1]) * c;
-          b = orig[k + 2] + (blurred[k + 2] - orig[k + 2]) * c;
-        }
         const p = (py * w + px) * 4;
+        if (sharpen) {
+          // Straight colour against the alpha-weighted blur; alpha kept.
+          const a = data[p + 3];
+          const ba = blurred[k + 3];
+          if (a === 0 || ba <= 1e-3) continue;
+          const kb = 255 / ba;
+          const r = data[p];
+          const g = data[p + 1];
+          const b = data[p + 2];
+          data[p] = r + (r - blurred[k] * kb) * c;
+          data[p + 1] = g + (g - blurred[k + 1] * kb) * c;
+          data[p + 2] = b + (b - blurred[k + 2] * kb) * c;
+          continue;
+        }
+        const a = orig[k + 3] + (blurred[k + 3] - orig[k + 3]) * c;
         if (a < 0.5) {
           data[p] = data[p + 1] = data[p + 2] = data[p + 3] = 0;
           continue;
         }
         const inv = 255 / a;
-        data[p] = r * inv;
-        data[p + 1] = g * inv;
-        data[p + 2] = b * inv;
+        data[p] = (orig[k] + (blurred[k] - orig[k]) * c) * inv;
+        data[p + 1] = (orig[k + 1] + (blurred[k + 1] - orig[k + 1]) * c) * inv;
+        data[p + 2] = (orig[k + 2] + (blurred[k + 2] - orig[k + 2]) * c) * inv;
         data[p + 3] = a;
       }
     }
   }
-}
-
-/** Premultiplied colour clamped to 0..alpha. */
-function clampTo(v: number, a: number): number {
-  return v < 0 ? 0 : v > a ? a : v;
 }
 
 export function createBlurSharpenTool(): BlurSharpenTool {

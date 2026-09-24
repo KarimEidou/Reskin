@@ -57,6 +57,7 @@ import { Scratch } from './tools/types';
 import type { ToolOptionsMap, ToolOptionsState, ToolSet } from './tools/registry';
 import { createTools, defaultToolOptions } from './tools/registry';
 import type { TransformParams } from './tools/transform';
+import { liftableBounds } from './tools/transform';
 import type { FitOptions } from './io/import';
 import { importLayer } from './io/import';
 import { deserializeProject, serializeProject } from './io/project';
@@ -881,7 +882,7 @@ export class Engine {
    * three points.
    */
   selectPolygon(points: readonly number[], op: SelectionOp = 'replace', antialias = true): boolean {
-    if (points.length < 6 || points.some((v) => !Number.isFinite(v))) return false;
+    if (this.disposed || points.length < 6 || points.some((v) => !Number.isFinite(v))) return false;
     const { width: w, height: h } = this._doc;
     const shape = polygonMask(w, h, [points], antialias && this._doc.pixelArt === null);
     this.setSelection(combineMasks(this._doc.selection, shape, op), 'Polygon select');
@@ -1099,26 +1100,7 @@ export class Engine {
   private contentBounds(layer: RasterLayer): Rect | null {
     const cached = this.boundsCache.get(layer.id);
     if (cached !== undefined) return cached ? { ...cached } : null;
-    const sel = this._doc.selection;
-    const s = layer.surface;
-    let r: Rect | null;
-    if (!sel || sel.width !== s.width || sel.height !== s.height) {
-      r = s.alphaBounds();
-    } else {
-      const { width: w, height: h, data } = s;
-      const m = sel.data;
-      let minX = w, minY = h, maxX = -1, maxY = -1;
-      for (let y = 0; y < h; y++) {
-        for (let x = 0, i = y * w; x < w; x++, i++) {
-          if (m[i] === 0 || data[i * 4 + 3] === 0) continue;
-          if (x < minX) minX = x;
-          if (x > maxX) maxX = x;
-          if (y < minY) minY = y;
-          maxY = y;
-        }
-      }
-      r = maxX < 0 ? null : { x: minX, y: minY, w: maxX - minX + 1, h: maxY - minY + 1 };
-    }
+    const r = liftableBounds(layer.surface, this._doc.selection);
     this.boundsCache.set(layer.id, r);
     return r ? { ...r } : null;
   }

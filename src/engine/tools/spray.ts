@@ -17,10 +17,7 @@ import type { ToolContext } from './types';
 import { compositeStroke, stampDab } from './paint';
 import type { DabStroke } from './dab-tool';
 import { DabTool, optionIn } from './dab-tool';
-import { apply } from '../geometry/affine';
 import { mulberry32 } from '../filters/prng';
-import type { Rect } from '../util/rect';
-import { unionRect } from '../util/rect';
 
 export interface SprayOptions {
   /** Spray disc radius, document px (1..256). */
@@ -75,6 +72,8 @@ interface SprayStroke extends DabStroke {
   alpha: Float32Array;
   color: Rgba;
   random: () => number;
+  /** Reusable per-copy bounds of a batch (4 numbers per symmetry transform). */
+  bounds: Float64Array;
 }
 
 export class SprayTool extends DabTool<SprayOptions, SprayStroke> {
@@ -104,6 +103,7 @@ export class SprayTool extends DabTool<SprayOptions, SprayStroke> {
       alpha: ctx.scratch.floatPlane(w * h),
       color: base.button === 2 ? ctx.secondary : ctx.primary,
       random: mulberry32(spraySeed(o.seed, ++this.serial, base.last.x, base.last.y)),
+      bounds: new Float64Array(4 * base.transforms.length),
     };
   }
 
@@ -112,7 +112,13 @@ export class SprayTool extends DabTool<SprayOptions, SprayStroke> {
     const radius = this.footprintRadius(o);
     const shape = { radius: optionIn(o.dotSize, 0.5, 32, 1.5) / 2, hardness: 1, aliased: s.aliased };
     const flow = optionIn(o.flow, 0, 1, 0.8);
-    const rects: (Rect | null)[] = s.transforms.map(() => null);
+    const { transforms, bounds } = s;
+    const copies = transforms.length;
+    // Per copy: the area its dots touched in this batch (x0, y0, x1, y1).
+    for (let t = 0; t < copies; t++) {
+      bounds[4 * t] = bounds[4 * t + 1] = Infinity;
+      bounds[4 * t + 2] = bounds[4 * t + 3] = -Infinity;
+    }
     const rnd = s.random;
     for (const d of dabs) {
       const expected = sprayDotCount(o, d.pressure);
@@ -124,14 +130,25 @@ export class SprayTool extends DabTool<SprayOptions, SprayStroke> {
         const theta = 2 * Math.PI * rnd();
         const x = d.x + rho * Math.cos(theta);
         const y = d.y + rho * Math.sin(theta);
-        for (let t = 0; t < s.transforms.length; t++) {
-          const q = apply(s.transforms[t], x, y);
-          rects[t] = unionRect(rects[t], stampDab(s.alpha, w, h, q.x, q.y, shape, flow));
+        for (let t = 0; t < copies; t++) {
+          const m = transforms[t];
+          const r = stampDab(s.alpha, w, h, m[0] * x + m[2] * y + m[4], m[1] * x + m[3] * y + m[5], shape, flow);
+          if (!r) continue;
+          const b = 4 * t;
+          if (r.x < bounds[b]) bounds[b] = r.x;
+          if (r.y < bounds[b + 1]) bounds[b + 1] = r.y;
+          if (r.x + r.w > bounds[b + 2]) bounds[b + 2] = r.x + r.w;
+          if (r.y + r.h > bounds[b + 3]) bounds[b + 3] = r.y + r.h;
         }
       }
     }
     const opacity = optionIn(o.opacity, 0, 1, 1);
-    for (const r of rects) if (r) compositeStroke(s.tx, s.alpha, r, s.color, opacity, 'paint', s.selection);
+    for (let t = 0; t < copies; t++) {
+      const b = 4 * t;
+      if (bounds[b + 2] <= bounds[b]) continue;
+      const r = { x: bounds[b], y: bounds[b + 1], w: bounds[b + 2] - bounds[b], h: bounds[b + 3] - bounds[b + 1] };
+      compositeStroke(s.tx, s.alpha, r, s.color, opacity, 'paint', s.selection);
+    }
   }
 
   protected historyLabel(): string {
