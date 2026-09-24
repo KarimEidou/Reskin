@@ -7,7 +7,7 @@ import { fileURLToPath } from 'node:url';
 import type { Page } from '@playwright/test';
 import { PNG } from 'pngjs';
 import type { BoxSkin } from '../src/lib/ipc/types';
-import { FIRST_RUN_HINT, iconRect, metricsFor, visualRect } from '../src/lib/ui/box-geometry';
+import { ERROR_HOLD_MS, errorLifetime, FIRST_RUN_HINT, iconRect, metricsFor, visualRect } from '../src/lib/ui/box-geometry';
 import {
   calls,
   editorState,
@@ -30,6 +30,14 @@ import {
 } from './support/fixtures';
 
 const TWO = [SAMPLE_PATHS.steam, SAMPLE_PATHS.site];
+/** What the box says when nothing dropped can be reskinned. */
+const NOTHING_USABLE = 'None of these items can be reskinned';
+
+/**
+ * How long the box may take to settle from an error saying `message`: the
+ * time it keeps a message up to be read, and room for a busy machine.
+ */
+const settleMs = (message: string) => errorLifetime(message, ERROR_HOLD_MS) + 2000;
 
 test.describe('drag and drop', () => {
   test('drag enter arms the box, shows the count and inspects immediately', async ({ openBox, page }) => {
@@ -121,9 +129,9 @@ test.describe('drag and drop', () => {
     await box.expectState('armed');
     await box.drop([SAMPLE_PATHS.notes]);
     await box.expectState('error');
-    await expect(box.root.getByRole('status')).toHaveText(/can be reskinned/);
-    // The shake settles back to idle.
-    await box.expectState('idle', 4000);
+    await expect(box.root.getByRole('status')).toHaveText(NOTHING_USABLE);
+    // The shake settles back to idle once the message has been read.
+    await box.expectState('idle', settleMs(NOTHING_USABLE));
     expect(await calls(page, 'open_editor')).toHaveLength(0);
   });
 
@@ -131,7 +139,7 @@ test.describe('drag and drop', () => {
     const box = await openBox();
     await box.drop([SAMPLE_PATHS.unreadable]);
     await box.expectState('error');
-    await box.expectState('idle', 4000);
+    await box.expectState('idle', settleMs(NOTHING_USABLE));
 
     await box.drop([SAMPLE_PATHS.unreadable, SAMPLE_PATHS.image]);
     const open = await waitForCall(page, 'open_editor');
@@ -147,7 +155,7 @@ test.describe('drag and drop', () => {
     // …when something else takes over the box.
     await box.flight('error', null, 'Could not update the shortcut');
     await box.expectState('error');
-    await box.expectState('idle', 4000);
+    await box.expectState('idle', settleMs('Could not update the shortcut'));
     expect(await calls(page, 'open_editor')).toHaveLength(0);
 
     await setInspectDelay(page, 1200);
@@ -529,6 +537,36 @@ test.describe('events from Rust', () => {
     await page.evaluate(() => window.dispatchEvent(new Event('focus')));
     await expect(box.hit).not.toHaveAttribute('title');
     await expect(box.hit).toHaveAccessibleDescription('');
+  });
+
+  test('on the first run the hotkey note waits for the first-run hint, then has its own few seconds', async ({ openBox, page }) => {
+    const box = await openBox({
+      firstRun: true,
+      hotkeyError: 'Ctrl+Alt+Shift+R is already in use by another app',
+      settings: { animationSpeed: 2 },
+    });
+    const hint = box.visual.locator('.hint');
+    await expect(hint).toHaveText(FIRST_RUN_HINT);
+    // The welcome stays open longer than a hint lasts.
+    await startFakeEditor(page);
+    await simulateOpen(page, [], 'welcome');
+    await expect(hint).toHaveCount(0);
+    await page.waitForTimeout(3600);
+    await simulateClose(page);
+    expect((await simulateBoxReturn(page, 'hide')).painted).toBe(true);
+    await expect(hint).toHaveText(FIRST_RUN_HINT);
+    await expect(hint).toHaveText('Ctrl+Alt+Shift+R is taken — change it in Settings', { timeout: 6000 });
+    await expect(hint).toHaveCount(0, { timeout: 6000 });
+  });
+
+  test('the hotkey note goes as soon as the hotkey works again', async ({ openBox, page }) => {
+    const box = await openBox({ hotkeyError: 'Ctrl+Alt+Shift+R is already in use by another app' });
+    const hint = box.visual.locator('.hint');
+    await expect(hint).toHaveText('Ctrl+Alt+Shift+R is taken — change it in Settings');
+    await page.evaluate(() => window.__e2e!.setHotkeyError(null));
+    await page.evaluate(() => window.dispatchEvent(new Event('focus')));
+    await expect(hint).toHaveCount(0);
+    await expect(box.hit).not.toHaveAttribute('title');
   });
 
   test('a hotkey that works leaves the box quiet', async ({ openBox }) => {
@@ -1020,6 +1058,24 @@ test.describe('skin gallery', () => {
     await box.expectStatic();
     await shoot(page, 'box-glass-compat.png');
   });
+
+  for (const tone of ['dark', 'light'] as const) {
+    test(`glass hotkey note in the small box (${tone})`, async ({ openBox, page }) => {
+      const box = await openBox({
+        settings: { boxSize: 'small', theme: tone },
+        accent: '#0078d4',
+        hotkeyError: 'Ctrl+Alt+Shift+R is already in use by another app',
+      });
+      await wallpaper(page, tone);
+      const hint = box.visual.locator('.hint');
+      await expect(hint).toHaveText('Ctrl+Alt+Shift+R is taken — change it in Settings');
+      await box.expectStatic();
+      // The whole note is inside the visual box (which clips what overflows).
+      const [note, visual] = await Promise.all([hint.boundingBox(), box.visual.locator('.box').boundingBox()]);
+      expect(note!.y + note!.height).toBeLessThanOrEqual(visual!.y + visual!.height);
+      await shoot(page, `box-glass-hotkey${tone === 'light' ? '-light' : ''}.png`);
+    });
+  }
 
   test('glass compatibility mode (clipped like the Rust window region)', async ({ openBox, page }) => {
     const box = await openBox({ settings: { compatibilityMode: true }, accent: '#0078d4' });

@@ -110,7 +110,9 @@ The visual and interaction contract for the box and the editor. Tokens live in
   delete / apply to current item. Opening one over unsaved changes asks
   first. The design open in the editor remembers the Library design it came
   from or was saved as (its card says "Editing"): **Save changes** updates it,
-  **Save as new** adds a copy.
+  **Save as new** adds a copy. Without that card on the page (still loading,
+  or gone from the Library) **Save current design** adds a new one — a save
+  never overwrites a design the user cannot see.
 * **History**: every change Reskin made (thumb, target, when, state), with
   Undo / Restore original per row and "Restore all".
 * **Settings**: Appearance (theme, accent, box skin + live BoxVisual preview,
@@ -167,8 +169,9 @@ message inside the box says why, up to three lines, and stays until it has
 been read). After an apply it shows an **Undo** chip for 6 s (`box:undo`):
 the box celebrates when the icon is back, or shakes saying why not. A saved
 hotkey Windows won't register at start-up (another app holds it) is said
-once, in the hint for a few seconds ("Ctrl+Alt+Shift+R is taken — change
-it in Settings"); the box's tooltip and accessible description
-say it for as long as it doesn't work. When the editor opens from elsewhere
+once, in the hint for a few seconds on screen ("Ctrl+Alt+Shift+R is taken —
+change it in Settings"; after the first-run hint, and gone as soon as the
+hotkey works); the box's tooltip and accessible description say it for as
+long as it doesn't work. When the editor opens from elsewhere
 (tray, menu, Explorer, first run), the box first takes on the picture the
 editor's proxy draws — never the other way round.

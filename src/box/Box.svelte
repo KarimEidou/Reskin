@@ -38,8 +38,8 @@
   /**
    * How long a hint stays once the box is on screen (UI.md: "for a few
    * seconds"): the first-run hint after the welcome (until then — the
-   * welcome is still open over the hidden box — it waits), the hotkey note
-   * from start-up.
+   * welcome is still open over the hidden box — it waits), then the hotkey
+   * note from start-up (for as long as it is in the bubble).
    */
   const HINT_MS = 6000;
   /** Undo chip lifetime after a successful apply. */
@@ -84,9 +84,9 @@
   const visualState: BoxVisualState = $derived(
     box.name === 'absorbing' && gulpEpoch !== box.epoch ? 'armed' : box.name,
   );
-  const hint = $derived(
-    (box.name === 'idle' || box.name === 'hover') && !box.handoff ? (showHint ? FIRST_RUN_HINT : hotkeyNote) : null,
-  );
+  // The hotkey note waits for the first-run hint, and goes once the hotkey works.
+  const note = $derived(showHint ? FIRST_RUN_HINT : system.hotkeyError ? hotkeyNote : null);
+  const hint = $derived((box.name === 'idle' || box.name === 'hover') && !box.handoff ? note : null);
   /** The tooltip and accessible description while the saved hotkey doesn't work (Windows is asked again on focus). */
   const problem = $derived(system.hotkeyError ? hotkeyProblem(system.hotkeyError) : null);
   const label = $derived(
@@ -297,13 +297,15 @@
     return () => clearTimeout(t);
   });
 
-  /** The box is on screen: the hotkey note's lifetime starts (once). */
+  /** The box is on screen: the hotkey note may start its lifetime. */
   function hotkeyNoteOnScreen(): void {
     if (hotkeyNote !== null) hotkeyNoteShown = true;
   }
 
+  // Its few seconds run while it is on screen in the hint bubble: not
+  // behind the first-run hint, a handoff or a drag (it waits for them).
   $effect(() => {
-    if (hotkeyNote === null || !hotkeyNoteShown) return;
+    if (hotkeyNote === null || !hotkeyNoteShown || hint !== hotkeyNote) return;
     const t = setTimeout(() => (hotkeyNote = null), dur(HINT_MS, 'hold'));
     return () => clearTimeout(t);
   });

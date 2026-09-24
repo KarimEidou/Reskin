@@ -245,7 +245,9 @@ test.describe('handoff protocol', () => {
     const tool = () => page.evaluate(() => (window as unknown as { __reskinSession: { engine: { selectedToolId: string } } }).__reskinSession.engine.selectedToolId);
     const before = await tool();
     await pushEditorCmd(page, { type: 'collapse', session, boxRect: { x: 32, y: 32, w: 148, h: 148 }, then: 'hide', icon: null, morph: true });
-    await expect(page.locator('html')).toHaveAttribute('data-stage', 'animating');
+    // Caught on the frame it starts: a busy machine can run the whole
+    // collapse between two of expect's polls.
+    await page.waitForFunction(() => document.documentElement.dataset.stage === 'animating', undefined, { polling: 'raf' });
     await page.keyboard.press('e');
     await page.keyboard.press('Escape');
     expect(await waitForAck(page, session, 'collapsed')).toBe(true);

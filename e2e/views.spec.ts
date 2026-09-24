@@ -297,6 +297,25 @@ test.describe('library', () => {
     await expect(view.getByText('Your Library is empty')).toBeVisible();
   });
 
+  test('a design whose Library design is gone is saved as a new one, never over the missing one', async ({ openEditor, page }) => {
+    await openEditor();
+    await simulateOpen(page, [SAMPLE_PATHS.steam], 'edit');
+    await hasDesign(page);
+    const saved = await page.evaluate(() => (window as unknown as Win).__reskinSession.saveToLibrary('Mono'));
+    // Deleted behind the editor's back (another window, the files themselves).
+    await page.evaluate(async (id) => {
+      type Invoke = (cmd: string, args: unknown) => Promise<unknown>;
+      await (window as unknown as { __TAURI_INTERNALS__: { invoke: Invoke } }).__TAURI_INTERNALS__.invoke('library_delete', { id });
+    }, (saved as { id: string }).id);
+    await titleBar(page).getByRole('button', { name: 'Library' }).click();
+    const view = page.getByTestId('library-view');
+    await expect(view.getByText('Your Library is empty')).toBeVisible();
+    await view.getByRole('button', { name: 'Save current design' }).first().click();
+    await expect.poll(async () => (await calls(page, 'library_save')).length).toBe(2);
+    expect((await calls(page, 'library_save')).at(-1)!.args.entry).toMatchObject({ id: null, name: 'Mono' });
+    await expect(view.getByTestId('library-card')).toHaveCount(1);
+  });
+
   test('the icon-only menu keeps its focused trigger while it opens and closes', async ({ openEditor, page }) => {
     await openEditor();
     await simulateOpen(page, [SAMPLE_PATHS.steam], 'edit');
@@ -1007,6 +1026,26 @@ test.describe('overlay gallery', () => {
       await page.keyboard.press('Enter');
       await expect(page.getByRole('dialog', { name: 'Restore all icons?' })).toBeVisible();
       await shot(page, `editor-shell-confirm${suffix}.png`);
+    });
+
+    test(`Save to Library over the design it is linked to (${tone})`, async ({ openEditor, page }) => {
+      const suffix = tone === 'light' ? '-light' : '';
+      await openEditor({ settings: { theme: tone }, accent: '#0078d4' });
+      await wallpaper(page, tone);
+      await simulateOpen(page, [SAMPLE_PATHS.steam], 'edit');
+      await hasDesign(page);
+      await page.evaluate(() => (window as unknown as Win).__reskinSession.saveToLibrary('Steam — midnight'));
+      // The save's toast goes first: dismissing it later would close the form.
+      const saved = page.getByRole('status').filter({ hasText: 'Saved "Steam — midnight" to the Library.' });
+      await saved.getByRole('button', { name: 'Dismiss notification' }).click();
+      await expect(saved).toHaveCount(0);
+
+      await page.getByTestId('save-library').click();
+      const form = page.getByRole('dialog', { name: 'Save to Library' });
+      await form.getByRole('textbox', { name: 'Name' }).fill('Steam — dawn');
+      await expect(form.getByTestId('library-link')).toHaveText('Updates "Steam — midnight" in your Library and renames it "Steam — dawn".');
+      await shot(page, `editor-shell-save-library${suffix}.png`);
+      await expect(form).toBeVisible();
     });
   }
 });

@@ -52,7 +52,8 @@
 
   function submit(e: SubmitEvent): void {
     e.preventDefault();
-    void save(false);
+    // Only the form that names the linked design ever saves over it.
+    void save(linked === null);
   }
 
   function selectAll(node: HTMLInputElement) {
