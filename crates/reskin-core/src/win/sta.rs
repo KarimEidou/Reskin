@@ -188,8 +188,12 @@ fn worker(rx: Receiver<Msg>, wake: Arc<WakeEvent>, ready: Sender<Result<()>>) {
         }
         // SAFETY: standard message loop on this thread's queue.
         while unsafe { PeekMessageW(&mut msg, None, 0, 0, PM_REMOVE) }.as_bool() {
+            // The worker's lifetime belongs to the `Sta` handles: a stray
+            // WM_QUIT (PostQuitMessage from a shell extension or a COM
+            // modal loop) must not stop all shell work for the rest of the
+            // session. Retrieving it clears the thread's quit state.
             if msg.message == WM_QUIT {
-                break 'pump;
+                continue;
             }
             unsafe {
                 let _ = TranslateMessage(&msg);

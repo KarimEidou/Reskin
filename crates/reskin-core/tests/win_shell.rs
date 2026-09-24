@@ -23,6 +23,7 @@ use reskin_core::win::{
     sysicons, urlfile, wallpaper,
 };
 use windows::Win32::Foundation::{ERROR_SUCCESS, HWND, POINT};
+use windows::Win32::Globalization::{CP_ACP, WC_NO_BEST_FIT_CHARS, WideCharToMultiByte};
 use windows::Win32::Graphics::Dwm::{DWMWA_CLOAKED, DwmGetWindowAttribute};
 use windows::Win32::System::Environment::ExpandEnvironmentStringsW;
 use windows::Win32::System::Registry::{
@@ -34,9 +35,9 @@ use windows::Win32::UI::HiDpi::{
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     DestroyIcon, GA_ROOT, GetAncestor, GetClassNameW, HICON, IMAGE_ICON, LR_LOADFROMFILE,
-    LoadImageW, WindowFromPoint,
+    LoadImageW, PostQuitMessage, WindowFromPoint,
 };
-use windows::core::PCWSTR;
+use windows::core::{PCSTR, PCWSTR};
 
 // ---------------------------------------------------------------------------
 // Fixtures
@@ -228,9 +229,18 @@ fn sta_runs_jobs_inline_nested_and_concurrently() {
     let results: Vec<u32> = handles.into_iter().map(|h| h.join().unwrap()).collect();
     assert_eq!(results, (0..8).map(|i| i * i).collect::<Vec<_>>());
 
-    // A private worker stops when its last handle goes away.
+    // A private worker survives a stray WM_QUIT and stops when its last
+    // handle goes away.
     let own = Sta::spawn().unwrap();
     assert_eq!(own.try_run(|| Ok(3)).unwrap(), 3);
+    // SAFETY: posts WM_QUIT to the worker's own queue.
+    own.run(|| unsafe { PostQuitMessage(0) }).unwrap();
+    std::thread::sleep(Duration::from_millis(50));
+    assert_eq!(
+        own.run(|| 4).unwrap(),
+        4,
+        "WM_QUIT must not stop the worker"
+    );
     drop(own);
 }
 
@@ -338,6 +348,63 @@ fn url_icon_set_read_and_clear() {
     assert_eq!(parsed.url(), Some("https://example.com/"));
 }
 
+/// A non-ASCII character the system ANSI code page can represent, and its
+/// ANSI bytes (which must not be valid UTF-8, so the file reads as ANSI).
+fn ansi_sample() -> Option<(char, Vec<u8>)> {
+    ['ë', 'Ж', 'é', '中', 'α'].into_iter().find_map(|c| {
+        let wide: Vec<u16> = c.to_string().encode_utf16().collect();
+        let mut out = [0u8; 8];
+        let mut used_default = windows::core::BOOL(0);
+        // SAFETY: valid buffers; no best-fit mapping.
+        let n = unsafe {
+            WideCharToMultiByte(
+                CP_ACP,
+                WC_NO_BEST_FIT_CHARS,
+                &wide,
+                Some(&mut out),
+                PCSTR::null(),
+                Some(&mut used_default),
+            )
+        };
+        let bytes = out[..n.max(0) as usize].to_vec();
+        (n > 0 && !used_default.as_bool() && std::str::from_utf8(&bytes).is_err())
+            .then_some((c, bytes))
+    })
+}
+
+#[test]
+#[ignore = "Windows shell integration (run with --include-ignored)"]
+fn ansi_url_files_are_read_in_the_system_code_page() {
+    let Some((c, ansi)) = ansi_sample() else {
+        return; // a UTF-8 system code page: nothing is ANSI-only
+    };
+    let dir = TempDir::new("ansi");
+    let url = dir.join("Ansi.url");
+    let mut bytes =
+        b"[InternetShortcut]\r\nURL=https://example.com/\r\nIconFile=C:\\Icons\\".to_vec();
+    bytes.extend_from_slice(&ansi);
+    bytes.extend_from_slice(b".ico\r\nIconIndex=5\r\n");
+    std::fs::write(&url, &bytes).unwrap();
+    let expected = format!("C:\\Icons\\{c}.ico");
+    assert_eq!(
+        urlfile::read_url_icon(&url).unwrap(),
+        (Some(expected.clone()), 5)
+    );
+    let u = url.clone();
+    let item = sta().try_run(move || extract::inspect_path(&u)).unwrap();
+    assert!(item.custom_icon);
+    assert_eq!(item.target.as_deref(), Some("https://example.com/"));
+
+    // Clearing keeps the URL readable.
+    let u = url.clone();
+    sta()
+        .try_run(move || urlfile::set_url_icon(&u, None))
+        .unwrap();
+    assert_eq!(urlfile::read_url_icon(&url).unwrap(), (None, 0));
+    let parsed = UrlFile::parse(&std::fs::read(&url).unwrap());
+    assert_eq!(parsed.url(), Some("https://example.com/"));
+}
+
 // ---------------------------------------------------------------------------
 // Folders
 // ---------------------------------------------------------------------------
@@ -392,6 +459,33 @@ fn folder_icon_set_read_and_clear() {
             "desktop.ini still names the icon: {text}"
         );
     }
+
+    // An icon path outside the ANSI code page (星 is in no Western one)
+    // must not degrade to '?' in desktop.ini.
+    let unicode_ico = dir.join("Ícône 星.ico");
+    write_ico(&unicode_ico, 140);
+    for _ in 0..2 {
+        // twice: once into a fresh desktop.ini, once over an existing one
+        let (t, i) = (target.clone(), unicode_ico.clone());
+        sta()
+            .try_run(move || folder::set_folder_icon(&t, Some((&i, 0))))
+            .unwrap();
+        let t = target.clone();
+        let (file, _) = sta()
+            .try_run(move || folder::read_folder_icon(&t))
+            .unwrap()
+            .expect("unicode folder icon set");
+        assert!(same_path(&expand(&file), &unicode_ico), "{file}");
+    }
+    let t = target.clone();
+    sta()
+        .try_run(move || folder::set_folder_icon(&t, None))
+        .unwrap();
+    let t = target.clone();
+    assert_eq!(
+        sta().try_run(move || folder::read_folder_icon(&t)).unwrap(),
+        None
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -500,6 +594,7 @@ fn system_icons_set_read_and_restore_exactly() {
     for id in [SystemIconId::ThisPc, SystemIconId::RecycleBinFull] {
         let before = snapshot(id);
         let original = sysicons::read_system_icon(id).unwrap();
+        let customized_before = sysicons::is_customized(id);
         let guard = RestoreSystemIcon(id, original.clone());
 
         let i = ico.clone();
@@ -513,6 +608,12 @@ fn system_icons_set_read_and_restore_exactly() {
         let (effective, index) = sysicons::effective_system_icon(id).unwrap().unwrap();
         assert!(same_path(Path::new(&effective), &ico));
         assert_eq!(index, 0);
+        assert!(sysicons::is_customized(id));
+        let item = sta()
+            .try_run(move || extract::inspect_system_icon(id))
+            .unwrap();
+        assert!(item.custom_icon);
+        assert_eq!(item.icon_source, IconSource::IcoFile);
 
         let o = original.clone();
         sta()
@@ -520,6 +621,7 @@ fn system_icons_set_read_and_restore_exactly() {
             .unwrap();
         assert_eq!(sysicons::read_system_icon(id).unwrap(), original);
         assert_eq!(snapshot(id), before, "{id:?} registry state not restored");
+        assert_eq!(sysicons::is_customized(id), customized_before);
         drop(guard);
     }
 }
@@ -785,6 +887,9 @@ impl Drop for RestoreContextMenu {
 #[ignore = "Windows shell integration (run with --include-ignored)"]
 fn context_menu_round_trip() {
     let guard = RestoreContextMenu(contextmenu::installed_exe());
+    let classes = ["lnkfile", "InternetShortcut", "Directory"]
+        .map(|class| format!(r"Software\Classes\{class}"));
+    let existed_before = classes.clone().map(|key| key_exists(&key));
     let exe = std::env::temp_dir().join(unique("ctx")).join("reskin.exe");
     contextmenu::install(&exe).unwrap();
     assert!(contextmenu::is_installed());
@@ -795,6 +900,15 @@ fn context_menu_round_trip() {
     )));
     contextmenu::uninstall().unwrap();
     assert!(!contextmenu::is_installed());
+    for (key, existed) in classes.iter().zip(existed_before) {
+        assert!(
+            !key_exists(&format!(r"{key}\shell\Reskin")),
+            "{key}: verb left behind"
+        );
+        if !existed {
+            assert!(!key_exists(key), "{key}: empty class key left behind");
+        }
+    }
     contextmenu::uninstall().unwrap(); // idempotent
     drop(guard);
 }

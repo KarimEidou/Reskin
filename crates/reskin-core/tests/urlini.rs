@@ -1,6 +1,9 @@
 //! `.url` INI parsing and writing (`urlini`).
 
-use reskin_core::urlini::{SECTION, SECTION_W, TextEncoding, UrlFile, decode_text};
+use reskin_core::urlini::{
+    SECTION, SECTION_W, TextEncoding, UrlFile, decode_text, decode_text_with_ansi, utf7_decode,
+    utf7_encode,
+};
 
 const STEAM: &str = "[{000214A0-0000-0000-C000-000000000046}]\r\n\
 Prop3=19,0\r\n\
@@ -254,4 +257,185 @@ fn new_file_and_encodings_round_trip() {
         assert_eq!(back.icon_file(), Some("C:\\icons\\a.ico"), "{enc:?}");
     }
     assert!(utf16le_bom("x").starts_with(&[0xFF, 0xFE]));
+}
+
+/// A tiny stand-in for the Cyrillic ANSI code page (Windows-1251), whose
+/// bytes 0xC0..=0xFF are U+0410..=U+044F.
+fn cp1251_decode(bytes: &[u8]) -> String {
+    bytes
+        .iter()
+        .map(|&b| match b {
+            0xC0..=0xFF => char::from_u32(0x0410 + u32::from(b - 0xC0)).unwrap(),
+            _ => char::from(b),
+        })
+        .collect()
+}
+
+fn cp1251_encode(text: &str) -> Vec<u8> {
+    text.chars()
+        .map(|c| match u32::from(c) {
+            0..=0x7F => c as u8,
+            cp @ 0x0410..=0x044F => (cp - 0x0410) as u8 + 0xC0,
+            _ => b'?',
+        })
+        .collect()
+}
+
+#[test]
+fn ansi_files_use_the_callers_code_page() {
+    // "Иван" in Windows-1251, as a Russian system writes an ANSI .url.
+    let mut bytes = b"[InternetShortcut]\r\nURL=https://x/\r\nIconFile=C:\\Users\\".to_vec();
+    bytes.extend_from_slice(&[0xC8, 0xE2, 0xE0, 0xED]);
+    bytes.extend_from_slice(b"\\a.ico\r\nIconIndex=2\r\n");
+
+    let f = UrlFile::parse_with_ansi(&bytes, cp1251_decode);
+    assert_eq!(f.encoding(), TextEncoding::Ansi);
+    assert_eq!(f.icon_file(), Some("C:\\Users\\Иван\\a.ico"));
+    assert_eq!(f.icon_index(), 2);
+    // Windows-1252 would read the same bytes as mojibake.
+    assert_eq!(
+        UrlFile::parse(&bytes).icon_file(),
+        Some("C:\\Users\\Èâàí\\a.ico")
+    );
+    assert_eq!(
+        decode_text_with_ansi(&bytes, cp1251_decode).0,
+        cp1251_decode(&bytes)
+    );
+    // Written back with the matching encoder: byte-identical.
+    assert_eq!(f.to_bytes_with_ansi(cp1251_encode), bytes);
+
+    // Changing the icon keeps the other values in the file's code page.
+    let mut changed = f.clone();
+    changed.set_icon(Some("D:\\Иконки\\b.ico"), 1);
+    let written = changed.to_bytes_with_ansi(cp1251_encode);
+    let back = UrlFile::parse_with_ansi(&written, cp1251_decode);
+    assert_eq!(back.icon_file(), Some("D:\\Иконки\\b.ico"));
+    assert_eq!(back.icon_index(), 1);
+    assert_eq!(back.url(), Some("https://x/"));
+
+    // The hook is only consulted for ANSI input.
+    let utf8 = UrlFile::parse_with_ansi("[InternetShortcut]\r\nURL=é\r\n".as_bytes(), |_| {
+        panic!("UTF-8 input must not reach the ANSI decoder")
+    });
+    assert_eq!(utf8.url(), Some("é"));
+    assert_eq!(
+        utf8.to_bytes_with_ansi(|_| panic!("UTF-8 output must not use the ANSI encoder")),
+        "[InternetShortcut]\r\nURL=é\r\n".as_bytes()
+    );
+}
+
+#[test]
+fn reads_desktop_ini_files_too() {
+    // folder.rs parses desktop.ini with the same reader.
+    let ini = "\u{feff}[.ShellClassInfo]\r\nIconResource=C:\\Icons\\x.ico,3\r\n\
+               LocalizedResourceName=@%SystemRoot%\\system32\\shell32.dll,-21798\r\n\
+               [ViewState]\r\nMode=\r\nVid=\r\nFolderType=Pictures\r\n";
+    let mut bytes = vec![0xFF, 0xFE];
+    bytes.extend(
+        ini.trim_start_matches('\u{feff}')
+            .encode_utf16()
+            .flat_map(u16::to_le_bytes),
+    );
+    let mut f = UrlFile::parse(&bytes);
+    assert_eq!(
+        f.get(".shellclassinfo", "iconresource"),
+        Some("C:\\Icons\\x.ico,3")
+    );
+    assert_eq!(f.get("ViewState", "Mode"), Some(""));
+    assert!(f.remove(".ShellClassInfo", "IconResource"));
+    assert!(!f.remove(".ShellClassInfo", "IconResource"));
+    assert!(!f.is_empty(), "other customisations remain");
+    let back = UrlFile::parse(&f.to_bytes());
+    assert_eq!(back.encoding(), TextEncoding::Utf16Le);
+    assert_eq!(back.get(".ShellClassInfo", "IconResource"), None);
+    assert_eq!(back.get("ViewState", "FolderType"), Some("Pictures"));
+
+    let only_icon = UrlFile::parse(b"[.ShellClassInfo]\r\nIconFile=x.ico\r\nIconIndex=0\r\n");
+    let mut cleared = only_icon.clone();
+    cleared.remove(".ShellClassInfo", "IconFile");
+    cleared.remove(".ShellClassInfo", "IconIndex");
+    assert!(cleared.is_empty(), "a header without keys counts as empty");
+}
+
+/// Deterministic xorshift so failures are reproducible.
+fn rng(seed: u64) -> impl FnMut() -> u64 {
+    let mut state = seed;
+    move || {
+        state ^= state << 13;
+        state ^= state >> 7;
+        state ^= state << 17;
+        state
+    }
+}
+
+#[test]
+fn arbitrary_bytes_never_panic_and_rewrite_stably() {
+    let mut next = rng(0x2545_F491_4F6C_DD1D);
+    let alphabet = b"[]=;+-\\\"' \t\r\nAZaz09\x00\xFF\xFE\xEF\xBB\xBF\x80\xC3\xA9.";
+    for round in 0..3000 {
+        let len = (next() % 120) as usize;
+        let bytes: Vec<u8> = (0..len)
+            .map(|_| {
+                if round % 2 == 0 {
+                    next() as u8
+                } else {
+                    alphabet[(next() % alphabet.len() as u64) as usize]
+                }
+            })
+            .collect();
+        let f = UrlFile::parse(&bytes);
+        let _ = (f.url(), f.icon_file(), f.icon_index());
+        // Whatever was read is written back without loss. (An ANSI file
+        // whose remaining bytes happen to form valid UTF-8 is read back as
+        // UTF-8: sniffing cannot tell the two apart, so that case is out.)
+        let back = UrlFile::parse(&f.to_bytes());
+        if f.encoding() == TextEncoding::Ansi && back.encoding() != TextEncoding::Ansi {
+            assert!(std::str::from_utf8(&f.to_bytes()).is_ok());
+            continue;
+        }
+        assert_eq!(back.to_ini_string(), f.to_ini_string(), "{bytes:?}");
+        assert_eq!(
+            back.section_names().collect::<Vec<_>>(),
+            f.section_names().collect::<Vec<_>>()
+        );
+    }
+}
+
+#[test]
+fn padded_and_quoted_values_survive_a_rewrite() {
+    let text = "[InternetShortcut]\r\nURL=\"'quoted'\"\r\nIconFile=\"  C:\\padded.ico \"\r\n\
+                [InternetShortcut.W]\r\nIconFile=\" +AOk-\"\r\n";
+    let f = UrlFile::parse(text.as_bytes());
+    assert_eq!(f.get(SECTION, "URL"), Some("'quoted'"));
+    assert_eq!(f.get(SECTION, "IconFile"), Some("  C:\\padded.ico "));
+    assert_eq!(f.icon_file(), Some(" é"));
+    let written = f.to_ini_string();
+    assert!(written.contains("URL=\"'quoted'\"\r\n"), "{written}");
+    let back = UrlFile::parse(written.as_bytes());
+    assert_eq!(back, f);
+    // Ordinary values stay unquoted.
+    let plain = UrlFile::parse(STEAM.as_bytes()).to_ini_string();
+    assert!(plain.contains("URL=steam://rungameid/570\r\n"));
+    assert!(!plain.contains('"'));
+}
+
+#[test]
+fn utf7_round_trips_arbitrary_text() {
+    let mut next = rng(0x9E37_79B9_7F4A_7C15);
+    let pool: Vec<char> = "aZ09 +-/\\~!\"#$%&*;<=>@[]^_`{|}\t\r\n.:?,()'éß中😀\u{7f}\u{0}\u{ffff}"
+        .chars()
+        .collect();
+    for _ in 0..3000 {
+        let len = (next() % 24) as usize;
+        let s: String = (0..len)
+            .map(|_| pool[(next() % pool.len() as u64) as usize])
+            .collect();
+        let encoded = utf7_encode(&s);
+        assert!(encoded.is_ascii(), "{s:?} -> {encoded:?}");
+        assert!(
+            !encoded.contains(['\r', '\n']),
+            "stays on one INI line: {encoded:?}"
+        );
+        assert_eq!(utf7_decode(&encoded), s, "{encoded:?}");
+    }
 }

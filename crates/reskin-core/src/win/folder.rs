@@ -10,8 +10,11 @@
 //! removes a `desktop.ini` left without any key, un-flagging the folder.
 //! Every change is verified by reading it back. Callers notify Explorer
 //! afterwards ([`super::notify::item_updated`]).
+//!
+//! `desktop.ini` is read like the profile API reads it: UTF-16 after a BOM,
+//! otherwise the system ANSI code page. A non-ASCII icon path is only ever
+//! written into a Unicode file, so it cannot degrade to `?`.
 
-use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 
 use windows::Win32::Storage::FileSystem::{
@@ -26,12 +29,14 @@ use windows::Win32::UI::Shell::{
 use windows::core::{PCWSTR, PWSTR, w};
 
 use super::util::{
-    ComScope, ResultExt, parse_icon_location, paths_equal_ci, pcwstr, resolve_icon_path, wide,
+    ComScope, ResultExt, ansi_decode, ini_bytes, parse_icon_location, paths_equal_ci, pcwstr,
+    read_ini, resolve_icon_path, wide,
 };
-use crate::urlini::UrlFile;
+use crate::urlini::decode_text_with_ansi;
 use crate::{Error, Result};
 
 const SECTION: &str = ".ShellClassInfo";
+const UTF16LE_BOM: [u8; 2] = [0xFF, 0xFE];
 const ICON_KEYS: [&str; 3] = ["IconResource", "IconFile", "IconIndex"];
 
 fn desktop_ini(folder: &Path) -> PathBuf {
@@ -74,12 +79,11 @@ pub fn read_folder_icon(path: &Path) -> Result<Option<(String, i32)>> {
 }
 
 fn read_ini_icon(folder: &Path) -> Result<Option<(String, i32)>> {
-    let bytes = match std::fs::read(desktop_ini(folder)) {
-        Ok(b) => b,
-        Err(e) if e.kind() == ErrorKind::NotFound => return Ok(None),
-        Err(e) => return Err(e.into()),
+    let ini = match read_ini(&desktop_ini(folder)) {
+        Ok(ini) => ini,
+        Err(Error::NotFound(_)) => return Ok(None),
+        Err(e) => return Err(e),
     };
-    let ini = UrlFile::parse(&bytes);
     if let Some(found) = ini
         .get(SECTION, "IconResource")
         .and_then(parse_icon_location)
@@ -144,17 +148,22 @@ fn set_icon(path: &Path, icon: &Path, index: i32) -> Result<()> {
     }
 }
 
-/// Fallback writer: `IconResource=path,index` in a Unicode desktop.ini,
-/// hidden + system, and the folder flagged as customised.
+/// Fallback writer: `IconResource=path,index` in desktop.ini (Unicode
+/// when new, or when the path needs it), hidden + system, and the folder
+/// flagged as customised.
 fn write_ini_icon(folder: &Path, icon: &Path, index: i32) -> Result<()> {
     let ini = desktop_ini(folder);
+    let mut location = icon.as_os_str().to_owned();
+    location.push(format!(",{index}"));
     if !ini.exists() {
         // A UTF-16LE BOM makes the profile API write Unicode text.
-        std::fs::write(&ini, [0xFF, 0xFE])?;
+        std::fs::write(&ini, UTF16LE_BOM)?;
+    } else if !location.is_ascii() {
+        // In an ANSI file the profile API would store characters outside
+        // the system code page as `?`.
+        make_unicode(&ini)?;
     }
     with_writable(&ini, |ini_w| {
-        let mut location = icon.as_os_str().to_owned();
-        location.push(format!(",{index}"));
         let value = wide(location);
         let section = wide(SECTION);
         // SAFETY: NUL-terminated strings that outlive the calls.
@@ -258,7 +267,7 @@ fn clear_icon(path: &Path) -> Result<()> {
             // sections): rewrite the file ourselves, keeping its encoding.
             rewrite_without_icon(&ini)?;
         }
-        if UrlFile::parse(&std::fs::read(&ini)?).is_empty() {
+        if read_ini(&ini)?.is_empty() {
             // Nothing else customises the folder: drop desktop.ini and the
             // folder's "read desktop.ini" flag.
             let ini_w = wide(&ini);
@@ -279,21 +288,42 @@ fn clear_icon(path: &Path) -> Result<()> {
     }
 }
 
-/// Removes every icon key from `desktop.ini` by rewriting it. The file is
-/// hidden + system, and `CREATE_ALWAYS` refuses to replace such files, so
-/// its attributes are cleared for the write and put back afterwards.
+/// Removes every icon key from `desktop.ini` by rewriting it (keeping its
+/// encoding and every other key).
 fn rewrite_without_icon(ini: &Path) -> Result<()> {
-    let mut parsed = UrlFile::parse(&std::fs::read(ini)?);
+    let mut parsed = read_ini(ini)?;
     for key in ICON_KEYS {
-        while parsed.remove(SECTION, key) {}
+        parsed.remove(SECTION, key);
     }
+    replace_contents(ini, &ini_bytes(&parsed))
+}
+
+/// Re-encodes `desktop.ini` as UTF-16LE with a BOM (the only Unicode form
+/// the profile API writes) unless it already is. The text is decoded the
+/// way [`read_ini`] reads it: BOMs, then UTF-8, else the system ANSI code
+/// page; comments and layout are kept.
+fn make_unicode(ini: &Path) -> Result<()> {
+    let bytes = std::fs::read(ini)?;
+    if bytes.starts_with(&UTF16LE_BOM) {
+        return Ok(());
+    }
+    let (text, _) = decode_text_with_ansi(&bytes, ansi_decode);
+    let mut unicode = UTF16LE_BOM.to_vec();
+    unicode.extend(text.encode_utf16().flat_map(u16::to_le_bytes));
+    replace_contents(ini, &unicode)
+}
+
+/// Overwrites `desktop.ini`. The file is hidden + system (and possibly
+/// read-only), and `CREATE_ALWAYS` refuses to replace such files, so its
+/// attributes are cleared for the write and put back afterwards.
+fn replace_contents(ini: &Path, bytes: &[u8]) -> Result<()> {
     let ini_w = wide(ini);
     // SAFETY: valid NUL-terminated path.
     let attrs = unsafe { GetFileAttributesW(pcwstr(&ini_w)) };
     // SAFETY: as above.
     unsafe { SetFileAttributesW(pcwstr(&ini_w), FILE_ATTRIBUTE_NORMAL) }
         .ctx("make desktop.ini writable")?;
-    let written = std::fs::write(ini, parsed.to_bytes());
+    let written = std::fs::write(ini, bytes);
     if attrs != INVALID_FILE_ATTRIBUTES {
         // SAFETY: as above.
         let _ = unsafe { SetFileAttributesW(pcwstr(&ini_w), FILE_FLAGS_AND_ATTRIBUTES(attrs)) };

@@ -15,7 +15,7 @@ use std::path::{Path, PathBuf};
 
 use windows::Win32::System::Registry::{HKEY_CURRENT_USER, KEY_READ, REG_SZ};
 
-use super::util::{RegKey, delete_tree, eq_ci};
+use super::util::{RegKey, delete_key_if_empty, delete_tree, eq_ci};
 use crate::Result;
 
 /// Menu text of the verb.
@@ -60,10 +60,18 @@ pub fn install(exe: &Path) -> Result<()> {
     Ok(())
 }
 
-/// Removes the verb from all three classes (absent keys are fine).
+/// Removes the verb from all three classes (absent keys are fine), and
+/// the `<class>\shell` / `<class>` keys [`install`] had to create when
+/// nothing else lives in them.
 pub fn uninstall() -> Result<()> {
     for class in CLASSES {
         delete_tree(HKEY_CURRENT_USER, &verb_key(class))?;
+        // Best effort: the verb itself is gone, and an empty per-user class
+        // key left behind is harmless.
+        let shell = format!(r"Software\Classes\{class}\shell");
+        if delete_key_if_empty(HKEY_CURRENT_USER, &shell).unwrap_or(false) {
+            let _ = delete_key_if_empty(HKEY_CURRENT_USER, &format!(r"Software\Classes\{class}"));
+        }
     }
     Ok(())
 }

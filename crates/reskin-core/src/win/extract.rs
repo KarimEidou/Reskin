@@ -48,11 +48,12 @@ use super::access::{location_of, probe_writable};
 use super::folder::read_folder_icon;
 use super::known;
 use super::shortcut::{LinkInfo, read_link};
-use super::sysicons::{effective_system_icon, read_system_icon};
-use super::util::{ComScope, ResultExt, hbitmap_to_rgba, pcwstr, resolve_icon_path, wide};
+use super::sysicons::{effective_system_icon, is_customized};
+use super::util::{
+    ComScope, ResultExt, hbitmap_to_rgba, pcwstr, read_ini, resolve_icon_path, wide,
+};
 use crate::model::{Access, IconFrame, IconSource, ItemKind, ItemLocation, SystemIconId};
 use crate::pixels::{Rgba, b64_encode, normalize_corner_icon, png_data_url};
-use crate::urlini::UrlFile;
 use crate::{Error, Result, grpicon, ico};
 
 /// Largest preview [`Inspected::icon`] carries.
@@ -87,7 +88,8 @@ pub struct Inspected {
     pub icon: Option<Rgba>,
     pub icon_source: IconSource,
     /// The item has an explicit icon location (IconLocation, IconFile,
-    /// desktop.ini icon, per-user system-icon override).
+    /// desktop.ini icon, a per-user system-icon override that differs from
+    /// the Windows default).
     pub custom_icon: bool,
     /// Store (AppsFolder) shortcut: Explorer ignores its IconLocation.
     pub store_app: bool,
@@ -211,8 +213,7 @@ fn plan_for(path: &Path, kind: ItemKind) -> Plan {
             }
         }
         ItemKind::InternetShortcut => {
-            if let Ok(bytes) = std::fs::read(path) {
-                let url = UrlFile::parse(&bytes);
+            if let Ok(url) = read_ini(path) {
                 if let Some(file) = url.icon_file() {
                     plan.custom = true;
                     plan.primary = Some(IconRef::Location {
@@ -267,7 +268,7 @@ fn system_plan(id: SystemIconId) -> Plan {
                 index,
             }),
         shell,
-        custom: read_system_icon(id).is_ok_and(|o| o.existed),
+        custom: is_customized(id),
         target: None,
         link: None,
     }

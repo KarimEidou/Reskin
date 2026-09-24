@@ -19,6 +19,10 @@
 //! `.W` value. Files written by other tools (Steam, Epic, installers) may
 //! instead be UTF-16LE or UTF-8, with or without a BOM.
 //!
+//! This module is host-independent, so it decodes ANSI as Windows-1252;
+//! `UrlFile::parse_with_ansi` / `to_bytes_with_ansi` take the system code
+//! page's codec instead (the Windows layer always uses those).
+//!
 //! The INI layer itself is generic — case-insensitive section and key
 //! lookup, `;` comment lines, surrounding quotes stripped like
 //! `GetPrivateProfileString` does — so it also reads `desktop.ini` files.
@@ -47,8 +51,10 @@ pub enum TextEncoding {
     /// UTF-8 without a BOM, which includes plain ASCII.
     #[default]
     Utf8,
-    /// Not valid UTF-8: decoded as Windows-1252 ("ANSI"; the five bytes
-    /// 1252 leaves undefined map to the Latin-1 code points).
+    /// Not valid UTF-8: an "ANSI" code page. [`UrlFile::parse`] decodes it
+    /// as Windows-1252 (the five bytes 1252 leaves undefined map to the
+    /// Latin-1 code points); [`UrlFile::parse_with_ansi`] lets the Windows
+    /// layer use the system code page instead.
     Ansi,
 }
 
@@ -79,10 +85,25 @@ impl UrlFile {
     /// with an empty key are ignored, as Windows does.
     pub fn parse(bytes: &[u8]) -> Self {
         let (text, encoding) = decode_text(bytes);
+        Self::from_text(&text, encoding)
+    }
+
+    /// [`UrlFile::parse`] with a caller-supplied decoder for ANSI input
+    /// (bytes that are neither UTF-16 nor valid UTF-8). Windows writes such
+    /// files in the *system* ANSI code page, which is only Windows-1252 on
+    /// Western systems; the Windows layer passes a `CP_ACP` decoder so that,
+    /// say, Cyrillic paths on a 1251 system read correctly. Write such a
+    /// file back with [`UrlFile::to_bytes_with_ansi`] and the matching
+    /// encoder.
+    pub fn parse_with_ansi(bytes: &[u8], ansi: impl FnOnce(&[u8]) -> String) -> Self {
+        let (text, encoding) = decode_text_with_ansi(bytes, ansi);
+        Self::from_text(&text, encoding)
+    }
+
+    fn from_text(text: &str, encoding: TextEncoding) -> Self {
         let mut sections: Vec<Section> = Vec::new();
         for raw in text.split(['\n', '\r']) {
-            let line =
-                raw.trim_matches(|c: char| c.is_whitespace() || c == '\u{feff}' || c == '\0');
+            let line = raw.trim_matches(is_trimmed);
             if line.is_empty() || line.starts_with(';') {
                 continue;
             }
@@ -104,7 +125,7 @@ impl UrlFile {
             if key.is_empty() {
                 continue;
             }
-            let value = strip_quotes(value.trim());
+            let value = strip_quotes(value.trim_matches(is_trimmed));
             let value = if ci_eq(&section.name, SECTION_W) {
                 utf7_decode(value)
             } else {
@@ -258,7 +279,9 @@ impl UrlFile {
 
     /// Serialises the file with CRLF line endings. Values of the `.W`
     /// section are UTF-7 encoded; line breaks inside other values (which
-    /// INI cannot represent) are dropped.
+    /// INI cannot represent) are dropped. A value that reading would alter
+    /// (surrounding whitespace, or already wrapped in quotes) is written in
+    /// double quotes, so a parsed file re-serialises without loss.
     pub fn to_ini_string(&self) -> String {
         let mut out = String::new();
         for s in &self.sections {
@@ -269,10 +292,17 @@ impl UrlFile {
             for (k, v) in &s.entries {
                 out.push_str(k);
                 out.push('=');
-                if wide {
-                    out.push_str(&utf7_encode(v));
+                let value = if wide {
+                    utf7_encode(v)
                 } else {
-                    out.extend(v.chars().filter(|&c| c != '\r' && c != '\n'));
+                    v.chars().filter(|&c| c != '\r' && c != '\n').collect()
+                };
+                if needs_quotes(&value) {
+                    out.push('"');
+                    out.push_str(&value);
+                    out.push('"');
+                } else {
+                    out.push_str(&value);
                 }
                 out.push_str("\r\n");
             }
@@ -283,6 +313,13 @@ impl UrlFile {
     /// [`UrlFile::to_ini_string`] encoded in [`UrlFile::encoding`]
     /// (characters Windows-1252 cannot represent become `?` in ANSI files).
     pub fn to_bytes(&self) -> Vec<u8> {
+        self.to_bytes_with_ansi(|text| text.chars().map(cp1252_encode).collect())
+    }
+
+    /// [`UrlFile::to_bytes`] with a caller-supplied encoder for
+    /// [`TextEncoding::Ansi`] files (the counterpart of
+    /// [`UrlFile::parse_with_ansi`]); the other encodings ignore it.
+    pub fn to_bytes_with_ansi(&self, ansi: impl FnOnce(&str) -> Vec<u8>) -> Vec<u8> {
         let text = self.to_ini_string();
         match self.encoding {
             TextEncoding::Utf16Le => [0xFF, 0xFE]
@@ -295,7 +332,7 @@ impl UrlFile {
                 .collect(),
             TextEncoding::Utf8Bom => [0xEF, 0xBB, 0xBF].into_iter().chain(text.bytes()).collect(),
             TextEncoding::Utf8 => text.into_bytes(),
-            TextEncoding::Ansi => text.chars().map(cp1252_encode).collect(),
+            TextEncoding::Ansi => ansi(&text),
         }
     }
 }
@@ -304,6 +341,14 @@ impl UrlFile {
 /// BOM-less UTF-16LE is recognised by its zero high bytes, then valid UTF-8
 /// is taken as is and anything else is decoded as Windows-1252.
 pub fn decode_text(bytes: &[u8]) -> (String, TextEncoding) {
+    decode_text_with_ansi(bytes, |b| b.iter().map(|&c| cp1252_decode(c)).collect())
+}
+
+/// [`decode_text`] with a caller-supplied decoder for ANSI input.
+pub fn decode_text_with_ansi(
+    bytes: &[u8],
+    ansi: impl FnOnce(&[u8]) -> String,
+) -> (String, TextEncoding) {
     if let Some(rest) = bytes.strip_prefix(&[0xFF, 0xFE]) {
         (
             utf16_decode(rest, u16::from_le_bytes),
@@ -327,10 +372,7 @@ pub fn decode_text(bytes: &[u8]) -> (String, TextEncoding) {
     } else {
         match std::str::from_utf8(bytes) {
             Ok(s) => (s.to_owned(), TextEncoding::Utf8),
-            Err(_) => (
-                bytes.iter().map(|&b| cp1252_decode(b)).collect(),
-                TextEncoding::Ansi,
-            ),
+            Err(_) => (ansi(bytes), TextEncoding::Ansi),
         }
     }
 }
@@ -395,6 +437,19 @@ fn strip_quotes(v: &str) -> &str {
         }
     }
     v
+}
+
+/// Characters the reader trims from both ends of a line and a value.
+fn is_trimmed(c: char) -> bool {
+    c.is_whitespace() || c == '\u{feff}' || c == '\0'
+}
+
+/// Reading `value` back would change it (trimmed ends, stripped quotes),
+/// so it has to be written in quotes.
+fn needs_quotes(value: &str) -> bool {
+    value.starts_with(is_trimmed)
+        || value.ends_with(is_trimmed)
+        || strip_quotes(value).len() != value.len()
 }
 
 /// Case-insensitive comparison of section / key names.

@@ -4,6 +4,7 @@
 
 use std::ffi::{OsStr, OsString, c_void};
 use std::fmt::Display;
+use std::io::Read;
 use std::os::windows::ffi::{OsStrExt, OsStringExt};
 use std::path::{Path, PathBuf};
 
@@ -11,7 +12,10 @@ use windows::Win32::Foundation::{
     ERROR_FILE_NOT_FOUND, ERROR_MORE_DATA, ERROR_PATH_NOT_FOUND, ERROR_SUCCESS, RPC_E_CHANGED_MODE,
     WIN32_ERROR,
 };
-use windows::Win32::Globalization::{CSTR_EQUAL, CompareStringOrdinal};
+use windows::Win32::Globalization::{
+    CP_ACP, CSTR_EQUAL, CompareStringOrdinal, MULTI_BYTE_TO_WIDE_CHAR_FLAGS, MultiByteToWideChar,
+    WC_NO_BEST_FIT_CHARS, WideCharToMultiByte,
+};
 use windows::Win32::Graphics::Gdi::{
     BI_RGB, BITMAP, BITMAPINFO, BITMAPINFOHEADER, CreateCompatibleDC, DIB_RGB_COLORS, DeleteDC,
     GetDIBits, GetObjectW, HBITMAP,
@@ -27,9 +31,10 @@ use windows::Win32::System::Registry::{
 };
 use windows::Win32::System::SystemInformation::GetSystemDirectoryW;
 use windows::Win32::UI::Shell::Common::ITEMIDLIST;
-use windows::core::{Owned, PCWSTR, PWSTR};
+use windows::core::{Owned, PCSTR, PCWSTR, PWSTR};
 
 use crate::pixels::{Rgba, bgra_to_rgba};
+use crate::urlini::UrlFile;
 use crate::{Error, Result};
 
 // ---------------------------------------------------------------------------
@@ -254,6 +259,91 @@ pub(crate) fn resolve_icon_path(raw: &str, base: Option<&Path>) -> PathBuf {
         Some(base) => base.join(p),
         None => p,
     }
+}
+
+// ---------------------------------------------------------------------------
+// INI files (.url, desktop.ini) and the ANSI code page
+// ---------------------------------------------------------------------------
+
+/// `.url` and `desktop.ini` files are tiny; anything bigger is refused
+/// rather than read into memory.
+const MAX_INI_BYTES: u64 = 1024 * 1024;
+
+/// Decodes bytes in the system ANSI code page (`CP_ACP`): what Windows
+/// assumes for an INI file without a BOM.
+pub(crate) fn ansi_decode(bytes: &[u8]) -> String {
+    if bytes.is_empty() {
+        return String::new();
+    }
+    let flags = MULTI_BYTE_TO_WIDE_CHAR_FLAGS(0);
+    // SAFETY: size query, then a conversion into a buffer of that size.
+    let needed = unsafe { MultiByteToWideChar(CP_ACP, flags, bytes, None) };
+    if needed > 0 {
+        let mut wide = vec![0u16; needed as usize];
+        // SAFETY: as above.
+        let written = unsafe { MultiByteToWideChar(CP_ACP, flags, bytes, Some(&mut wide)) };
+        if written > 0 {
+            return String::from_utf16_lossy(&wide[..written as usize]);
+        }
+    }
+    // Conversion failed (should not happen): Latin-1 keeps every byte.
+    bytes.iter().map(|&b| char::from(b)).collect()
+}
+
+/// Encodes text in the system ANSI code page; characters it lacks become
+/// the code page's default character (`?`), never a "best fit" look-alike
+/// (which would silently turn `Zoë` into another path, `Zoe`).
+pub(crate) fn ansi_encode(text: &str) -> Vec<u8> {
+    let wide: Vec<u16> = text.encode_utf16().collect();
+    if wide.is_empty() {
+        return Vec::new();
+    }
+    // A UTF-8 system code page rejects WC_NO_BEST_FIT_CHARS (and has no
+    // best fit to avoid), hence the retry without flags.
+    for flags in [WC_NO_BEST_FIT_CHARS, 0] {
+        // SAFETY: size query, then a conversion into a buffer of that size;
+        // no default-character arguments (required for UTF-8 code pages).
+        let needed =
+            unsafe { WideCharToMultiByte(CP_ACP, flags, &wide, None, PCSTR::null(), None) };
+        if needed <= 0 {
+            continue;
+        }
+        let mut out = vec![0u8; needed as usize];
+        // SAFETY: as above.
+        let written = unsafe {
+            WideCharToMultiByte(CP_ACP, flags, &wide, Some(&mut out), PCSTR::null(), None)
+        };
+        if written > 0 {
+            out.truncate(written as usize);
+            return out;
+        }
+    }
+    text.chars()
+        .map(|c| if c.is_ascii() { c as u8 } else { b'?' })
+        .collect()
+}
+
+/// Reads an INI file the way Windows does: BOMs and UTF-8 as
+/// [`UrlFile::parse`] detects them, anything else in the system ANSI code
+/// page (not Windows-1252 on, say, a Cyrillic or Japanese system).
+pub(crate) fn read_ini(path: &Path) -> Result<UrlFile> {
+    let mut bytes = Vec::new();
+    std::fs::File::open(path)?
+        .take(MAX_INI_BYTES + 1)
+        .read_to_end(&mut bytes)?;
+    if bytes.len() as u64 > MAX_INI_BYTES {
+        return Err(Error::Unsupported(format!(
+            "{} is too large for an INI file",
+            path.display()
+        )));
+    }
+    Ok(UrlFile::parse_with_ansi(&bytes, ansi_decode))
+}
+
+/// `file` as bytes in its original encoding (ANSI files in `CP_ACP`, the
+/// counterpart of [`read_ini`]).
+pub(crate) fn ini_bytes(file: &UrlFile) -> Vec<u8> {
+    file.to_bytes_with_ansi(ansi_encode)
 }
 
 // ---------------------------------------------------------------------------
@@ -641,6 +731,34 @@ mod tests {
             OsStr::new("::{645FF040-5081-101B-9F08-00AA002F954E}"),
             OsStr::new("::{645ff040-5081-101b-9f08-00aa002f954e}")
         ));
+    }
+
+    #[test]
+    fn ansi_code_page_round_trip() {
+        assert_eq!(ansi_decode(b""), "");
+        assert!(ansi_encode("").is_empty());
+        assert_eq!(ansi_encode("C:\\plain ascii.ico"), b"C:\\plain ascii.ico");
+        assert_eq!(ansi_decode(b"C:\\plain ascii.ico"), "C:\\plain ascii.ico");
+        // Whatever the system code page is, text survives a round trip or
+        // degrades to its default character; nothing panics or vanishes.
+        for s in ["Zoë", "Иван", "星空", "😀"] {
+            let back = ansi_decode(&ansi_encode(s));
+            assert!(back == s || back.contains('?'), "{s} -> {back}");
+        }
+        let dir = std::env::temp_dir().join(format!("reskin-ini-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("x.url");
+        let mut file = UrlFile::new();
+        file.set_url("https://example.com/");
+        std::fs::write(&path, ini_bytes(&file)).unwrap();
+        assert_eq!(read_ini(&path).unwrap().url(), Some("https://example.com/"));
+        std::fs::write(&path, vec![b'x'; MAX_INI_BYTES as usize + 1]).unwrap();
+        assert!(matches!(read_ini(&path), Err(Error::Unsupported(_))));
+        assert!(matches!(
+            read_ini(&dir.join("missing.url")),
+            Err(Error::NotFound(_))
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
