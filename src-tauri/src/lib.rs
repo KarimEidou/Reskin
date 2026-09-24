@@ -112,7 +112,7 @@ pub fn run(args: AppArgs) {
     let edit_paths = args.edit.clone();
     let state = AppState::new(&args, dirs, settings, first_run, journal, sta);
 
-    tauri::Builder::default()
+    let app = tauri::Builder::default()
         // Must be registered first so a second launch exits before doing work.
         .plugin(tauri_plugin_single_instance::init(|app, argv, _cwd| {
             let forwarded = AppArgs::parse(&argv);
@@ -211,14 +211,18 @@ pub fn run(args: AppArgs) {
             commands::system::smoke_ready,
         ])
         .build(tauri::generate_context!())
-        .expect("error while building Reskin")
-        .run(|_app, event| {
-            // Windows are only ever hidden, never closed; keep running
-            // unless an explicit exit code was requested.
-            if let tauri::RunEvent::ExitRequested { api, code, .. } = event
-                && code.is_none()
-            {
-                api.prevent_exit();
-            }
-        });
+        .expect("error while building Reskin");
+    // `run` would end the process with code 0 whatever `app.exit(code)`
+    // asked for (tao exits on its own); `run_return` hands the code back so
+    // the smoke test and helper modes report failures.
+    let code = app.run_return(|_app, event| {
+        // Windows are only ever hidden, never closed; keep running
+        // unless an explicit exit code was requested.
+        if let tauri::RunEvent::ExitRequested { api, code, .. } = event
+            && code.is_none()
+        {
+            api.prevent_exit();
+        }
+    });
+    std::process::exit(code);
 }
