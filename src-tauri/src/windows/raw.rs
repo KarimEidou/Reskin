@@ -7,6 +7,10 @@
 
 use reskin_core::model::Rect;
 use windows::Win32::Foundation::{HWND, RECT};
+use windows::Win32::Graphics::Dwm::{
+    DWMWA_WINDOW_CORNER_PREFERENCE, DWMWCP_ROUND, DwmSetWindowAttribute,
+};
+use windows::Win32::Graphics::Gdi::{CreateRoundRectRgn, SetWindowRgn};
 use windows::Win32::UI::WindowsAndMessaging::{
     GetWindowRect, HWND_NOTOPMOST, HWND_TOPMOST, IsWindowVisible, SW_HIDE, SW_SHOWNOACTIVATE,
     SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SetWindowPos, ShowWindow,
@@ -74,4 +78,42 @@ pub fn rect(h: isize) -> Option<Rect> {
         (r.right - r.left) as f64,
         (r.bottom - r.top) as f64,
     ))
+}
+
+/// Compatibility mode: clip a window to a rounded rectangle (physical px,
+/// window-relative). The system owns the region afterwards.
+pub fn set_round_region(h: isize, r: Rect, radius: f64) {
+    if h == 0 {
+        return;
+    }
+    let d = (radius * 2.0).round() as i32;
+    unsafe {
+        let rgn = CreateRoundRectRgn(
+            r.x.round() as i32,
+            r.y.round() as i32,
+            r.right().round() as i32 + 1,
+            r.bottom().round() as i32 + 1,
+            d,
+            d,
+        );
+        if !rgn.is_invalid() {
+            SetWindowRgn(hwnd(h), Some(rgn), true);
+        }
+    }
+}
+
+/// Asks DWM for Windows 11 rounded corners (no effect on Windows 10).
+pub fn round_corners(h: isize) {
+    if h == 0 {
+        return;
+    }
+    let pref = DWMWCP_ROUND;
+    unsafe {
+        let _ = DwmSetWindowAttribute(
+            hwnd(h),
+            DWMWA_WINDOW_CORNER_PREFERENCE,
+            &pref as *const _ as *const core::ffi::c_void,
+            std::mem::size_of_val(&pref) as u32,
+        );
+    }
 }

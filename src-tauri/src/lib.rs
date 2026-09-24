@@ -17,6 +17,7 @@ mod helper;
 mod hotkey;
 mod items;
 mod log;
+mod memory;
 mod menu;
 mod restore;
 mod selftest;

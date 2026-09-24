@@ -5,7 +5,7 @@
 use reskin_core::model::{Settings, editor_size};
 use tauri::{AppHandle, PhysicalPosition, Runtime, WebviewWindow, WebviewWindowBuilder};
 
-use super::{webview2, window_config};
+use super::{raw, webview2, window_config};
 
 pub const LABEL: &str = "editor";
 
@@ -39,6 +39,9 @@ pub fn create<R: Runtime>(
         })
         .build()?;
     webview2::tune(&window);
+    if compat {
+        raw::round_corners(raw::hwnd_of(&window));
+    }
     prime(&window);
     Ok(window)
 }

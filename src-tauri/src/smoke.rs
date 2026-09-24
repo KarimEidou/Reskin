@@ -138,7 +138,13 @@ fn settle() {
 
 fn run_scenarios<R: Runtime>(app: &AppHandle<R>) -> i32 {
     let state = app.state::<AppState>();
-    std::thread::sleep(Duration::from_millis(400));
+    // Idle footprint: both pages booted, editor hidden with a low memory
+    // target. Give WebView2 a moment to settle first.
+    std::thread::sleep(Duration::from_millis(2500));
+    log::line(&format!(
+        "smoke: idle working set {}",
+        crate::memory::measure()
+    ));
     if state.smoke.capture_handoff {
         match handoff(app) {
             Ok(msg) => log::line(&format!("smoke: handoff {msg}")),

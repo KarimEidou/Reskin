@@ -112,7 +112,9 @@ fn wants_morph(settings: &Settings, system_reduced: bool) -> bool {
         MotionPref::Full => false,
         MotionPref::System => system_reduced,
     };
-    settings.open_style == OpenStyle::Morph && !reduced
+    // An opaque (compatibility-mode) editor can't show the box proxy over
+    // the desktop, so it always crossfades.
+    settings.open_style == OpenStyle::Morph && !reduced && !settings.compatibility_mode
 }
 
 /// Returns the editor window, creating (or recreating) it when it is
@@ -371,7 +373,10 @@ fn close_inner<R: Runtime>(
     webview2::set_memory_low(&editor, true);
     log::line(&format!("morph: session {session} closed"));
 
-    if settings.low_memory {
+    if state.take_window_rebuild() {
+        // Compatibility mode changed while the editor was open.
+        crate::commands::settings::rebuild_windows(app, &settings);
+    } else if settings.low_memory {
         // Free the editor's memory entirely; it is recreated on next open.
         let _ = editor.destroy();
         state.mailbox.reset();

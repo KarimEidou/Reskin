@@ -34,6 +34,8 @@ pub struct AppState {
     box_hidden_by_user: AtomicBool,
     hidden_for_fullscreen: AtomicBool,
     system_reduced_motion: AtomicBool,
+    /// Compatibility mode changed: rebuild both windows at the next close.
+    rebuild_windows: AtomicBool,
 }
 
 impl AppState {
@@ -61,6 +63,7 @@ impl AppState {
             box_hidden_by_user: AtomicBool::new(false),
             hidden_for_fullscreen: AtomicBool::new(false),
             system_reduced_motion: AtomicBool::new(false),
+            rebuild_windows: AtomicBool::new(false),
         }
     }
 
@@ -117,6 +120,14 @@ impl AppState {
 
     pub fn set_hidden_for_fullscreen(&self, v: bool) {
         self.hidden_for_fullscreen.store(v, Ordering::SeqCst);
+    }
+
+    pub fn request_window_rebuild(&self) {
+        self.rebuild_windows.store(true, Ordering::SeqCst);
+    }
+
+    pub fn take_window_rebuild(&self) -> bool {
+        self.rebuild_windows.swap(false, Ordering::SeqCst)
     }
 
     pub fn system_reduced_motion(&self) -> bool {

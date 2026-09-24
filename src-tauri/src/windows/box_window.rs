@@ -5,7 +5,7 @@
 use reskin_core::model::{BoxMetrics, Rect, Settings};
 use tauri::{AppHandle, Runtime, WebviewWindow, WebviewWindowBuilder};
 
-use super::{monitors, webview2, window_config};
+use super::{monitors, raw, webview2, window_config};
 
 pub const LABEL: &str = "box";
 
@@ -27,6 +27,44 @@ pub fn create<R: Runtime>(
         .transparent(!compat)
         .build()?;
     webview2::tune(&window);
+    if compat {
+        apply_compat_shape(&window, &metrics);
+    }
+    Ok(window)
+}
+
+/// Compatibility mode: the window is opaque, so clip it to the visual box.
+pub fn apply_compat_shape<R: Runtime>(window: &WebviewWindow<R>, m: &BoxMetrics) {
+    let scale = window.scale_factor().unwrap_or(1.0);
+    let visual = Rect::new(
+        m.margin * scale,
+        m.margin * scale,
+        m.visual * scale,
+        m.visual * scale,
+    );
+    let h = raw::hwnd_of(window);
+    raw::set_round_region(h, visual, m.radius * scale);
+    raw::round_corners(h);
+}
+
+/// Rebuilds the box window (after the transparency setting changed). The
+/// new window starts hidden; the caller shows it.
+pub fn recreate<R: Runtime>(
+    app: &AppHandle<R>,
+    settings: &Settings,
+) -> tauri::Result<WebviewWindow<R>> {
+    use tauri::Manager;
+    if let Some(old) = app.get_webview_window(LABEL) {
+        let _ = old.destroy();
+        for _ in 0..40 {
+            if app.get_webview_window(LABEL).is_none() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(25));
+        }
+    }
+    let window = create(app, settings)?;
+    raw::hide(raw::hwnd_of(&window));
     Ok(window)
 }
 
