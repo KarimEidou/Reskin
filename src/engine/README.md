@@ -371,9 +371,21 @@ const [png] = await toSizedPngs(engine.doc, [256]);           // or exportPng(do
   `MAX_PROJECT_LAYERS` (256) layers, and pixel blobs are inflated with a hard
   output limit (`inflate(bytes, maxBytes)`), so hostile files cannot exhaust
   memory.
-- `new Autosave({ produce: () => engine.serialize(), save: (d) =>
-  commands.autosave(d), delayMs, maxWaitMs })` — call `schedule()` on
-  `history`/`layers` events, `flush()` before closing, `dispose()`.
+- Serializing in two steps: `snapshotProject(doc)` takes the document as it
+  is (synchronous; copies the layer pixels), `encodeSnapshot(snapshot)`
+  compresses and base64-encodes it anywhere. `new ProjectEncoder()`
+  (`io/encoder.ts`) does the second step in a module worker
+  (`io/project.worker.ts`, pixel copies transferred, not cloned):
+  `encode(doc) → Promise<json>` equals `serializeProject(doc)` but only
+  the snapshot runs on the calling thread; without `Worker` it encodes
+  inline; `dispose()` ends it.
+- `new Autosave({ produce, save, delayMs, maxWaitMs, onError })` — call
+  `schedule()` on `history` events; it saves once things were quiet for
+  `delayMs`, at least every `maxWaitMs` during continuous edits. `produce`
+  may return null (nothing unsaved: no save). Storage tasks run one after
+  another: `flush()` saves a pending change now, `write(data)` saves given
+  data instead, `enqueue(task)` runs any other task in order (rejecting
+  with its own failure); `cancel()`, `dispose()`.
 - `fitAndCenter(surface, { size, padding, fit, allowUpscale, resample,
   trim })`, `importLayer(doc, surface, name)`, `surfaceFromImageData`,
   `bestFrameIndex(frames)`; in the browser `decodeImage(bytes | Blob |

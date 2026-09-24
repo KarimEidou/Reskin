@@ -1,8 +1,9 @@
 <!--
-  Shown when an apply returned `needsElevation` (session.elevation): the
-  item is on the Public Desktop, which only administrators can change.
-  Allow → the elevated helper (UAC prompt); or make a personal copy on the
-  user's own desktop; or cancel.
+  Shown when applies returned `needsElevation` (session.elevation): the
+  items are on the Public Desktop, which only administrators can change —
+  one item after Save & Apply, or every such item of an "Apply style to
+  all" at once. Allow → the elevated helper (a UAC prompt per item); or
+  personal copies on the user's own desktop; or cancel.
 -->
 <script lang="ts">
   import Copy from '@lucide/svelte/icons/copy';
@@ -16,8 +17,11 @@
   const session = getSession();
 
   const pending = $derived(session.elevation);
-  const name = $derived(session.item?.name ?? 'This shortcut');
-  const canCopy = $derived(session.modes.includes('personalCopy'));
+  const names = $derived(pending?.requests.map((r) => r.entry.info.name) ?? []);
+  const many = $derived(names.length > 1);
+  /** Items that can be copied instead (shortcuts shared by all users). */
+  const copyable = $derived(pending?.requests.filter((r) => r.entry.info.modes.includes('personalCopy')).length ?? 0);
+  const reasons = $derived([...new Set(pending?.requests.map((r) => r.reason).filter((r) => r !== '') ?? [])]);
   let open = $state(false);
 
   $effect(() => {
@@ -35,29 +39,50 @@
     <div class="body" data-testid="elevation-dialog">
       <div class="where">
         <span class="badge" aria-hidden="true"><Users size={20} /></span>
-        <p>
-          <strong>{name}</strong> is on the <strong>Public Desktop</strong>, which every account on this PC shares.
-          Windows only lets administrators change it.
-        </p>
+        {#if many}
+          <p>
+            <strong>{names.length} shortcuts</strong> are on the <strong>Public Desktop</strong>, which every account on this
+            PC shares. Windows only lets administrators change them.
+          </p>
+        {:else}
+          <p>
+            <strong>{names[0]}</strong> is on the <strong>Public Desktop</strong>, which every account on this PC shares.
+            Windows only lets administrators change it.
+          </p>
+        {/if}
       </div>
-      {#if pending.reason}<p class="reason">{pending.reason}</p>{/if}
+      {#if many}
+        <ul class="names" aria-label="Waiting for approval">
+          {#each names as name, i (i)}<li>{name}</li>{/each}
+        </ul>
+      {/if}
+      {#each reasons as reason (reason)}<p class="reason">{reason}</p>{/each}
       <ul class="options">
         <li>
           <ShieldCheck size={16} aria-hidden="true" />
-          <span><strong>Allow</strong> changes it for everyone. Windows asks for permission once.</span>
+          <span>
+            <strong>Allow</strong> changes {many ? 'them' : 'it'} for everyone. Windows asks for permission {many
+              ? 'for each one'
+              : 'once'}.
+          </span>
         </li>
-        {#if canCopy}
+        {#if copyable > 0}
           <li>
             <Copy size={16} aria-hidden="true" />
-            <span><strong>Personal copy</strong> puts a copy on your own desktop with the new icon — no admin needed.</span>
+            <span>
+              <strong>Personal {copyable > 1 ? 'copies' : 'copy'}</strong> put{copyable > 1 ? '' : 's'} a copy on your own
+              desktop with the new icon — no admin needed.
+            </span>
           </li>
         {/if}
       </ul>
     </div>
     {#snippet footer()}
       <Button variant="ghost" onclick={() => session.dismissElevation()}>Cancel</Button>
-      {#if canCopy}
-        <Button icon={Copy} onclick={() => void session.personalCopy()}>Make a personal copy</Button>
+      {#if copyable > 0}
+        <Button icon={Copy} onclick={() => void session.personalCopy()}>
+          {copyable > 1 ? 'Make personal copies' : 'Make a personal copy'}
+        </Button>
       {/if}
       <Button variant="primary" icon={ShieldCheck} onclick={() => void session.approveElevation()} {@attach autofocus}>
         Allow (administrator)
@@ -96,6 +121,21 @@
   strong {
     color: var(--text);
     font-weight: var(--weight-semibold);
+  }
+  .names {
+    display: flex;
+    flex-wrap: wrap;
+    gap: var(--space-1);
+    margin: 0;
+    padding: 0;
+    list-style: none;
+  }
+  .names li {
+    padding: 2px var(--space-2);
+    border-radius: var(--radius-full);
+    background: var(--shell-well);
+    color: var(--text);
+    font-size: var(--text-sm);
   }
   .reason {
     padding: var(--space-2) var(--space-3);

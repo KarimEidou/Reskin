@@ -1,8 +1,11 @@
 <!--
   The batch queue: a thumbnail per dropped item with its status (pending,
-  editing, applying, applied, failed). Click switches the design (each item
-  keeps its own), × removes an item; "Apply style to all" rebuilds the last
-  style on every other item's icon.
+  editing, applying, applied, failed) and, in its tooltip, why an apply
+  did not go through and the item's notes. Click switches the design (each
+  item keeps its own), × removes an item — both wait while a job runs or
+  an item loads (the session's queue lock, shared with the title bar's
+  queue menu). "Apply style to all" replays the current item's recipe on
+  every other queued icon (each on its own icon) and applies it.
 -->
 <script lang="ts">
   import CircleAlert from '@lucide/svelte/icons/circle-alert';
@@ -13,7 +16,7 @@
   import Spinner from '$lib/ui/Spinner.svelte';
   import { toast } from '$lib/ui/toasts.svelte';
   import Tooltip from '$lib/ui/Tooltip.svelte';
-  import { errorText, type QueueStatus } from '../state/session.svelte';
+  import { errorText, isTarget, type QueueEntry, type QueueStatus } from '../state/session.svelte';
   import { getSession } from '../state/context';
 
   const session = getSession();
@@ -27,39 +30,45 @@
   };
 
   const many = $derived(session.queue.length > 1);
-  const canApplyAll = $derived(!!session.recipe && session.queue.length >= 2 && session.busy === null);
+  /** Other queued icons "Apply style to all" would apply to. */
+  const others = $derived(
+    session.queue.filter((q, i) => i !== session.currentIndex && q.status !== 'applied' && isTarget(q.info)).length,
+  );
+  const canApplyAll = $derived(!!session.recipe && others > 0 && !session.queueLocked);
   const applyAllHint = $derived(
-    session.busy
+    session.queueLocked
       ? 'Wait for the current job to finish'
       : !session.recipe
         ? 'Apply a style, backdrop or adjustment first'
-        : `Rebuild "${session.recipe.label}" on every other icon and apply it`,
+        : others === 0
+          ? 'Every other queued icon is applied'
+          : `Replay this icon's style ("${session.recipe.label}") on every other queued icon and apply it`,
   );
 
-  /** One switch at a time: each loads and stashes a whole design. */
-  let switching = false;
+  /** "Name — status: why", the item's accessible name. */
+  function label(entry: QueueEntry): string {
+    return `${entry.info.name}, ${STATUS_TEXT[entry.status]}${entry.problem ? `: ${entry.problem}` : ''}`;
+  }
+
+  /** The tooltip: status, why an apply did not go through, the item's notes. */
+  function tip(entry: QueueEntry): string {
+    const head = `${entry.info.name} — ${STATUS_TEXT[entry.status]}${entry.problem ? `: ${entry.problem}` : ''}`;
+    return entry.info.notes.length > 0 ? `${head}. ${entry.info.notes.join(' ')}` : head;
+  }
 
   async function select(i: number): Promise<void> {
-    if (switching || session.busy || i === session.currentIndex) return;
-    switching = true;
     try {
-      await session.select(i);
+      await session.switchTo(i);
     } catch (e) {
       toast({ message: `Could not open ${session.queue[i]?.info.name ?? 'that icon'}: ${errorText(e)}`, kind: 'error' });
-    } finally {
-      switching = false;
     }
   }
 
   async function remove(i: number): Promise<void> {
-    if (switching || session.busy) return;
-    switching = true;
     try {
       await session.remove(i);
     } catch (e) {
       toast({ message: `Could not switch icons: ${errorText(e)}`, kind: 'error' });
-    } finally {
-      switching = false;
     }
   }
 
@@ -79,13 +88,13 @@
       {#each session.queue as entry, i (entry.info.id)}
         {@const current = i === session.currentIndex}
         <li class="item" class:current data-status={entry.status}>
-          <Tooltip text="{entry.info.name} — {STATUS_TEXT[entry.status]}" placement="top" describe={false}>
+          <Tooltip text={tip(entry)} placement="top" describe={entry.info.notes.length > 0}>
             <button
               type="button"
               class="thumb"
-              aria-label="{entry.info.name}, {STATUS_TEXT[entry.status]}"
+              aria-label={label(entry)}
               aria-current={current ? 'true' : undefined}
-              aria-disabled={session.busy !== null && !current}
+              aria-disabled={session.queueLocked && !current}
               data-testid="queue-item"
               onclick={() => select(i)}
             >
@@ -110,7 +119,7 @@
               type="button"
               class="remove"
               aria-label="Remove {entry.info.name} from the queue"
-              disabled={session.busy !== null}
+              disabled={session.queueLocked}
               onclick={() => remove(i)}
             >
               <X size={10} strokeWidth={2.5} aria-hidden="true" />

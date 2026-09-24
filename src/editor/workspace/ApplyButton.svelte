@@ -1,13 +1,17 @@
 <!--
   The primary Save & Apply split button. The main part applies with the
-  item's preferred mode; the menu lists every mode (unavailable ones
-  disabled) and the "also update pins" setting. Disabled with the reason
-  as a tooltip when nothing can be applied; while working it morphs into a
-  progress ring with the current step.
+  item's preferred mode (a classic shortcut for Store apps, whose own
+  icon Windows ignores); the menu lists every mode (unavailable ones
+  disabled), the item's notes and the "also update pins" setting. Disabled
+  with the reason as a tooltip when nothing can be applied; while working
+  it morphs into a progress ring with the current step. With other items
+  still queued the editor stays open after applying and moves on to the
+  next one (see session.apply).
 -->
 <script lang="ts">
   import ChevronUp from '@lucide/svelte/icons/chevron-up';
   import CopyPlus from '@lucide/svelte/icons/copy-plus';
+  import Info from '@lucide/svelte/icons/info';
   import Link2 from '@lucide/svelte/icons/link-2';
   import Sparkles from '@lucide/svelte/icons/sparkles';
   import type { ApplyMode } from '$lib/ipc/types';
@@ -35,9 +39,12 @@
 
   const busy = $derived(session.busy);
   const mode = $derived(session.modes[0] ?? null);
-  const blocked = $derived(applyBlockedReason(session.item, session.busy));
+  const blocked = $derived(
+    applyBlockedReason(session.item, session.busy ?? (session.switching > 0 ? { label: 'Loading' } : null)),
+  );
   const canApply = $derived(session.canApply && blocked === null);
-  const tip = $derived(blocked ?? (mode ? MODE_INFO[mode].description : ''));
+  const notes = $derived(session.item?.notes ?? []);
+  const tip = $derived(blocked ?? (mode ? [MODE_INFO[mode].description, ...notes].join(' ') : ''));
   const pct = $derived(busy?.progress === null || busy?.progress === undefined ? null : Math.round(busy.progress * 100));
 
   async function apply(m: ApplyMode | null = mode): Promise<void> {
@@ -107,6 +114,13 @@
         </button>
       {/each}
     </div>
+    {#if notes.length > 0}
+      <ul class="notes" aria-label="Good to know" data-testid="apply-notes">
+        {#each notes as note, i (i)}
+          <li><Info size={14} strokeWidth={1.75} aria-hidden="true" /><span>{note}</span></li>
+        {/each}
+      </ul>
+    {/if}
     <div class="pins">
       <Toggle
         size="sm"
@@ -310,6 +324,28 @@
     font-size: var(--text-2xs);
     font-weight: var(--weight-semibold);
     letter-spacing: 0.02em;
+  }
+  .notes {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-1);
+    margin: 0;
+    padding: var(--space-2) 0 0;
+    border-top: 1px solid var(--divider);
+    list-style: none;
+  }
+  .notes li {
+    display: flex;
+    gap: var(--space-2);
+    align-items: flex-start;
+    color: var(--text-2);
+    font-size: var(--text-sm);
+    line-height: var(--leading-tight);
+  }
+  .notes :global(svg) {
+    flex: none;
+    margin-top: 1px;
+    color: var(--text-3);
   }
   .pins {
     padding-top: var(--space-2);

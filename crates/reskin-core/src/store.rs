@@ -1,5 +1,5 @@
 //! Crash-safe file storage: atomic writes, JSON helpers, the
-//! content-hashed icon store, the design library and the autosave slot.
+//! content-hashed icon store, the design library and the autosave slots.
 
 use std::fs::{self, OpenOptions};
 use std::io::{self, Write as _};
@@ -498,11 +498,7 @@ impl Library {
 pub fn autosave_write(file: &Path, data: Option<&str>) -> Result<()> {
     match data {
         Some(data) => write_atomic(file, data.as_bytes()),
-        None => match fs::remove_file(file) {
-            Ok(()) => Ok(()),
-            Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(()),
-            Err(e) => Err(io_error(e, "deleting", file)),
-        },
+        None => remove_if_present(file),
     }
 }
 
@@ -517,6 +513,88 @@ pub fn autosave_read(file: &Path) -> Result<Option<String>> {
             file.display()
         ))),
         Err(e) => Err(io_error(e, "reading", file)),
+    }
+}
+
+/// File name of the recovery slot, next to the live autosave.
+pub const RECOVERY_FILE: &str = "recovery.reskin";
+
+fn remove_if_present(file: &Path) -> Result<()> {
+    match fs::remove_file(file) {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(io_error(e, "deleting", file)),
+    }
+}
+
+/// The crash-recovery autosave: two slots side by side.
+///
+/// The editor keeps the open design's unsaved changes in the *live* slot.
+/// Once per launch, before the first use, [`AutosaveSlots::rotate`] turns
+/// what the previous launch left there into the *recovery* slot — the
+/// design offered for recovery. So a design lost in a crash is still
+/// offered after the next session has started autosaving its own work.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AutosaveSlots {
+    live: PathBuf,
+    recovery: PathBuf,
+}
+
+impl AutosaveSlots {
+    /// The slots of the live autosave file `live` (see
+    /// `AppDirs::autosave_file`); the recovery slot sits next to it.
+    pub fn new(live: impl Into<PathBuf>) -> AutosaveSlots {
+        let live = live.into();
+        let recovery = live.with_file_name(RECOVERY_FILE);
+        AutosaveSlots { live, recovery }
+    }
+
+    pub fn live(&self) -> &Path {
+        &self.live
+    }
+
+    pub fn recovery(&self) -> &Path {
+        &self.recovery
+    }
+
+    /// Once per launch: a design the previous launch left in the live slot
+    /// becomes the one offered for recovery (replacing an older offer). An
+    /// empty live slot is just removed; without one, an offer nobody
+    /// answered yet stays.
+    pub fn rotate(&self) -> Result<()> {
+        let bytes = match fs::read(&self.live) {
+            Ok(b) => b,
+            Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(()),
+            Err(e) => return Err(io_error(e, "reading", &self.live)),
+        };
+        if bytes.iter().all(u8::is_ascii_whitespace) {
+            return remove_if_present(&self.live);
+        }
+        rename_replacing(&self.live, &self.recovery)
+            .map_err(|e| io_error(e, "keeping for recovery", &self.live))?;
+        sync_dir(&parent_dir(&self.recovery));
+        Ok(())
+    }
+
+    /// Keeps the open design's unsaved changes in the live slot. Empty data
+    /// (nothing unsaved any more) removes it.
+    pub fn write(&self, data: &str) -> Result<()> {
+        if data.trim().is_empty() {
+            remove_if_present(&self.live)
+        } else {
+            write_atomic(&self.live, data.as_bytes())
+        }
+    }
+
+    /// Forgets every unsaved design: the live slot and the recovery offer.
+    pub fn discard(&self) -> Result<()> {
+        remove_if_present(&self.live)?;
+        remove_if_present(&self.recovery)
+    }
+
+    /// The design offered for recovery, if any.
+    pub fn read_recovery(&self) -> Result<Option<String>> {
+        autosave_read(&self.recovery)
     }
 }
 
@@ -556,5 +634,79 @@ mod tests {
     fn bom_is_ignored() {
         assert_eq!(strip_bom(b"\xEF\xBB\xBF{}"), b"{}");
         assert_eq!(strip_bom(b"{}"), b"{}");
+    }
+
+    /// A fresh folder in the temp dir, removed on drop.
+    struct Scratch(PathBuf);
+
+    impl Scratch {
+        fn new() -> Scratch {
+            let dir = std::env::temp_dir().join(format!("reskin-store-unit-{}", new_id()));
+            fs::create_dir_all(&dir).unwrap();
+            Scratch(dir)
+        }
+    }
+
+    impl Drop for Scratch {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+
+    #[test]
+    fn autosave_slots_sit_side_by_side() {
+        let slots = AutosaveSlots::new(Path::new("roaming").join("autosave.reskin"));
+        assert_eq!(slots.live(), Path::new("roaming").join("autosave.reskin"));
+        assert_eq!(slots.recovery(), Path::new("roaming").join(RECOVERY_FILE));
+    }
+
+    #[test]
+    fn a_crashed_design_stays_offered_while_the_next_session_autosaves() {
+        let dir = Scratch::new();
+        let slots = AutosaveSlots::new(dir.0.join("autosave.reskin"));
+        // Launch 1 autosaves, then crashes.
+        slots.write("crashed").unwrap();
+        assert_eq!(slots.read_recovery().unwrap(), None);
+        // Launch 2: the rotation offers it; the new session's own
+        // autosaves never touch the offer.
+        slots.rotate().unwrap();
+        assert!(!slots.live().exists());
+        assert_eq!(slots.read_recovery().unwrap().as_deref(), Some("crashed"));
+        slots.write("new work").unwrap();
+        assert_eq!(slots.read_recovery().unwrap().as_deref(), Some("crashed"));
+        // Applying or saving the new work empties the live slot only.
+        slots.write("").unwrap();
+        assert!(!slots.live().exists());
+        assert_eq!(slots.read_recovery().unwrap().as_deref(), Some("crashed"));
+        // Launch 3 without a live autosave: the unanswered offer stays.
+        slots.rotate().unwrap();
+        assert_eq!(slots.read_recovery().unwrap().as_deref(), Some("crashed"));
+        // Discard answers it (and drops the live slot too).
+        slots.write("more").unwrap();
+        slots.discard().unwrap();
+        assert!(!slots.live().exists());
+        assert_eq!(slots.read_recovery().unwrap(), None);
+        slots.discard().unwrap();
+    }
+
+    #[test]
+    fn a_newer_live_autosave_replaces_the_offer_and_a_blank_one_is_dropped() {
+        let dir = Scratch::new();
+        let slots = AutosaveSlots::new(dir.0.join("autosave.reskin"));
+        slots.write("first crash").unwrap();
+        slots.rotate().unwrap();
+        slots.write("second crash").unwrap();
+        slots.rotate().unwrap();
+        assert_eq!(
+            slots.read_recovery().unwrap().as_deref(),
+            Some("second crash")
+        );
+        fs::write(slots.live(), b" \n\t").unwrap();
+        slots.rotate().unwrap();
+        assert!(!slots.live().exists());
+        assert_eq!(
+            slots.read_recovery().unwrap().as_deref(),
+            Some("second crash")
+        );
     }
 }

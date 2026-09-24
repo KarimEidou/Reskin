@@ -1,18 +1,23 @@
 // Debounced autosave. Call `schedule()` after every change; the data is
 // produced and saved once things have been quiet for `delayMs`, but at
-// least every `maxWaitMs` during continuous editing. Saves never overlap: a
+// least every `maxWaitMs` during continuous editing. `produce` may answer
+// null: nothing worth saving (e.g. no unsaved changes). Saves never
+// overlap — every storage task runs after the ones before it — and a
 // change during a save triggers another save afterwards. `flush()` saves
-// immediately (e.g. before the window hides).
+// a pending change immediately (e.g. before the window hides); `write()`
+// saves given data in its place (e.g. a design being put away), and
+// `enqueue()` runs any other storage task in the same order.
 
 export interface AutosaveOptions {
-  /** Produces the data to save (e.g. `engine.serialize()`). */
-  produce: () => Promise<string> | string;
+  /** Produces the data to save (e.g. `engine.serialize()`), or null when there is nothing to save. */
+  produce: () => Promise<string | null> | string | null;
   /** Persists it (e.g. `commands.autosave`). */
   save: (data: string) => Promise<void>;
   /** Quiet period before saving, ms (default 2000). */
   delayMs?: number;
   /** Longest a pending change may wait, ms (default 15000). */
   maxWaitMs?: number;
+  /** Failures of the scheduled saves (`write` and `enqueue` reject instead). */
   onError?: (error: unknown) => void;
 }
 
@@ -22,7 +27,8 @@ export class Autosave {
   private timer: ReturnType<typeof setTimeout> | null = null;
   private firstPendingAt = 0;
   private dirty = false;
-  private running: Promise<void> | null = null;
+  /** The last storage task; the next one runs after it. */
+  private tail: Promise<void> = Promise.resolve();
   private disposed = false;
 
   constructor(private readonly opts: AutosaveOptions) {
@@ -30,13 +36,9 @@ export class Autosave {
     this.maxWait = Math.max(opts.maxWaitMs ?? 15000, this.delay);
   }
 
-  /** True when a change has not been saved yet. */
+  /** True when a change has not been handed to a save yet. */
   get pending(): boolean {
     return this.dirty;
-  }
-
-  get saving(): boolean {
-    return this.running !== null;
   }
 
   /** Marks the document changed. */
@@ -51,18 +53,34 @@ export class Autosave {
     this.clearTimer();
     this.timer = setTimeout(() => {
       this.timer = null;
-      void this.run();
+      this.run();
     }, wait);
   }
 
-  /** Saves now if anything is pending; resolves when saved. */
-  async flush(): Promise<void> {
+  /** Saves a pending change now; resolves once every save so far is done. */
+  flush(): Promise<void> {
     this.clearTimer();
-    if (this.running) await this.running;
-    if (this.dirty) await this.run();
+    if (this.dirty) this.run();
+    return this.tail;
   }
 
-  /** Drops any pending save. */
+  /** Saves `data` (after the saves before it) instead of a pending change. */
+  write(data: string): Promise<void> {
+    this.cancel();
+    return this.enqueue(() => this.opts.save(data));
+  }
+
+  /** Runs `task` once the storage tasks before it are done; rejects when it fails. */
+  enqueue<T>(task: () => Promise<T>): Promise<T> {
+    const run = this.tail.then(task);
+    this.tail = run.then(
+      () => undefined,
+      () => undefined,
+    );
+    return run;
+  }
+
+  /** Drops a pending change. */
   cancel(): void {
     this.clearTimer();
     this.dirty = false;
@@ -80,26 +98,18 @@ export class Autosave {
     }
   }
 
-  private run(): Promise<void> {
-    if (this.running) {
-      // A save is in flight; the change will be picked up right after it.
-      return this.running.then(() => (this.dirty && !this.disposed ? this.run() : undefined));
-    }
-    if (!this.dirty || this.disposed) return Promise.resolve();
+  /** Hands the pending change to a save (produced when its turn comes, so it is the latest). */
+  private run(): void {
+    if (!this.dirty || this.disposed) return;
     this.dirty = false;
-    const task = (async () => {
+    void this.enqueue(async () => {
+      if (this.disposed) return;
       try {
         const data = await this.opts.produce();
-        await this.opts.save(data);
+        if (data !== null) await this.opts.save(data);
       } catch (e) {
         this.opts.onError?.(e);
-      } finally {
-        this.running = null;
       }
-    })();
-    this.running = task;
-    return task.then(() => {
-      if (this.dirty && !this.disposed && this.timer === null) this.schedule();
     });
   }
 }

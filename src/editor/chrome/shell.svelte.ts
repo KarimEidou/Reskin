@@ -4,10 +4,10 @@
 
 import { getContext, setContext } from 'svelte';
 import { commands } from '$lib/ipc/commands';
-import type { EditorView, ItemInfo, RefreshLevel, RestoreReport } from '$lib/ipc/types';
+import type { EditorView, ItemInfo, LibraryEntry, RefreshLevel, RestoreReport } from '$lib/ipc/types';
 import { toast } from '$lib/ui/toasts.svelte';
 import { play } from '$lib/sound/synth';
-import { errorText, isTarget, type EditorSession } from '../state/session.svelte';
+import { errorText, type EditorSession, type ImportChoice, type ImportSource } from '../state/session.svelte';
 import { confirm } from '../dialogs/confirm.svelte';
 
 const KEY = Symbol('reskin.editor.shell');
@@ -15,13 +15,25 @@ const KEY = Symbol('reskin.editor.shell');
 /** Where Settings should scroll to when it opens (e.g. "about"). */
 export type SettingsSection = 'appearance' | 'motion' | 'behaviour' | 'advanced' | 'about';
 
+/** The import popover's question: what should these become? */
+export interface ImportQuestion {
+  sources: ImportSource[];
+  /** Where to ask (CSS px), or null for the middle of the window. */
+  at: { x: number; y: number } | null;
+}
+
+/** Names what is being imported, for messages. */
+function describe(sources: readonly ImportSource[]): string {
+  if (sources.length !== 1) return 'the items';
+  const [s] = sources;
+  return s!.kind === 'item' ? s!.info.name : s!.name;
+}
+
 export class Shell {
   readonly session: EditorSession;
 
   /** Bumped on every open (Prepare): views reload their data. */
   openEpoch = $state(0);
-  /** The panel is open and interactive (not hidden / animating). */
-  interactive = $state(false);
   paletteOpen = $state(false);
   shortcutsOpen = $state(false);
   /** Item loads in flight (Prepare / AddItems / drops / pickers). */
@@ -34,6 +46,8 @@ export class Shell {
   historyEpoch = $state(0);
   /** Bumped when the Library changed outside the Library view. */
   libraryEpoch = $state(0);
+  /** Asked by the import popover, or null (see askImport). */
+  importQuestion = $state.raw<ImportQuestion | null>(null);
 
   /**
    * An autosaved design offered for recovery (the Start banner and the
@@ -49,6 +63,15 @@ export class Shell {
     this.session = session;
   }
 
+  /** The panel is open and interactive (not hidden / animating); the session follows it. */
+  get interactive(): boolean {
+    return this.session.interactive;
+  }
+
+  set interactive(on: boolean) {
+    this.session.interactive = on;
+  }
+
   /** Switches view; `about` is the About section of Settings. */
   navigate(view: EditorView): void {
     if (view === 'about') {
@@ -61,19 +84,18 @@ export class Shell {
   }
 
   /**
-   * Opens items in order (each load waits for the previous one), without
+   * Runs loads in order (each waits for the previous one), without
    * blocking the caller. Errors become a toast.
    */
-  openItems(items: ItemInfo[], opts: { replace?: boolean } = {}): Promise<void> {
-    if (items.length === 0 && !opts.replace) return Promise.resolve();
+  private load(what: string, task: () => Promise<void>): Promise<void> {
     this.loading += 1;
     // A load still queued when the editor closed and reopened belongs to
     // the old open: skip it rather than leak its items into the new one.
     const epoch = this.openEpoch;
     const next = this.chain
-      .then(() => (epoch === this.openEpoch ? this.session.openItems(items, opts) : undefined))
+      .then(() => (epoch === this.openEpoch ? task() : undefined))
       .catch((e: unknown) => {
-        toast({ message: `Could not open ${items.length === 1 ? items[0]!.name : 'the items'}: ${errorText(e)}`, kind: 'error' });
+        toast({ message: `Could not open ${what}: ${errorText(e)}`, kind: 'error' });
         play('error');
       })
       .finally(() => {
@@ -83,12 +105,43 @@ export class Shell {
     return next;
   }
 
+  /** Opens items (Prepare, AddItems) in order, without blocking the caller. */
+  openItems(items: ItemInfo[], opts: { replace?: boolean } = {}): Promise<void> {
+    if (items.length === 0 && !opts.replace) return Promise.resolve();
+    return this.load(items.length === 1 ? items[0]!.name : 'the items', () => this.session.openItems(items, opts));
+  }
+
   /** Resolves once every queued load has finished. */
   idle(): Promise<void> {
     return this.chain;
   }
 
-  /** "Open image…": native picker, then open/add what was picked. */
+  /**
+   * Brings in dropped, picked or pasted things. With nothing open they
+   * open right away; with a design open the import popover asks what they
+   * become (see ImportChoice) — nothing open is replaced.
+   */
+  askImport(sources: ImportSource[], at: { x: number; y: number } | null = null): Promise<void> {
+    if (sources.length === 0) return Promise.resolve();
+    if (!this.session.hasDesign) {
+      return this.load(describe(sources), async () => {
+        await this.session.importSources(sources, 'queue');
+      });
+    }
+    this.importQuestion = { sources, at };
+    return Promise.resolve();
+  }
+
+  /** The import popover's answer. */
+  importAs(sources: ImportSource[], how: ImportChoice): Promise<void> {
+    this.importQuestion = null;
+    return this.load(describe(sources), async () => {
+      const queued = await this.session.importSources(sources, how);
+      if (queued > 0) toast({ message: `Added ${queued} item${queued === 1 ? '' : 's'} to the queue.`, kind: 'info' });
+    });
+  }
+
+  /** "Open image…": native picker, then imports what was picked. */
   async openImage(): Promise<void> {
     // One picker at a time (double clicks, Ctrl+O while it is open).
     if (this.picking) return;
@@ -102,31 +155,40 @@ export class Shell {
     } finally {
       this.picking = false;
     }
-    if (picked.length === 0) return;
-    await this.openItems(picked);
-    const targets = picked.filter(isTarget).length;
-    if (targets > 0 && this.session.queue.length > 1) {
-      toast({ message: `Added ${targets} item${targets === 1 ? '' : 's'} to the queue.`, kind: 'info' });
-    }
+    await this.askImport(picked.map((info) => ({ kind: 'item', info })));
+  }
+
+  /** Asks before the open design's unsaved changes are replaced; true to go ahead. */
+  private confirmReplace(title: string, confirmLabel: string): Promise<boolean> {
+    const { session } = this;
+    if (!session.unsaved) return Promise.resolve(true);
+    const item = session.item;
+    return confirm({
+      title,
+      message: `Your changes to ${item ? `${item.name}'s design` : 'the current design'} will be lost. Save it to the Library first to keep them.`,
+      confirmLabel,
+      danger: true,
+    });
   }
 
   /**
    * Starts a blank design in the Edit view. It replaces the open design
-   * (and its undo history), so unsaved edits are confirmed first.
+   * (and its undo history), so unsaved changes are confirmed first.
    */
   async newBlank(): Promise<void> {
-    const { session } = this;
-    if (session.hasDesign && session.engine.canUndo) {
-      const ok = await confirm({
-        title: 'Start a blank icon?',
-        message: 'Your changes to the current design will be lost. Save it to the Library first to keep it.',
-        confirmLabel: 'Start blank',
-        danger: true,
-      });
-      if (!ok) return;
-    }
-    session.newBlank();
-    session.navigate('edit');
+    if (!(await this.confirmReplace('Start a blank icon?', 'Start blank'))) return;
+    this.session.newBlank();
+    this.session.navigate('edit');
+  }
+
+  /**
+   * Opens a Library design in place of the open one, asking first when
+   * that has unsaved changes. False when the user kept the open design.
+   */
+  async openLibraryDesign(entry: LibraryEntry): Promise<boolean> {
+    if (!(await this.confirmReplace(`Open "${entry.name}"?`, 'Open'))) return false;
+    await this.session.openLibraryDesign(entry.id, entry.name);
+    return true;
   }
 
   /** Re-reads the autosave offered for recovery. */
@@ -185,8 +247,9 @@ export class Shell {
     }
   }
 
-  async saveToLibrary(): Promise<unknown> {
-    const entry = await this.session.saveToLibrary();
+  /** Saves the open design to the Library (over its Library design unless `asNew`). */
+  async saveToLibrary(name?: string, opts: { asNew?: boolean } = {}): Promise<LibraryEntry | null> {
+    const entry = await this.session.saveToLibrary(name, opts);
     if (entry) this.libraryEpoch += 1;
     return entry;
   }

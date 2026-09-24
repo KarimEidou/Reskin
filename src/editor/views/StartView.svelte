@@ -60,8 +60,7 @@
 
   async function openDesign(entry: LibraryEntry): Promise<void> {
     try {
-      await session.openLibraryDesign(entry.id);
-      session.engine.setDocumentName(entry.name);
+      await shell.openLibraryDesign(entry);
     } catch (e) {
       toast({ message: `Could not open "${entry.name}": ${errorText(e)}`, kind: 'error' });
     }

@@ -68,13 +68,21 @@ The visual and interaction contract for the box and the editor. Tokens live in
   label over the actual wallpaper at the desktop icon size) and taskbar
   light/dark previews.
 * **Bottom bar**: batch queue strip (thumbnails of every item dropped; current
-  one highlighted; status badges; "Apply style to all"), zoom %, pixel-art
+  one highlighted; status badges; the tooltip adds why an apply did not go
+  through and the item's notes; "Apply style to all" replays the current
+  item's style on every other queued icon), zoom %, pixel-art
   toggle with grid size, before/after split, **Save to Library**, **Export ▾**
   (.ico / .png / copy to clipboard / .reskin project), and the primary
   **Save & Apply ▾** (dropdown: mode — Change in place / New desktop shortcut /
-  Personal copy — disabled when not in `item.modes`; "Also update Start menu
-  and taskbar pins"). Apply shows a ring while working, then the window
-  collapses into the box.
+  Personal copy — disabled when not in `item.modes`; the item's notes;
+  "Also update Start menu and taskbar pins"). The main part uses the item's
+  preferred mode (New desktop shortcut for Store app shortcuts, whose own
+  icon Windows ignores). Apply shows a ring while working. With other
+  queued items still waiting the editor stays open: the item gets its
+  "applied" badge, a toast offers **Undo** for 6 s, and the next item not
+  applied yet opens. The last one collapses the window into the box.
+  Switching or removing queue items waits while a job runs or an item
+  loads (the strip and the title bar's queue menu alike).
 
 ## Views
 
@@ -88,7 +96,10 @@ The visual and interaction contract for the box and the editor. Tokens live in
 * **System icons**: grid of This PC, Recycle Bin (empty/full), User files,
   Network, Control Panel with their current icons; click → edit.
 * **Library**: grid of saved designs (thumb, name, date), open / rename /
-  delete / apply to current item.
+  delete / apply to current item. Opening one over unsaved changes asks
+  first. The design open in the editor remembers the Library design it came
+  from or was saved as (its card says "Editing"): **Save changes** updates it,
+  **Save as new** adds a copy.
 * **History**: every change Reskin made (thumb, target, when, state), with
   Undo / Restore original per row and "Restore all".
 * **Settings**: Appearance (theme, accent, box skin + live BoxVisual preview,
@@ -103,10 +114,19 @@ The visual and interaction contract for the box and the editor. Tokens live in
 
 * **Elevation** (apply returned `needsElevation`): explains Public Desktop;
   buttons "Allow (administrator)" → `apply_icon_elevated(ticket)`, "Make a
-  personal copy" → apply with mode `personalCopy`, Cancel.
-* **Import popover** (image dropped / pasted while editing): "Add as layer"
-  or "Queue as new item".
-* **Crash recovery** (autosave found at startup): Restore / Discard.
+  personal copy" → apply with mode `personalCopy`, Cancel. After "Apply
+  style to all" it asks once about every such icon (listed by name):
+  Allow approves them one by one, "Make personal copies" copies the ones
+  that can be copied.
+* **Import popover** (files dropped, picked or pasted while a design is
+  open): "Add as layer" (another shortcut: "Use its icon as a layer") or
+  "Queue as new item" (shortcuts: "Queue it"); nothing open is replaced.
+  A shortcut dropped on a design without a target offers "Apply this design
+  to “…”" first. With nothing open, things open without asking.
+* **Crash recovery** (a design an earlier launch left unsaved): Restore /
+  Discard. Restoring brings its shortcut back into the queue when it still
+  exists. Only unsaved work is ever offered — a design opened and closed
+  without changes, or applied / saved / exported, leaves nothing behind.
 * **Command palette** (Ctrl+K): fuzzy search over every command (tools,
   filters, presets, views, settings toggles, export/apply), shows shortcuts.
 * **Shortcuts overlay** (`?`): grouped keyboard map.

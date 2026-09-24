@@ -4,7 +4,8 @@
   canvas at the chosen size and switches to the move tool so it can be
   placed. Its Stamp button (shown on hover / focus), Alt+click or Alt+Enter
   loads it into the stamp tool instead, rendered with the same colour,
-  outline and size options, to click it onto the canvas anywhere.
+  outline and size options, to click it onto the canvas anywhere — and
+  while the stamp tool is the selected tool, a plain click does that too.
 -->
 <script lang="ts">
   import Search from '@lucide/svelte/icons/search';
@@ -50,6 +51,13 @@
   let hovered = $state<string | null>(null);
   let focused = $state<string | null>(null);
 
+  /** The stamp tool is selected: a click loads the stamp rather than adding a layer. */
+  const stamping = $derived.by(() => {
+    void session.rev.tool;
+    return engine.selectedToolId === 'stamp';
+  });
+  const clickHint = $derived(stamping ? 'click to stamp' : 'click to add, Alt+click to stamp');
+
   const stickers = $derived(searchStickers(query));
   const emojiOk = canRenderEmoji();
   const emoji = $derived(emojiOk ? searchEmoji(query) : []);
@@ -83,19 +91,20 @@
   async function addSticker(def: StickerDef, stamp: boolean): Promise<void> {
     if (adding) return;
     adding = def.id;
-    const target = engine.doc;
+    const token = session.designToken;
+    const size = engine.doc.width;
     const box = boxSize();
     const color = colorFor(def);
     try {
       if (stamp) {
         const px = await session.panels.request({ op: 'stickerStamp', id: def.id, box, color, outline: outlineFor(box) });
-        // Another design was opened meanwhile: the size was meant for the old one.
-        if (engine.doc !== target || !px) return;
+        // Another design opened meanwhile: the size was meant for the old one.
+        if (session.designToken !== token || !px) return;
         useStamp(px);
       } else {
-        const px = await session.panels.request({ op: 'sticker', id: def.id, size: target.width, box, color, outline: outlineFor(box) });
-        // Another design was opened (or resized) meanwhile: not meant for it.
-        if (engine.doc !== target || target.width !== px.width) return;
+        const px = await session.panels.request({ op: 'sticker', id: def.id, size, box, color, outline: outlineFor(box) });
+        // Another design opened (or this one was resized) meanwhile: not meant for it.
+        if (session.designToken !== token || engine.doc.width !== px.width) return;
         place(def.label, px);
       }
     } catch (e) {
@@ -176,11 +185,11 @@
             <button
               type="button"
               class="cell"
-              aria-label="Add {def.label} sticker"
+              aria-label={stamping ? `Use ${def.label} as the stamp` : `Add ${def.label} sticker`}
               aria-keyshortcuts="Alt+Enter"
-              title="{def.label} — click to add, Alt+click to stamp"
+              title="{def.label} — {clickHint}"
               aria-busy={adding === def.id}
-              onclick={(e) => void addSticker(def, e.altKey)}
+              onclick={(e) => void addSticker(def, e.altKey || stamping)}
               onkeydown={(e) => stampKey(e, () => void addSticker(def, true))}
               data-testid="sticker"
               data-sticker={def.id}
@@ -231,10 +240,10 @@
                 <button
                   type="button"
                   class="em"
-                  aria-label="Add {e.name} emoji"
+                  aria-label={stamping ? `Use ${e.name} as the stamp` : `Add ${e.name} emoji`}
                   aria-keyshortcuts="Alt+Enter"
-                  title="{e.name} — click to add, Alt+click to stamp"
-                  onclick={(ev) => addEmoji(e.char, e.name, ev.altKey)}
+                  title="{e.name} — {clickHint}"
+                  onclick={(ev) => addEmoji(e.char, e.name, ev.altKey || stamping)}
                   onkeydown={(ev) => stampKey(ev, () => addEmoji(e.char, e.name, true))}
                   data-testid="emoji">{e.char}</button
                 >

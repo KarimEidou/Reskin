@@ -1,8 +1,12 @@
 <!--
-  Library: saved designs (thumb, name, date). Open one, rename it, delete it,
-  or apply it straight to the queued item.
+  Library: saved designs (thumb, name, date). Open one (asking before
+  unsaved changes are replaced), rename it, delete it, or apply it straight
+  to the queued item. The open design remembers the Library design it came
+  from or was saved as: saving updates that one ("Save changes"), or
+  "Save as new" adds another.
 -->
 <script lang="ts">
+  import CopyPlus from '@lucide/svelte/icons/copy-plus';
   import LibraryIcon from '@lucide/svelte/icons/library';
   import Save from '@lucide/svelte/icons/save';
   import Search from '@lucide/svelte/icons/search';
@@ -33,7 +37,8 @@
   let query = $state('');
   let renaming = $state<string | null>(null);
   let draft = $state('');
-  let saving = $state(false);
+  /** Which save runs: over the open design's Library design, or as a new one. */
+  let saving = $state<'update' | 'new' | null>(null);
   let renameInput: HTMLInputElement | undefined = $state();
   let grid: HTMLUListElement | undefined = $state();
 
@@ -43,6 +48,8 @@
     return q ? list.filter((e) => e.name.toLowerCase().includes(q)) : list;
   });
   const target = $derived(session.item && session.canApply ? session.item : null);
+  /** The Library design the open design came from or was saved as. */
+  const savedAs = $derived(session.hasDesign ? (entries?.find((e) => e.id === session.libraryId) ?? null) : null);
 
   async function refresh(): Promise<void> {
     try {
@@ -60,24 +67,20 @@
     void refresh();
   });
 
-  async function saveCurrent(): Promise<void> {
-    saving = true;
+  /** Saves the open design over its Library design, or as a copy of it with `asNew`. */
+  async function saveCurrent(asNew: boolean): Promise<void> {
+    if (saving) return;
+    saving = asNew ? 'new' : 'update';
     try {
-      await shell.saveToLibrary();
+      await shell.saveToLibrary(asNew && savedAs ? `${savedAs.name} copy` : undefined, { asNew });
     } finally {
-      saving = false;
+      saving = null;
     }
-  }
-
-  /** Opens a saved design, named after its Library entry. */
-  async function load(entry: LibraryEntry): Promise<void> {
-    await session.openLibraryDesign(entry.id);
-    session.engine.setDocumentName(entry.name);
   }
 
   async function open(entry: LibraryEntry): Promise<void> {
     try {
-      await load(entry);
+      await shell.openLibraryDesign(entry);
     } catch (e) {
       toast({ message: `Could not open "${entry.name}": ${errorText(e)}`, kind: 'error' });
     }
@@ -99,6 +102,8 @@
     try {
       const data = await commands.libraryLoad(entry.id);
       await commands.librarySave({ id: entry.id, name, thumb: entry.thumb, data });
+      // The open design saves over this entry: it keeps the new name.
+      if (session.hasDesign && session.libraryId === entry.id) session.engine.setDocumentName(name);
       toast({ message: `Renamed to "${name}".`, kind: 'success' });
       await refresh();
     } catch (e) {
@@ -131,6 +136,7 @@
     const at = shown.findIndex((e) => e.id === entry.id);
     try {
       await commands.libraryDelete(entry.id);
+      session.forgetLibraryDesign(entry.id);
       toast({ message: `Deleted "${entry.name}".`, kind: 'success' });
       await refresh();
       await tick();
@@ -147,8 +153,7 @@
 
   async function applyToCurrent(entry: LibraryEntry): Promise<void> {
     try {
-      await load(entry);
-      await session.apply();
+      if (await shell.openLibraryDesign(entry)) await session.apply();
     } catch (e) {
       toast({ message: `Could not apply "${entry.name}": ${errorText(e)}`, kind: 'error' });
     }
@@ -187,8 +192,20 @@
         <input type="search" placeholder="Filter" bind:value={query} />
       </label>
     {/if}
-    {#if session.hasDesign}
-      <Button variant="primary" icon={Save} loading={saving} onclick={saveCurrent}>Save current design</Button>
+    {#if savedAs}
+      <Button icon={CopyPlus} loading={saving === 'new'} disabled={saving === 'update'} onclick={() => saveCurrent(true)}>
+        Save as new
+      </Button>
+      <Button
+        variant="primary"
+        icon={Save}
+        loading={saving === 'update'}
+        disabled={saving === 'new'}
+        aria-label="Save changes to {savedAs.name}"
+        onclick={() => saveCurrent(false)}>Save changes</Button
+      >
+    {:else if session.hasDesign}
+      <Button variant="primary" icon={Save} loading={saving !== null} onclick={() => saveCurrent(false)}>Save current design</Button>
     {/if}
   {/snippet}
 
@@ -206,7 +223,7 @@
         {#if failed}
           <Button onclick={refresh}>Try again</Button>
         {:else if session.hasDesign}
-          <Button variant="primary" icon={Save} onclick={saveCurrent}>Save current design</Button>
+          <Button variant="primary" icon={Save} onclick={() => saveCurrent(false)}>Save current design</Button>
         {/if}
       </EmptyState>
     </div>
@@ -219,6 +236,7 @@
           <button type="button" class="open" onclick={() => open(entry)} aria-label="Open {entry.name}">
             <span class="thumb"><img src={pngSrc(entry.thumb)} alt="" draggable="false" /></span>
           </button>
+          {#if savedAs?.id === entry.id}<span class="editing">Editing</span>{/if}
           <div class="meta">
             {#if renaming === entry.id}
               <input
@@ -360,6 +378,20 @@
     color: var(--text-3);
     font-size: var(--text-xs);
     font-variant-numeric: tabular-nums;
+  }
+  /* The design open in the editor saves over this one. */
+  .editing {
+    position: absolute;
+    top: calc(var(--space-2) + 6px);
+    left: calc(var(--space-2) + 6px);
+    padding: 2px 8px;
+    border-radius: var(--radius-full);
+    background: var(--accent);
+    color: var(--on-accent);
+    font-size: var(--text-2xs);
+    font-weight: var(--weight-semibold);
+    letter-spacing: 0.02em;
+    pointer-events: none;
   }
   .rename {
     width: 100%;

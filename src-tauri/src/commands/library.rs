@@ -1,10 +1,13 @@
 //! Library of saved designs and the crash-recovery autosave.
 
+use std::sync::Once;
+
 use reskin_core::model::{LibraryEntry, LibrarySave};
-use reskin_core::store::{self, Library};
+use reskin_core::store::{AutosaveSlots, Library};
 use tauri::State;
 
 use super::CmdResult;
+use crate::log;
 use crate::state::AppState;
 
 fn library(state: &AppState) -> Library {
@@ -31,12 +34,39 @@ pub fn library_delete(state: State<'_, AppState>, id: String) -> CmdResult<()> {
     library(&state).delete(&id).map_err(|e| e.to_string())
 }
 
-#[tauri::command]
-pub fn autosave(state: State<'_, AppState>, data: Option<String>) -> CmdResult<()> {
-    store::autosave_write(&state.dirs.autosave_file(), data.as_deref()).map_err(|e| e.to_string())
+/// The autosave slots. Their first use in this process (= this launch)
+/// rotates them: what the previous launch left in the live slot becomes
+/// the recovery offer before this launch writes its own.
+fn autosave_slots(state: &AppState) -> AutosaveSlots {
+    static ROTATED: Once = Once::new();
+    let slots = AutosaveSlots::new(state.dirs.autosave_file());
+    ROTATED.call_once(|| {
+        if let Err(e) = slots.rotate() {
+            log::line(&format!(
+                "could not keep the last autosave for recovery: {e}"
+            ));
+        }
+    });
+    slots
 }
 
+/// `data`: the open design's unsaved changes for the live slot (an empty
+/// string empties it: nothing is unsaved any more). `None` discards every
+/// unsaved design, the recovery offer included.
+#[tauri::command]
+pub fn autosave(state: State<'_, AppState>, data: Option<String>) -> CmdResult<()> {
+    let slots = autosave_slots(&state);
+    match data {
+        Some(data) => slots.write(&data),
+        None => slots.discard(),
+    }
+    .map_err(|e| e.to_string())
+}
+
+/// The design offered for recovery: what an earlier launch left unsaved.
 #[tauri::command]
 pub fn autosave_load(state: State<'_, AppState>) -> CmdResult<Option<String>> {
-    store::autosave_read(&state.dirs.autosave_file()).map_err(|e| e.to_string())
+    autosave_slots(&state)
+        .read_recovery()
+        .map_err(|e| e.to_string())
 }
