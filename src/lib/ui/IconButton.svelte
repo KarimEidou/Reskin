@@ -7,7 +7,7 @@
   import type { HTMLButtonAttributes } from 'svelte/elements';
   import type { Placement } from './position';
   import Tooltip from './Tooltip.svelte';
-  import { ICON_SIZE, type ControlSize, type IconComponent } from './types';
+  import { ICON_SIZE, ICON_STROKE, type ControlSize, type IconComponent } from './types';
 
   interface Props extends Omit<HTMLButtonAttributes, 'children' | 'aria-label'> {
     /** Accessible name (also the default tooltip). */
@@ -48,7 +48,7 @@
     aria-label={label}
     aria-pressed={pressed}
   >
-    <Icon size={ICON_SIZE[size]} aria-hidden="true" />
+    <Icon size={ICON_SIZE[size]} strokeWidth={ICON_STROKE} aria-hidden="true" />
   </button>
 {/snippet}
 

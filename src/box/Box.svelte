@@ -21,6 +21,7 @@
     ABSORB_MS,
     CELEBRATE_MS,
     ERROR_MS,
+    FIRST_RUN_HINT,
     iconRect,
     metricsFor,
     physicalToCss,
@@ -29,7 +30,12 @@
   import { flyIconIn } from './absorb';
   import { boxReducer, initialBoxState, progressFraction, type BoxEvent } from './box-state';
 
-  const HINT = 'Drag a shortcut onto me';
+  /**
+   * How long the first-run hint stays once the box is back on screen after
+   * the welcome (UI.md: "for a few seconds"). Until then — the welcome is
+   * still open over the hidden box — it waits.
+   */
+  const HINT_MS = 6000;
   /** Undo chip lifetime after a successful apply. */
   const UNDO_MS = 6000;
   /** Unfreeze a handoff that Rust never followed up on. */
@@ -38,9 +44,11 @@
   let info = $state.raw<BootInfo | null>(null);
   let box = $state.raw(initialBoxState);
   let ready = $state(false);
-  /** The absorb animation is running (the icon is ready and flying in). */
-  let gulping = $state(false);
+  /** Epoch of the absorb whose gulp is running (its icon is flying in). */
+  let gulpEpoch = $state<number | null>(null);
   let showHint = $state(false);
+  /** Bumped by `box:shown` while the hint is up: starts its lifetime. */
+  let hintClock = $state(0);
   let undoId = $state<string | null>(null);
   let flyLayer: HTMLDivElement | undefined = $state();
 
@@ -50,8 +58,12 @@
   );
   // While a drop waits for its inspection the box keeps "holding" (armed
   // look); the gulp starts together with the icon's flight.
-  const visualState: BoxVisualState = $derived(box.name === 'absorbing' && !gulping ? 'armed' : box.name);
-  const hint = $derived(showHint && (box.name === 'idle' || box.name === 'hover') && !box.handoff ? HINT : null);
+  const visualState: BoxVisualState = $derived(
+    box.name === 'absorbing' && gulpEpoch !== box.epoch ? 'armed' : box.name,
+  );
+  const hint = $derived(
+    showHint && (box.name === 'idle' || box.name === 'hover') && !box.handoff ? FIRST_RUN_HINT : null,
+  );
   const label = $derived(
     box.name === 'armed'
       ? box.count > 1
@@ -85,6 +97,9 @@
     send({ type: 'drop', count: paths.length });
     if (box.name !== 'absorbing') return;
     const epoch = box.epoch;
+    // Anything else (an error, a flight, the window being hidden or shown)
+    // cancels this absorb; `epoch` alone misses the resets, which keep it.
+    const current = () => box.epoch === epoch && box.name === 'absorbing';
     const dropAt = physicalToCss(position, window.devicePixelRatio);
     showHint = false;
 
@@ -96,7 +111,7 @@
       failure = errorText(e);
     }
     pending = null;
-    if (box.epoch !== epoch || box.name !== 'absorbing') return;
+    if (!current()) return;
     if (items.length === 0) {
       send({ type: 'inspectFailed', message: failure });
       play('error');
@@ -105,15 +120,19 @@
 
     const icon = items[0]!.icon;
     const impact = dur(ABSORB_MS * ABSORB_IMPACT_AT);
-    gulping = true;
-    if (icon && flyLayer) await flyIconIn(flyLayer, icon, dropAt, iconRect(metrics), impact);
-    else await sleep(impact);
-    if (box.epoch !== epoch) return;
-    send({ type: 'inspectDone', icon, count: items.length });
-    play('drop');
-    await sleep(dur(ABSORB_MS) - impact);
-    gulping = false;
-    if (box.epoch !== epoch || box.name !== 'absorbing') return;
+    gulpEpoch = epoch;
+    try {
+      if (icon && flyLayer) await flyIconIn(flyLayer, icon, dropAt, iconRect(metrics), impact);
+      else await sleep(impact);
+      if (!current()) return;
+      send({ type: 'inspectDone', icon, count: items.length });
+      play('drop');
+      await sleep(dur(ABSORB_MS) - impact);
+    } finally {
+      // Never leave a later drop showing the gulp instead of the hold.
+      if (gulpEpoch === epoch) gulpEpoch = null;
+    }
+    if (!current()) return;
     await requestOpen(
       items.map((i) => i.id),
       'edit',
@@ -193,6 +212,12 @@
   });
 
   $effect(() => {
+    if (hint === null || hintClock === 0) return;
+    const t = setTimeout(() => (showHint = false), dur(HINT_MS, 'hold'));
+    return () => clearTimeout(t);
+  });
+
+  $effect(() => {
     if (!undoId) return;
     const t = setTimeout(() => (undoId = null), UNDO_MS);
     return () => clearTimeout(t);
@@ -221,7 +246,10 @@
           else if (f.phase === 'error') play('error');
         }),
         on('box:progress', (p) => send({ type: 'progress', done: p.done, total: p.total })),
-        on('box:shown', () => send({ type: 'shown' })),
+        on('box:shown', () => {
+          send({ type: 'shown' });
+          if (showHint) hintClock += 1;
+        }),
         on('box:undo', (id) => (undoId = id)),
         getCurrentWebview().onDragDropEvent(({ payload }) => {
           switch (payload.type) {
@@ -268,6 +296,7 @@
 
 <main
   class="box-page"
+  class:handoff={box.handoff}
   data-state={box.name}
   data-ready={ready ? 'true' : 'false'}
   data-skin={s.boxSkin}
@@ -288,18 +317,22 @@
     onkeydown={onKeyDown}
     oncontextmenu={onContextMenu}
   >
-    <BoxVisual
-      {metrics}
-      skin={s.boxSkin}
-      state={visualState}
-      icon={box.icon}
-      count={box.count}
-      progress={progressFraction(box)}
-      opacity={s.idleOpacity}
-      compat={s.compatibilityMode}
-      reducedMotion={motion.reduced}
-      {hint}
-    />
+    <!-- The window is visible from the start: paint nothing until boot has
+         applied the real skin, theme and motion (no flash of defaults). -->
+    {#if info}
+      <BoxVisual
+        {metrics}
+        skin={s.boxSkin}
+        state={visualState}
+        icon={box.icon}
+        count={box.count}
+        progress={progressFraction(box)}
+        opacity={s.idleOpacity}
+        compat={s.compatibilityMode}
+        reducedMotion={motion.reduced}
+        {hint}
+      />
+    {/if}
   </div>
   <div class="flyers" bind:this={flyLayer}></div>
   {#if undoId}
@@ -325,6 +358,14 @@
   .box-page {
     position: relative;
     overflow: hidden;
+  }
+
+  /* The handoff picture must be on screen at once: the editor's proxy
+     (handoffProps) renders its final state and is revealed over the box
+     within a few frames, so a still-running hover → idle transition would
+     show two different boxes. */
+  .handoff :global(*) {
+    transition: none !important;
   }
 
   .hit {

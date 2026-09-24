@@ -12,6 +12,11 @@
   keyframes exist only while armed (particles, aurora drift) or busy without
   a known progress. Reduced motion removes all movement; state changes then
   read through colour/opacity only.
+
+  Compatibility mode: the window is opaque and Rust clips it to the visual
+  box (a rounded window region), so nothing that matters may live in the
+  margin: the box itself does not scale or move (the content inside it
+  squashes and shakes instead), and the badge and busy ring sit inside.
 -->
 <script lang="ts">
   import type { BoxMetrics, BoxSkin } from '$lib/ipc/types';
@@ -20,9 +25,9 @@
     CELEBRATE_MS,
     ERROR_MS,
     ICON_FRACTION,
+    ringRadius,
     ringRect,
     roundedRectPath,
-    RING_GAP,
     STATE_TRANSFORM,
     transformCss,
     type BoxVisualState,
@@ -72,8 +77,8 @@
     delay: (i % 3) * 40,
   }));
 
-  const ring = $derived(ringRect(metrics));
-  const ringPath = $derived(roundedRectPath(ring, metrics.radius + RING_GAP));
+  const ringPath = $derived(roundedRectPath(ringRect(metrics, undefined, compat), ringRadius(metrics, compat)));
+  const bodyTransform = $derived(compat ? 'none' : transformCss(STATE_TRANSFORM[state]));
   const pct = $derived(progress === null ? null : Math.round(Math.min(1, Math.max(0, progress)) * 1000) / 10);
   const bodyOpacity = $derived(state === 'idle' ? Math.min(1, Math.max(0, opacity)) : 1);
 </script>
@@ -96,7 +101,7 @@
   style:--bv-celebrate="{CELEBRATE_MS}ms"
   style:--bv-error="{ERROR_MS}ms"
 >
-  <div class="body" style:transform={transformCss(STATE_TRANSFORM[state])} style:opacity={bodyOpacity}>
+  <div class="body" style:transform={bodyTransform} style:opacity={bodyOpacity}>
     <div class="shadow"></div>
     <div class="shadow lift"></div>
     <div class="glow"></div>
@@ -569,6 +574,31 @@
     mix-blend-mode: normal;
     opacity: 0.03;
   }
+  /* The window region is the visual box: the gulp, pop and shake move the
+     content inside it instead of the box, the badge tucks into the corner
+     (inside the rounded clip at every size) and hover lights the rim. */
+  .compat.state-absorbing .body,
+  .compat.state-celebrate .body,
+  .compat.state-error .body {
+    animation: none;
+  }
+  .compat.state-absorbing .content {
+    animation: bv-absorb calc(var(--bv-absorb) * var(--motion-k)) linear both;
+  }
+  .compat.state-celebrate .content {
+    animation: bv-pop calc(var(--bv-celebrate) * 0.6 * var(--motion-k)) var(--ease-standard) both;
+  }
+  .compat.state-error .content {
+    animation: bv-shake calc(var(--bv-error) * var(--motion-k)) linear both;
+  }
+  .compat .badge {
+    top: 7px;
+    right: 7px;
+    box-shadow: 0 0 0 1.5px rgb(255 255 255 / 0.9);
+  }
+  .compat.state-hover .rim.hot {
+    opacity: 0.45;
+  }
 
   /* ------------------------------------------------------------------ */
   /* States                                                               */
@@ -735,6 +765,7 @@
     transition-property: opacity;
   }
   .reduced .body,
+  .reduced .content,
   .reduced .glow,
   .reduced .rim.hot,
   .reduced .fill,

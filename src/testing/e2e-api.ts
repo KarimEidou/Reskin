@@ -150,7 +150,11 @@ export interface E2EApi {
   readonly acks: readonly E2EAck[];
   waitForAck(session: number, stage: AckStage, timeoutMs?: number): Promise<boolean>;
   readonly editor: E2EEditorState;
-  /** Runs Rust's open handoff: Prepare → prepared (400 ms) → Reveal → revealed → Expand → expanded. */
+  /**
+   * Runs Rust's open handoff: Prepare → prepared (400 ms) → Reveal →
+   * revealed → Expand → expanded. After a late `prepared`, Reveal and
+   * Expand{morph: false} follow at once (no wait for `revealed`).
+   */
   simulateOpen(
     items: ItemInfo[] | string[],
     view?: EditorView,

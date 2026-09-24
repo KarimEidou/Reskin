@@ -58,7 +58,7 @@
     aria-label={label}
     tabindex="-1"
     style:width
-    {@attach portal()}
+    {@attach portal(() => anchor)}
     {@attach floating({ anchor: () => anchor, placement, offset })}
     {@attach dismissable(close, () => [anchor])}
     {@attach focusOnOpen}

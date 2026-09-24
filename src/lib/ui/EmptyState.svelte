@@ -1,7 +1,7 @@
 <!-- Placeholder for empty lists and views: icon, title, description, actions. -->
 <script lang="ts">
   import type { Snippet } from 'svelte';
-  import type { IconComponent } from './types';
+  import { ICON_STROKE, type IconComponent } from './types';
 
   interface Props {
     icon?: IconComponent;
@@ -19,7 +19,7 @@
 
 <div class="empty" class:compact>
   {#if Icon}
-    <span class="badge" aria-hidden="true"><Icon size={compact ? 20 : 26} strokeWidth={1.75} /></span>
+    <span class="badge" aria-hidden="true"><Icon size={compact ? 20 : 26} strokeWidth={ICON_STROKE} /></span>
   {/if}
   <svelte:element this={`h${level}`} class="title">{title}</svelte:element>
   {#if description}<p class="desc">{description}</p>{/if}

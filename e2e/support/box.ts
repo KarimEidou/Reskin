@@ -51,6 +51,19 @@ export class BoxDriver {
     return this.root.getAttribute('data-state');
   }
 
+  /**
+   * Waits until BoxVisual shows `state`, checking every frame. Use it for
+   * short-lived looks (the ~720 ms gulp): `expect(…).toHaveAttribute` polls
+   * with growing gaps (up to 1 s) and can step over them.
+   */
+  async waitForVisualState(state: BoxVisualState, timeout = 5000): Promise<void> {
+    await this.page.waitForFunction(
+      (s) => document.querySelector('main.box-page .bv')?.getAttribute('data-state') === s,
+      state,
+      { polling: 'raf', timeout },
+    );
+  }
+
   /** A CSS px point in the box window as Tauri reports drops: PHYSICAL px. */
   async physical(at: Point = { x: 74, y: 74 }): Promise<Point> {
     const dpr = await this.page.evaluate(() => window.devicePixelRatio);

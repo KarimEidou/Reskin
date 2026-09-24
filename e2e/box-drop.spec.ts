@@ -6,7 +6,7 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type { Page } from '@playwright/test';
 import type { BoxSkin } from '../src/lib/ipc/types';
-import { iconRect, metricsFor } from '../src/lib/ui/box-geometry';
+import { iconRect, metricsFor, visualRect } from '../src/lib/ui/box-geometry';
 import {
   calls,
   editorState,
@@ -95,7 +95,7 @@ test.describe('drag and drop', () => {
     await box.expectState('absorbing');
     // Still holding (armed look) while the inspection runs.
     await expect(box.visual).toHaveAttribute('data-state', 'armed');
-    await expect(box.visual).toHaveAttribute('data-state', 'absorbing', { timeout: 3000 });
+    await box.waitForVisualState('absorbing', 3000);
     const open = await waitForCall(page, 'open_editor');
     expect((open.args.items as string[]).length).toBe(1);
     expect(open.args.view).toBe('edit');
@@ -132,6 +132,31 @@ test.describe('drag and drop', () => {
     expect((open.args.items as string[]).length).toBe(1);
   });
 
+  test('an absorb cancelled mid-flight does not leak into the next drop', async ({ openBox, page }) => {
+    // Half speed: the icon's flight into the box lasts ~600 ms.
+    const box = await openBox({ settings: { animationSpeed: 0.5 } });
+    await box.drop([SAMPLE_PATHS.steam]);
+    // The inspected icon is flying in and the box gulps…
+    await box.waitForVisualState('absorbing');
+    // …when something else takes over the box.
+    await box.flight('error', null, 'Could not update the shortcut');
+    await box.expectState('error');
+    await box.expectState('idle', 4000);
+    expect(await calls(page, 'open_editor')).toHaveLength(0);
+
+    await setInspectDelay(page, 1200);
+    const [notes] = await makeItems(page, [SAMPLE_PATHS.notes]);
+    await box.drop([SAMPLE_PATHS.notes]);
+    await box.expectState('absorbing');
+    // Holding (armed look) while the slow inspection runs — not gulping.
+    await expect(box.visual).toHaveAttribute('data-state', 'armed');
+    await page.waitForTimeout(300);
+    await expect(box.visual).toHaveAttribute('data-state', 'armed');
+    const open = await waitForCall(page, 'open_editor');
+    expect(open.args).toEqual({ items: [notes!.id], view: 'edit' });
+    expect(await calls(page, 'open_editor')).toHaveLength(1);
+  });
+
   test('a failing inspection is an error too', async ({ openBox, page }) => {
     const box = await openBox();
     await page.evaluate(() => window.__e2e!.failNext('inspect_paths', 'access denied'));
@@ -150,6 +175,20 @@ test.describe('pointer and keyboard', () => {
     const open = await waitForCall(page, 'open_editor');
     expect(open.args).toEqual({ items: [], view: 'start' });
     expect(open.t).toBeGreaterThan(drag.t);
+  });
+
+  test('a click snaps to the handoff picture the editor proxy reproduces', async ({ openBox, page }) => {
+    const box = await openBox();
+    await box.hit.hover();
+    await box.expectState('hover');
+    await box.expectStatic();
+    await box.hit.click();
+    await waitForCall(page, 'open_editor', { view: 'start' });
+    // No hover → idle transition left running under the editor's proxy.
+    expect(await box.runningAnimations()).toBe(0);
+    await expect(box.visual).toHaveAttribute('data-state', 'idle');
+    await expect(box.visual.locator('.body')).toHaveCSS('transform', 'none');
+    await expect(box.visual.locator('.body')).toHaveCSS('opacity', '0.92');
   });
 
   test('a drag that moved the box does not open the editor', async ({ openBox, page }) => {
@@ -183,6 +222,31 @@ test.describe('pointer and keyboard', () => {
     await box.hit.focus();
     await page.keyboard.press('Space');
     await waitForCall(page, 'open_editor', { items: [], view: 'start' });
+  });
+
+  test('the first-run hint stays until a few seconds after the welcome closes', async ({ openBox, page }) => {
+    // Animation speed 2 halves the hint's 6 s lifetime.
+    const box = await openBox({ firstRun: true, settings: { animationSpeed: 2 } });
+    const hint = box.visual.locator('.hint');
+    await expect(hint).toHaveText('Drag a shortcut onto me');
+    // The welcome is still open over the (hidden) box: the hint waits.
+    await page.waitForTimeout(3500);
+    await expect(hint).toHaveCount(1);
+    // The welcome collapsed into the box: now the clock runs.
+    await emit(page, 'box:shown', null);
+    await page.waitForTimeout(1500);
+    await expect(hint).toHaveCount(1);
+    await expect(hint).toHaveCount(0, { timeout: 4000 });
+  });
+
+  test('dragging something onto the box ends the first-run hint', async ({ openBox, page }) => {
+    const box = await openBox({ firstRun: true });
+    await expect(box.visual.locator('.hint')).toHaveCount(1);
+    await box.drop([SAMPLE_PATHS.steam]);
+    await waitForCall(page, 'open_editor');
+    await emit(page, 'box:shown', null);
+    await box.expectState('idle');
+    await expect(box.visual.locator('.hint')).toHaveCount(0);
   });
 
   test('hover lifts the box and leaving settles it', async ({ openBox }) => {
@@ -270,10 +334,68 @@ test.describe('events from Rust', () => {
     await expect(box.root).toHaveCSS('width', '176px');
   });
 
+  test('the box paints only its configured look (no flash of defaults at startup)', async ({ openBox, page }) => {
+    await page.addInitScript(() => {
+      const seen: string[] = [];
+      (window as unknown as { skinsSeen: string[] }).skinsSeen = seen;
+      new MutationObserver(() => {
+        for (const el of document.querySelectorAll('.bv')) {
+          const look = `${el.getAttribute('data-skin')}:${document.documentElement.dataset.theme ?? 'unset'}`;
+          if (!seen.includes(look)) seen.push(look);
+        }
+      }).observe(document, { subtree: true, childList: true, attributes: true });
+    });
+    const box = await openBox({ settings: { boxSkin: 'neon', theme: 'light' } });
+    await expect(box.visual).toHaveAttribute('data-skin', 'neon');
+    expect(await page.evaluate(() => (window as unknown as { skinsSeen: string[] }).skinsSeen)).toEqual([
+      'neon:light',
+    ]);
+  });
+
   test('smoke mode reports readiness after the first paint', async ({ openBox, page }) => {
     await openBox({ smoke: true });
     const ready = await waitForCall(page, 'smoke_ready');
     expect(ready.args.report).toMatchObject({ window: 'box' });
+  });
+});
+
+test.describe('compatibility mode', () => {
+  // Rust clips the opaque box window to the visual box (a rounded window
+  // region), so everything must stay inside it.
+  test('keeps the box, the badge and the busy ring inside the visual box', async ({ openBox }) => {
+    const box = await openBox({ settings: { compatibilityMode: true } });
+    await expect(box.visual).toHaveClass(/compat/);
+    const v = visualRect(metricsFor('medium'));
+    const expectInside = (r: { x: number; y: number; width: number; height: number } | null) => {
+      expect(r).not.toBeNull();
+      expect(r!.x).toBeGreaterThanOrEqual(v.x);
+      expect(r!.y).toBeGreaterThanOrEqual(v.y);
+      expect(r!.x + r!.width).toBeLessThanOrEqual(v.x + v.w);
+      expect(r!.y + r!.height).toBeLessThanOrEqual(v.y + v.h);
+    };
+
+    await box.dragEnter(TWO);
+    await box.expectState('armed');
+    await expect(box.visual.locator('.body')).toHaveCSS('transform', 'none');
+    expectInside(await box.badge.boundingBox());
+    await box.dragLeave();
+
+    await box.progress(1, 3);
+    await box.expectState('busy');
+    // The stroke's geometry (its soft glow may bleed into the clip).
+    expectInside(
+      await box.ring.locator('.bar').evaluate((el) => {
+        const path = el as SVGPathElement;
+        const b = path.getBBox();
+        const half = parseFloat(getComputedStyle(path).strokeWidth) / 2;
+        return { x: b.x - half, y: b.y - half, width: b.width + 2 * half, height: b.height + 2 * half };
+      }),
+    );
+    await box.progress(3, 3);
+
+    await box.hit.hover();
+    await box.expectState('hover');
+    await expect(box.visual.locator('.body')).toHaveCSS('transform', 'none');
   });
 });
 
@@ -311,13 +433,22 @@ interface FakeEditorOptions {
   prepareDelayMs?: number;
 }
 
+interface FakeEditorLog {
+  /** Command types, in order. */
+  seen: string[];
+  /** Command types per `editor_next` response. */
+  batches: string[][];
+  /** The `expand` commands received. */
+  expands: Array<{ session: number; morph: boolean }>;
+}
+
 async function startFakeEditor(page: Page, opts: FakeEditorOptions = {}): Promise<void> {
   await page.evaluate(({ prepareDelayMs = 0 }) => {
     type Invoke = (cmd: string, args?: Record<string, unknown>) => Promise<unknown>;
-    type Env = { seq: number; cmd: { type: string; session?: number } };
+    type Env = { seq: number; cmd: { type: string; session?: number; morph?: boolean } };
     const invoke = (window as unknown as { __TAURI_INTERNALS__: { invoke: Invoke } }).__TAURI_INTERNALS__.invoke;
-    const seen: string[] = [];
-    (window as unknown as { fakeEditor: string[] }).fakeEditor = seen;
+    const log: FakeEditorLog = { seen: [], batches: [], expands: [] };
+    (window as unknown as { fakeEditor: FakeEditorLog }).fakeEditor = log;
     const stages: Record<string, string> = {
       prepare: 'prepared',
       reveal: 'revealed',
@@ -329,9 +460,11 @@ async function startFakeEditor(page: Page, opts: FakeEditorOptions = {}): Promis
       let after = 0;
       for (;;) {
         const batch = (await invoke('editor_next', { after })) as Env[];
+        log.batches.push(batch.map((env) => env.cmd.type));
         for (const env of batch) {
           after = env.seq;
-          seen.push(env.cmd.type);
+          log.seen.push(env.cmd.type);
+          if (env.cmd.type === 'expand') log.expands.push({ session: env.cmd.session!, morph: env.cmd.morph! });
           const stage = stages[env.cmd.type];
           if (!stage) continue;
           if (stage === 'prepared' && prepareDelayMs) await new Promise((r) => setTimeout(r, prepareDelayMs));
@@ -342,7 +475,9 @@ async function startFakeEditor(page: Page, opts: FakeEditorOptions = {}): Promis
   }, opts);
 }
 
-const seenByEditor = (page: Page) => page.evaluate(() => (window as unknown as { fakeEditor: string[] }).fakeEditor);
+const fakeEditorLog = (page: Page) =>
+  page.evaluate(() => (window as unknown as { fakeEditor: FakeEditorLog }).fakeEditor);
+const seenByEditor = async (page: Page) => (await fakeEditorLog(page)).seen;
 
 test.describe('fake backend', () => {
   test('simulateOpen / simulateClose run the handoff protocol', async ({ openBox, page }) => {
@@ -365,6 +500,11 @@ test.describe('fake backend', () => {
     const open = await simulateOpen(page, [SAMPLE_PATHS.folder], 'edit');
     expect(open).toMatchObject({ session: 1, morph: false, preparedInTime: false, timedOut: ['prepared'] });
     expect((await editorState(page)).morph).toBe(false);
+    const log = await fakeEditorLog(page);
+    // Rust's fallback does not wait for `revealed`: Reveal and a crossfade
+    // Expand are queued back to back, so the editor gets them together.
+    expect(log.batches).toContainEqual(['reveal', 'expand']);
+    expect(log.expands).toEqual([{ session: 1, morph: false }]);
   });
 
   test('editor_close from the page runs the close handoff', async ({ openBox, page }) => {
@@ -593,6 +733,23 @@ test.describe('skin gallery', () => {
     await setSettings(page, { compatibilityMode: true });
     await box.expectStatic();
     await shoot(page, 'box-glass-compat.png');
+  });
+
+  test('glass compatibility mode (clipped like the Rust window region)', async ({ openBox, page }) => {
+    const box = await openBox({ settings: { compatibilityMode: true }, accent: '#0078d4' });
+    await wallpaper(page, 'dark');
+    const m = metricsFor('medium');
+    await page.addStyleTag({
+      content: `main.box-page { clip-path: inset(${m.margin}px round ${m.radius}px); }`,
+    });
+    await box.dragEnter(TWO);
+    await box.expectState('armed');
+    await page.waitForTimeout(700);
+    await shoot(page, 'box-glass-compat-armed.png');
+    await box.dragLeave();
+    await box.progress(2, 3);
+    await page.waitForTimeout(300);
+    await shoot(page, 'box-glass-compat-busy.png');
   });
 
   for (const skin of SKINS) {
