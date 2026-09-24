@@ -88,12 +88,12 @@ The visual and interaction contract for the box and the editor. Tokens live in
   = pan, Ctrl+0 fit, Ctrl+1 100 %, Ctrl+ +/−. Pixel grid appears ≥ 8× (≥ 4×
   in pixel-art documents). Windows keyline guides toggle (K). Before/after:
   hold `\` shows the original icon; split view toggle in the bottom bar.
-  Enter commits a transform, text edit or lasso polygon; arrows nudge the
-  layer or selection (Shift: 10 px). Delete / Backspace clear the selected
-  pixels, or the whole layer without a selection (while a lasso polygon is
-  being drawn they remove its last corner instead). An image pasted or
-  dropped on the canvas goes through the import popover, which opens at the
-  pointer.
+  Enter commits a transform, text edit or lasso polygon; with the Move tool
+  the arrows nudge the layer, or the selected pixels (Shift: 10 px). Delete /
+  Backspace clear the selected pixels, or the whole layer without a
+  selection (while a lasso polygon is being drawn they remove its last
+  corner instead). An image pasted or dropped on the canvas goes through the
+  import popover, which opens at the pointer.
 * **Sidebar tabs** (panels are independent components in `src/editor/panels/`):
   Layers (Ctrl+click a thumbnail selects that layer's pixels; Shift adds, Alt
   subtracts), Color, Adjust (filters and icon helpers), Effects (layer
@@ -147,12 +147,12 @@ The visual and interaction contract for the box and the editor. Tokens live in
 * **System icons**: grid of This PC, Recycle Bin (empty/full), User files,
   Network, Control Panel with their current icons; click → edit.
 * **Library**: grid of saved designs (thumb, name, date) with a name filter,
-  open / rename / delete / apply to current item. Opening one over unsaved changes asks
-  first. The design open in the editor remembers the Library design it came
-  from or was saved as (its card says "Editing"): **Save changes** updates it,
-  **Save as new** adds a copy. Without that card on the page (still loading,
-  or gone from the Library) **Save current design** adds a new one — a save
-  never overwrites a design the user cannot see.
+  open / rename / delete / apply to current item. Opening one over unsaved
+  changes asks first. The design open in the editor remembers the Library
+  design it came from or was saved as (its card says "Editing"): **Save
+  changes** updates it, **Save as new** adds a copy. Without that card on
+  the page (still loading, or gone from the Library) **Save current design**
+  adds a new one — a save never overwrites a design the user cannot see.
 * **History**: every change Reskin made (thumb, target, when, state), with
   Undo / Restore original per row and "Restore all".
 * **Settings**: Appearance (theme, accent, box skin + live BoxVisual preview,
@@ -163,10 +163,10 @@ The visual and interaction contract for the box and the editor. Tokens live in
   refresh desktop icons (quick / rebuild cache), export sizes, pixel-art
   grid), About (version, build, Releases link, MIT license, and "Open-source
   licenses": a dialog, loaded when first opened, with the third-party
-  notices shipped in the app). The hotkey recorder takes
-  one key with Ctrl, Alt or Win (F1–F24 also alone); a saved hotkey Windows
-  won't register (another app holds it) shows a warning under the recorder,
-  and recording it again retries it. The accent swatch follows Windows live.
+  notices shipped in the app). The hotkey recorder takes one key with Ctrl,
+  Alt or Win (F1–F24 also alone); a saved hotkey Windows won't register
+  (another app holds it) shows a warning under the recorder, and recording
+  it again retries it. The accent swatch follows Windows live.
 
 ## Dialogs & overlays
 
@@ -177,18 +177,18 @@ The visual and interaction contract for the box and the editor. Tokens live in
   Allow approves them one by one, "Make personal copies" copies the ones
   that can be copied.
 * **Import popover** (`shell.askImport`): what is dropped on the window,
-  picked with Open image… (the Import dialog offers images, icons,
-  shortcuts, programs and `.reskin` projects, and projects on their own) or
-  pasted while a design is open. A paste or drop on the canvas asks at the
-  pointer, anything else in the middle. Choices: "Add as layer" (another
-  shortcut: "Use its icon as a layer"; projects join the queue instead) and
-  "Queue as new item" (shortcuts: "Queue it"; images and projects become
-  designs of their own); a shortcut dropped on a design without a target
-  offers "Apply this design to “…”" first (the other items join the
-  queue). Nothing open is replaced, and nothing goes in without asking.
-  Work in progress stays: a pending move is committed and an adjustment
-  being tuned kept before the new layer, so Undo takes back just that
-  layer. With nothing open, things open without asking.
+  picked with Open image… (the Import dialog's filters: images, icons,
+  shortcuts, programs and `.reskin` projects; or projects only) or pasted
+  while a design is open. A drop asks where it landed, a paste on the canvas
+  at the pointer, anything else (a pick, a paste elsewhere) in the middle.
+  Choices: "Add as layer" (another shortcut: "Use its icon as a layer";
+  projects join the queue instead) and "Queue as new item" (shortcuts:
+  "Queue it"; images and projects become designs of their own); a shortcut
+  dropped on a design without a target offers "Apply this design to “…”"
+  first (the other items join the queue). Nothing open is replaced, and
+  nothing goes in without asking. Work in progress stays: a pending move is
+  committed and an adjustment being tuned kept before the new layer, so Undo
+  takes back just that layer. With nothing open, things open without asking.
 * **Crash recovery** (a design an earlier launch left unsaved): Restore /
   Discard. Restoring brings its shortcut back into the queue when it still
   exists. Only unsaved work is ever offered — a design opened and closed

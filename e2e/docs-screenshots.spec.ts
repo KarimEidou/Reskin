@@ -27,6 +27,15 @@ const WALLPAPER = [
   'linear-gradient(160deg, #0d1640 0%, #0a1030 55%, #070b1f 100%)',
 ].join(', ');
 
+/**
+ * CSS painting the wallpaper behind the page as a fixed `selector::before`
+ * layer, softened: a blurred gradient compresses far better than
+ * Chromium's dithered one and looks the same.
+ */
+function desktop(selector: string): string {
+  return `${selector}::before { content: ''; position: fixed; inset: -48px; z-index: -1; background: ${WALLPAPER}; filter: blur(24px); }`;
+}
+
 /** PNG row filters (-1: the best per row) and deflate strategies (0 default, 1 filtered) worth trying. */
 const ENCODINGS = [-1, 1, 4].flatMap((filterType) => [0, 1].map((deflateStrategy) => ({ filterType, deflateStrategy })));
 
@@ -73,25 +82,30 @@ test.describe('box skins', () => {
     const boxes: string[] = [];
     for (const { skin } of SKINS) {
       const boxPage = await context.newPage();
+      // Like the `pageErrors` fixture does for `page`.
+      const errors: string[] = [];
+      boxPage.on('pageerror', (e) => errors.push(`${e.name}: ${e.message}`));
       const box = await BoxDriver.open(boxPage, { settings: { boxSkin: skin, theme: 'dark' } });
       await expect(box.visual).toHaveAttribute('data-skin', skin);
       await box.expectStatic();
       const png = await box.root.screenshot({ omitBackground: true });
       boxes.push(`data:image/png;base64,${png.toString('base64')}`);
       await boxPage.close();
+      expect(errors, `uncaught errors on the ${skin} box page`).toEqual([]);
     }
 
     await page.setViewportSize({ width: 720, height: 240 });
     await page.setContent(`<!doctype html>
       <style>
         html, body { margin: 0; height: 100%; }
+        html { background: #0a1030; }
+        ${desktop('html')}
         body {
           display: flex;
           align-items: center;
           justify-content: space-evenly;
           padding: 0 12px;
           box-sizing: border-box;
-          background: ${WALLPAPER};
           font: 12px/1 'Segoe UI Variable Text', 'Segoe UI', system-ui, sans-serif;
           letter-spacing: 0.03em;
           color: rgb(255 255 255 / 0.86);
@@ -134,12 +148,8 @@ test.describe('editor', () => {
     // The click scrolled the tile into view; show the panel from its top.
     await page.getByTestId('panel-styles').evaluate((panel) => panel.scrollTo(0, 0));
 
-    // The desktop behind the transparent window, softened: only a thin strip
-    // of it shows, and a blurred gradient compresses far better than Chromium's
-    // dithered one.
-    await page.addStyleTag({
-      content: `html::before { content: ''; position: fixed; inset: -48px; z-index: -1; background: ${WALLPAPER}; filter: blur(24px); }`,
-    });
+    // The desktop behind the transparent window.
+    await page.addStyleTag({ content: desktop('html') });
     await settle(page);
     await expect(page.locator('.toasts').locator('[role="alert"], [role="status"]').locator(':scope > *')).toHaveCount(0);
     save('editor.png', await page.screenshot({ animations: 'disabled' }));

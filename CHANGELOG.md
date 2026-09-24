@@ -41,9 +41,9 @@ Apply changes the real icon — every change journaled and undoable.
 
 - The box grows into the editor with a morph, and the editor folds back
   into the box when you close it — or they crossfade: if you prefer it,
-  with reduced motion, or when the editor needs a moment longer. The icon
-  you dropped lands right on the canvas, and the two windows hand over
-  without a flicker.
+  with reduced motion, in compatibility mode, or when the editor needs a
+  moment longer. The icon you dropped lands right on the canvas, and the
+  two windows hand over without a flicker.
 - The editor opens from the box, the tray and box menus, the Explorer entry
   *Reskin this icon*, or a second start of Reskin with a path.
 
@@ -68,7 +68,8 @@ Apply changes the real icon — every change journaled and undoable.
   options sit in the bar above the canvas.
 - **Selections:** add, subtract and intersect with Shift and Alt; select
   all, deselect, invert, select a layer's pixels, feather, grow, shrink and
-  border; Delete clears the selected pixels; arrow keys nudge.
+  border; Delete clears the selected pixels, and with the Move tool the
+  arrow keys nudge them (or the whole layer).
 - **Layers:** image and text layers with 12 blend modes, opacity,
   visibility, lock, rename, drag or keyboard reordering, duplicate, merge
   down, flatten and live thumbnails.
@@ -108,7 +109,7 @@ Apply changes the real icon — every change journaled and undoable.
 - **Queue:** drop several items at once and design them one by one; each
   keeps its own design. **Apply style to all** gives every other queued
   icon the current look — preset, backdrop, adjustments, helpers and
-  effects, scaled to each icon.
+  effects, scaled to each icon — and applies them in one go.
 - **Autosave and recovery:** unsaved designs are saved in the background
   and offered again after a crash.
 - **Command palette** (Ctrl+K) with every command, adjustment, icon helper,
@@ -149,8 +150,7 @@ Apply changes the real icon — every change journaled and undoable.
   instance.
 - Follows the Windows accent colour and the "Animation effects" setting
   live.
-- Started as administrator, Reskin restarts itself as a normal user; a
-  missing WebView2 Runtime is detected at start-up with a link to
+- A missing WebView2 Runtime is detected at start-up, with a link to
   Microsoft's download.
 
 #### Settings
@@ -202,12 +202,13 @@ Apply changes the real icon — every change journaled and undoable.
 
 ### Security
 
-- Reskin itself never runs with administrator rights. Public Desktop
-  changes go through a separate helper that Windows asks you to approve;
-  it accepts only validated jobs for shortcuts directly on the Public
-  Desktop, writes only inside an administrator-owned
-  `%ProgramData%\Reskin` folder, refuses links and redirected files,
-  creates files without overwriting, and keeps no log.
+- Started as administrator, Reskin restarts itself as a normal user (and
+  warns you when it can't). Public Desktop changes go through a separate
+  helper that Windows asks you to approve; it accepts only validated jobs,
+  edits only shortcuts that are plain files directly on the Public
+  Desktop, creates files only in an administrator-owned
+  `%ProgramData%\Reskin` folder and never over an existing one, refuses
+  links and hard-linked files, and keeps no log.
 - `reskin.exe --restore-all` started as administrator restores nothing
   itself: it runs again as the signed-in user (or refuses).
 - Several Reskin processes share the history safely; the editor pages
