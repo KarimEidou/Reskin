@@ -18,7 +18,6 @@ use crate::windows::mailbox::Mailbox;
 use crate::windows::morph::Morph;
 
 pub struct AppState {
-    pub args: AppArgs,
     pub dirs: AppDirs,
     pub settings: RwLock<Settings>,
     /// No settings.json existed at startup.
@@ -38,10 +37,16 @@ pub struct AppState {
 }
 
 impl AppState {
-    pub fn new(args: AppArgs, dirs: AppDirs, settings: Settings, first_run: bool, journal: Journal) -> Self {
+    pub fn new(
+        args: &AppArgs,
+        dirs: AppDirs,
+        settings: Settings,
+        first_run: bool,
+        journal: Journal,
+        sta: Sta,
+    ) -> Self {
         let smoke = Smoke::new(args.smoke, args.capture_handoff);
         Self {
-            args,
             dirs,
             settings: RwLock::new(settings),
             first_run,
@@ -49,7 +54,7 @@ impl AppState {
             morph: Morph::default(),
             animator: Animator::spawn(),
             items: Items::default(),
-            sta: Sta::spawn(),
+            sta,
             smoke,
             elevations: Elevations::default(),
             journal: Mutex::new(journal),
@@ -60,12 +65,19 @@ impl AppState {
     }
 
     pub fn settings(&self) -> Settings {
-        self.settings.read().unwrap_or_else(|e| e.into_inner()).clone()
+        self.settings
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
     }
 
     /// Mutates, normalises and persists the settings, then tells both
     /// windows. Returns the new settings.
-    pub fn update_settings<R: Runtime>(&self, app: &AppHandle<R>, f: impl FnOnce(&mut Settings)) -> Settings {
+    pub fn update_settings<R: Runtime>(
+        &self,
+        app: &AppHandle<R>,
+        f: impl FnOnce(&mut Settings),
+    ) -> Settings {
         let new = {
             let mut g = self.settings.write().unwrap_or_else(|e| e.into_inner());
             let mut s = g.clone();
@@ -76,8 +88,14 @@ impl AppState {
         if let Err(e) = reskin_core::settings::save(&self.dirs.settings_file(), &new) {
             crate::log::line(&format!("saving settings failed: {e}"));
         }
-        let _ = app.emit_to(crate::windows::box_window::LABEL, "settings:changed", new.clone());
-        self.mailbox.push(EditorCmd::Settings { settings: new.clone() });
+        let _ = app.emit_to(
+            crate::windows::box_window::LABEL,
+            "settings:changed",
+            new.clone(),
+        );
+        self.mailbox.push(EditorCmd::Settings {
+            settings: new.clone(),
+        });
         new
     }
 

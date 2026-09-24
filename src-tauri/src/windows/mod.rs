@@ -1,10 +1,13 @@
 //! The two windows (box and editor), the editor mailbox, and WebView2
 //! tuning.
 
+pub mod animator;
 pub mod box_window;
 pub mod editor_window;
 pub mod mailbox;
 pub mod monitors;
+pub mod morph;
+pub mod raw;
 pub mod webview2;
 
 use tauri::{AppHandle, Manager, Runtime, utils::config::WindowConfig};

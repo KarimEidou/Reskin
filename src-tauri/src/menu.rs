@@ -29,7 +29,8 @@ pub fn build<R: Runtime>(app: &AppHandle<R>, box_visible: bool) -> tauri::Result
             )
         })
         .collect::<tauri::Result<_>>()?;
-    let sys_refs: Vec<&dyn IsMenuItem<R>> = sys_items.iter().map(|m| m as &dyn IsMenuItem<R>).collect();
+    let sys_refs: Vec<&dyn IsMenuItem<R>> =
+        sys_items.iter().map(|m| m as &dyn IsMenuItem<R>).collect();
     let system = Submenu::with_id_and_items(app, "system-icons", "System icons", true, &sys_refs)?;
     let restore = MenuItem::with_id(app, RESTORE_ALL, "Restore all icons…", true, None::<&str>)?;
     let settings = MenuItem::with_id(app, SETTINGS, "Settings", true, None::<&str>)?;

@@ -86,7 +86,10 @@ pub fn start_watchdog() {
 static READY: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 pub fn on_ready<R: Runtime>(app: &AppHandle<R>, smoke: &Smoke, report: SmokeReport) {
-    log::line(&format!("smoke: {:?} reported: {}", report.window, report.detail));
+    log::line(&format!(
+        "smoke: {:?} reported: {}",
+        report.window, report.detail
+    ));
     if report.window == WindowKind::Editor && report.detail.starts_with("cycle:") {
         *smoke.cycle.lock().unwrap_or_else(|e| e.into_inner()) = Some(report.detail);
         return;
@@ -184,10 +187,17 @@ fn handoff<R: Runtime>(app: &AppHandle<R>) -> Result<String, String> {
     }
     let distinct = capture::diff(&with_box, &bare);
     if distinct < DISTINCT {
-        return Ok(format!("inconclusive (box indistinguishable from desktop: {distinct:.1})"));
+        return Ok(format!(
+            "inconclusive (box indistinguishable from desktop: {distinct:.1})"
+        ));
     }
     *state.smoke.region.lock().unwrap_or_else(|e| e.into_inner()) = Some(region);
-    state.smoke.frames.lock().unwrap_or_else(|e| e.into_inner()).clear();
+    state
+        .smoke
+        .frames
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .clear();
 
     let t = Instant::now();
     morph::open(app, vec![], EditorView::Start)?;
@@ -211,10 +221,17 @@ fn handoff<R: Runtime>(app: &AppHandle<R>) -> Result<String, String> {
         if (name.contains("revealed") || name.contains("collapsed") || name.contains("after-close"))
             && to_box > SAME
         {
-            return Err(format!("frame {name} differs from the box ({})", report.join("; ")));
+            return Err(format!(
+                "frame {name} differs from the box ({})",
+                report.join("; ")
+            ));
         }
     }
-    Ok(format!("ok ({} frames: {})", frames.len(), report.join("; ")))
+    Ok(format!(
+        "ok ({} frames: {})",
+        frames.len(),
+        report.join("; ")
+    ))
 }
 
 /// Temp fixture shortcut for the apply/restore cycle.
@@ -238,16 +255,27 @@ fn cycle<R: Runtime>(app: &AppHandle<R>) -> Result<(), String> {
         sta.run(fixture).map_err(|e| e.to_string())??
     };
     let infos = items::inspect_blocking(app, std::slice::from_ref(&lnk));
-    let item = infos.first().ok_or("fixture could not be inspected")?.clone();
+    let item = infos
+        .first()
+        .ok_or("fixture could not be inspected")?
+        .clone();
     if item.icon.is_none() {
         return Err("fixture has no icon preview".into());
     }
     morph::open(app, vec![item.clone()], EditorView::Edit)?;
     *state.smoke.cycle.lock().unwrap_or_else(|e| e.into_inner()) = None;
-    state.mailbox.push(EditorCmd::SmokeCycle { item: item.id.clone() });
+    state.mailbox.push(EditorCmd::SmokeCycle {
+        item: item.id.clone(),
+    });
     let deadline = Instant::now() + Duration::from_secs(30);
     let outcome = loop {
-        if let Some(o) = state.smoke.cycle.lock().unwrap_or_else(|e| e.into_inner()).take() {
+        if let Some(o) = state
+            .smoke
+            .cycle
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .take()
+        {
             break o;
         }
         if Instant::now() > deadline {
@@ -268,7 +296,10 @@ fn cycle<R: Runtime>(app: &AppHandle<R>) -> Result<(), String> {
         .map_err(|e| e.to_string())?
         .map_err(|e| e.to_string())?;
     if link.icon_location.as_deref().is_some_and(|l| !l.is_empty()) {
-        return Err(format!("fixture icon was not restored: {:?}", link.icon_location));
+        return Err(format!(
+            "fixture icon was not restored: {:?}",
+            link.icon_location
+        ));
     }
     let target = lnk.display().to_string();
     let journal = state.journal();

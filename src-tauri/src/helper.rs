@@ -9,7 +9,9 @@ use reskin_core::job::{self, JobExec, JobOp, JobResult};
 use reskin_core::paths::AppDirs;
 use reskin_core::win::{elevate, known, notify, shortcut, urlfile};
 use reskin_core::{Error, Result};
-use windows::Win32::System::Com::{COINIT_APARTMENTTHREADED, COINIT_DISABLE_OLE1DDE, CoInitializeEx};
+use windows::Win32::System::Com::{
+    COINIT_APARTMENTTHREADED, COINIT_DISABLE_OLE1DDE, CoInitializeEx,
+};
 
 use crate::{log, restore};
 
@@ -61,7 +63,12 @@ pub fn elevated_apply(job_path: &str) -> i32 {
         }
     };
     let icons = dirs.public_icons_dir().display().to_string();
-    let code = job::run_job_file(Path::new(job_path), &public_desktop, &icons, &mut WinJobExec);
+    let code = job::run_job_file(
+        Path::new(job_path),
+        &public_desktop,
+        &icons,
+        &mut WinJobExec,
+    );
     log::line(&format!("elevated-apply {job_path}: exit {code}"));
     code
 }
@@ -73,7 +80,10 @@ pub fn run_elevated_job(dirs: &AppDirs, ops: Vec<JobOp>) -> Result<JobResult> {
     let path = job::write_job(&dirs.jobs_dir(), &job)?;
     let exe = std::env::current_exe()?;
     let result = (|| {
-        let code = elevate::run_elevated(&exe, &["--elevated-apply".to_string(), path.display().to_string()])?;
+        let code = elevate::run_elevated(
+            &exe,
+            &["--elevated-apply".to_string(), path.display().to_string()],
+        )?;
         // The helper writes its result before exiting; allow a moment for
         // the file system to settle on slow disks.
         for _ in 0..20 {
@@ -82,7 +92,9 @@ pub fn run_elevated_job(dirs: &AppDirs, ops: Vec<JobOp>) -> Result<JobResult> {
             }
             std::thread::sleep(Duration::from_millis(50));
         }
-        Err(Error::Other(format!("the elevated helper exited with code {code} without a result")))
+        Err(Error::Other(format!(
+            "the elevated helper exited with code {code} without a result"
+        )))
     })();
     let _ = std::fs::remove_file(&path);
     let _ = std::fs::remove_file(job::result_path(&path));
@@ -132,5 +144,9 @@ pub fn restore_all(quiet: bool) -> i32 {
             println!("  {f}");
         }
     }
-    if report.failed.is_empty() { EXIT_OK } else { EXIT_FAILED }
+    if report.failed.is_empty() {
+        EXIT_OK
+    } else {
+        EXIT_FAILED
+    }
 }

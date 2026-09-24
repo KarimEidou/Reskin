@@ -105,7 +105,10 @@ mod tests {
     fn delivers_in_order_and_keeps_until_acked() {
         let mb = Mailbox::default();
         let a = mb.push(EditorCmd::Reveal { session: 1 });
-        let b = mb.push(EditorCmd::Expand { session: 1 });
+        let b = mb.push(EditorCmd::Expand {
+            session: 1,
+            morph: true,
+        });
         let got = mb.next(0, Duration::from_millis(10));
         assert_eq!(got.iter().map(|e| e.seq).collect::<Vec<_>>(), vec![a, b]);
         // A reloaded page polling from 0 still receives them.

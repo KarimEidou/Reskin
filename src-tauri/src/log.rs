@@ -23,7 +23,11 @@ pub fn line(msg: &str) {
     if cfg!(debug_assertions) {
         eprint!("{text}");
     }
-    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(path()) {
+    if let Ok(mut f) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path())
+    {
         let _ = f.write_all(text.as_bytes());
     }
 }

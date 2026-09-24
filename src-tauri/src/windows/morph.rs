@@ -13,7 +13,8 @@ use std::time::{Duration, Instant};
 
 use reskin_core::geom;
 use reskin_core::model::{
-    AckStage, CollapseThen, EditorCmd, EditorView, ItemInfo, MotionPref, OpenStyle, Rect, Settings, editor_size,
+    AckStage, CollapseThen, EditorCmd, EditorView, ItemInfo, MotionPref, OpenStyle, Rect, Settings,
+    editor_size,
 };
 use tauri::{AppHandle, Emitter, Manager, PhysicalPosition, PhysicalSize, Runtime, WebviewWindow};
 
@@ -86,7 +87,9 @@ impl Morph {
             }
             let now = Instant::now();
             if now >= deadline {
-                log::line(&format!("morph: session {session} timed out waiting for {stage:?}"));
+                log::line(&format!(
+                    "morph: session {session} timed out waiting for {stage:?}"
+                ));
                 return false;
             }
             g = self
@@ -114,7 +117,10 @@ fn wants_morph(settings: &Settings, system_reduced: bool) -> bool {
 
 /// Returns the editor window, creating (or recreating) it when it is
 /// missing or its page stopped polling the mailbox.
-pub fn ensure_editor<R: Runtime>(app: &AppHandle<R>, settings: &Settings) -> Result<WebviewWindow<R>, String> {
+pub fn ensure_editor<R: Runtime>(
+    app: &AppHandle<R>,
+    settings: &Settings,
+) -> Result<WebviewWindow<R>, String> {
     let state = app.state::<AppState>();
     for attempt in 0..2 {
         let window = match app.get_webview_window(editor_window::LABEL) {
@@ -160,7 +166,11 @@ pub fn box_home<R: Runtime>(app: &AppHandle<R>) -> Option<Rect> {
 /// Opens the editor out of the box. Blocks for the whole handoff (call it
 /// from a blocking-capable thread). If the editor is already open the items
 /// are added / the view switched instead.
-pub fn open<R: Runtime>(app: &AppHandle<R>, items: Vec<ItemInfo>, view: EditorView) -> Result<(), String> {
+pub fn open<R: Runtime>(
+    app: &AppHandle<R>,
+    items: Vec<ItemInfo>,
+    view: EditorView,
+) -> Result<(), String> {
     let state = app.state::<AppState>();
     let morph = &state.morph;
     // Only one handoff at a time. Whoever loses the race (or arrives while
@@ -182,7 +192,11 @@ pub fn open<R: Runtime>(app: &AppHandle<R>, items: Vec<ItemInfo>, view: EditorVi
     let _busy = busy;
     morph.set_phase(Phase::Opening);
     let result = open_inner(app, items, view);
-    morph.set_phase(if result.is_ok() { Phase::Open } else { Phase::Closed });
+    morph.set_phase(if result.is_ok() {
+        Phase::Open
+    } else {
+        Phase::Closed
+    });
     if result.is_err() {
         // Never leave the user without the box.
         let bh = box_hwnd(app);
@@ -193,7 +207,11 @@ pub fn open<R: Runtime>(app: &AppHandle<R>, items: Vec<ItemInfo>, view: EditorVi
     result
 }
 
-fn open_inner<R: Runtime>(app: &AppHandle<R>, items: Vec<ItemInfo>, view: EditorView) -> Result<(), String> {
+fn open_inner<R: Runtime>(
+    app: &AppHandle<R>,
+    items: Vec<ItemInfo>,
+    view: EditorView,
+) -> Result<(), String> {
     let state = app.state::<AppState>();
     let settings = state.settings();
     let editor = ensure_editor(app, &settings)?;
@@ -273,7 +291,11 @@ fn open_inner<R: Runtime>(app: &AppHandle<R>, items: Vec<ItemInfo>, view: Editor
 
 /// Closes the editor back into the box. `then` decides what the box does
 /// afterwards; `Fly`/`Celebrate` are driven by the caller (apply flow).
-pub fn close<R: Runtime>(app: &AppHandle<R>, then: CollapseThen, icon: Option<String>) -> Result<(), String> {
+pub fn close<R: Runtime>(
+    app: &AppHandle<R>,
+    then: CollapseThen,
+    icon: Option<String>,
+) -> Result<(), String> {
     let state = app.state::<AppState>();
     let morph = &state.morph;
     if morph.phase() != Phase::Open {
@@ -288,7 +310,11 @@ pub fn close<R: Runtime>(app: &AppHandle<R>, then: CollapseThen, icon: Option<St
     result
 }
 
-fn close_inner<R: Runtime>(app: &AppHandle<R>, then: CollapseThen, icon: Option<String>) -> Result<(), String> {
+fn close_inner<R: Runtime>(
+    app: &AppHandle<R>,
+    then: CollapseThen,
+    icon: Option<String>,
+) -> Result<(), String> {
     let state = app.state::<AppState>();
     let settings = state.settings();
     let morph = &state.morph;
@@ -313,8 +339,14 @@ fn close_inner<R: Runtime>(app: &AppHandle<R>, then: CollapseThen, icon: Option<
     };
     state.animator.jump_to((at.x as i32, at.y as i32));
     let scale = editor.scale_factor().unwrap_or(1.0);
-    let css = Rect::new((at.x - er.x) / scale, (at.y - er.y) / scale, at.w / scale, at.h / scale);
-    let do_morph = show_box && box_was_visible && wants_morph(&settings, state.system_reduced_motion());
+    let css = Rect::new(
+        (at.x - er.x) / scale,
+        (at.y - er.y) / scale,
+        at.w / scale,
+        at.h / scale,
+    );
+    let do_morph =
+        show_box && box_was_visible && wants_morph(&settings, state.system_reduced_motion());
 
     let _ = editor.set_always_on_top(true);
     state.mailbox.push(EditorCmd::Collapse {

@@ -5,8 +5,9 @@
 use reskin_core::model::Rect;
 use reskin_core::pixels::{Rgba, bgra_to_rgba};
 use windows::Win32::Graphics::Gdi::{
-    BI_RGB, BITMAPINFO, BITMAPINFOHEADER, BitBlt, CAPTUREBLT, CreateCompatibleBitmap, CreateCompatibleDC,
-    DIB_RGB_COLORS, DeleteDC, DeleteObject, GetDC, GetDIBits, HGDIOBJ, ReleaseDC, SRCCOPY, SelectObject,
+    BI_RGB, BITMAPINFO, BITMAPINFOHEADER, BitBlt, CAPTUREBLT, CreateCompatibleBitmap,
+    CreateCompatibleDC, DIB_RGB_COLORS, DeleteDC, DeleteObject, GetDC, GetDIBits, HGDIOBJ,
+    ReleaseDC, SRCCOPY, SelectObject,
 };
 
 /// Captures `r` (physical screen px). Alpha is forced opaque.
@@ -73,7 +74,11 @@ pub fn diff(a: &Rgba, b: &Rgba) -> f64 {
         .data
         .chunks_exact(4)
         .zip(b.data.chunks_exact(4))
-        .map(|(p, q)| (0..3).map(|i| (p[i] as i32 - q[i] as i32).unsigned_abs() as u64).sum::<u64>())
+        .map(|(p, q)| {
+            (0..3)
+                .map(|i| (p[i] as i32 - q[i] as i32).unsigned_abs() as u64)
+                .sum::<u64>()
+        })
         .sum();
     sum as f64 / (a.data.len() / 4 * 3) as f64
 }
@@ -81,6 +86,10 @@ pub fn diff(a: &Rgba, b: &Rgba) -> f64 {
 /// A capture that is (almost) entirely black says nothing about what was
 /// on screen (no interactive desktop, secure desktop, no GPU output).
 pub fn is_black(img: &Rgba) -> bool {
-    let bright = img.data.chunks_exact(4).filter(|p| p[0] > 8 || p[1] > 8 || p[2] > 8).count();
+    let bright = img
+        .data
+        .chunks_exact(4)
+        .filter(|p| p[0] > 8 || p[1] > 8 || p[2] > 8)
+        .count();
     bright * 100 < img.data.len() / 4
 }

@@ -9,7 +9,8 @@ use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use reskin_core::model::{
-    Access, ApplyMode, IconFrame, ItemId, ItemInfo, ItemKind, ItemLocation, PickPurpose, SystemIconId,
+    Access, ApplyMode, IconFrame, ItemId, ItemInfo, ItemKind, ItemLocation, PickPurpose,
+    SystemIconId,
 };
 use reskin_core::pixels::Rgba;
 use reskin_core::win::extract::{self, Inspected};
@@ -37,9 +38,16 @@ pub struct Items {
 }
 
 impl Items {
-    fn register(&self, mut info: ItemInfo, path: Option<PathBuf>, system_icon: Option<SystemIconId>) -> ItemInfo {
+    fn register(
+        &self,
+        mut info: ItemInfo,
+        path: Option<PathBuf>,
+        system_icon: Option<SystemIconId>,
+    ) -> ItemInfo {
         let n = self.counter.fetch_add(1, Ordering::Relaxed);
-        let salt = reskin_core::paths::sha256_hex(format!("{n}:{}:{}", info.path, reskin_core::now_ms()).as_bytes());
+        let salt = reskin_core::paths::sha256_hex(
+            format!("{n}:{}:{}", info.path, reskin_core::now_ms()).as_bytes(),
+        );
         let id = ItemId(format!("it{n:x}{}", &salt[..10]));
         info.id = id.clone();
         let mut g = self.map.lock().unwrap_or_else(|e| e.into_inner());
@@ -113,10 +121,13 @@ fn notes_for(ins: &Inspected) -> Vec<String> {
         notes.push("A Store app shortcut — Windows may ignore a custom icon; Reskin can create a classic shortcut instead.".into());
     }
     match ins.kind {
-        ItemKind::Executable | ItemKind::File => {
-            notes.push("Reskin never modifies programs; it will create a new desktop shortcut with your icon.".into())
+        ItemKind::Executable | ItemKind::File => notes.push(
+            "Reskin never modifies programs; it will create a new desktop shortcut with your icon."
+                .into(),
+        ),
+        ItemKind::Image => {
+            notes.push("An image — it becomes the starting point of your design.".into())
         }
-        ItemKind::Image => notes.push("An image — it becomes the starting point of your design.".into()),
         _ => {}
     }
     if ins.access == Access::ReadOnly && !matches!(ins.kind, ItemKind::Image | ItemKind::Project) {
@@ -178,7 +189,10 @@ pub fn inspect_blocking<R: Runtime>(app: &AppHandle<R>, paths: &[PathBuf]) -> Ve
     out
 }
 
-pub fn system_icon_blocking<R: Runtime>(app: &AppHandle<R>, id: SystemIconId) -> Result<ItemInfo, String> {
+pub fn system_icon_blocking<R: Runtime>(
+    app: &AppHandle<R>,
+    id: SystemIconId,
+) -> Result<ItemInfo, String> {
     let state = app.state::<AppState>();
     let ins = state
         .sta
@@ -272,7 +286,8 @@ pub async fn pick_files(app: AppHandle, purpose: PickPurpose) -> CmdResult<Vec<I
                 .add_filter(
                     "Images, icons and shortcuts",
                     &[
-                        "png", "jpg", "jpeg", "gif", "bmp", "webp", "ico", "tif", "tiff", "lnk", "url", "exe", "dll",
+                        "png", "jpg", "jpeg", "gif", "bmp", "webp", "ico", "tif", "tiff", "lnk",
+                        "url", "exe", "dll",
                     ],
                 )
                 .add_filter("All files", &["*"])
@@ -324,7 +339,11 @@ mod tests {
         );
         assert_eq!(
             modes_for(ItemKind::Shortcut, Access::NeedsElevation, true),
-            vec![ApplyMode::InPlace, ApplyMode::PersonalCopy, ApplyMode::NewShortcut]
+            vec![
+                ApplyMode::InPlace,
+                ApplyMode::PersonalCopy,
+                ApplyMode::NewShortcut
+            ]
         );
         assert_eq!(
             modes_for(ItemKind::Executable, Access::ReadOnly, false),

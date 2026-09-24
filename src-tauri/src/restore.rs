@@ -83,7 +83,9 @@ fn elevated_op(plan: &RestorePlan) -> reskin_core::Result<job::JobOp> {
             index: 0,
             existed: true,
         },
-        RestoreTo::Delete => return Err(Error::Unsupported("cannot delete elevated targets".into())),
+        RestoreTo::Delete => {
+            return Err(Error::Unsupported("cannot delete elevated targets".into()));
+        }
     };
     job::JobOp::restore_icon(&plan.target, &original)
 }
@@ -158,7 +160,10 @@ pub fn execute_plans(
     report
 }
 
-fn plans_for<R: Runtime>(app: &AppHandle<R>, target: &RestoreTarget) -> Result<Vec<RestorePlan>, String> {
+fn plans_for<R: Runtime>(
+    app: &AppHandle<R>,
+    target: &RestoreTarget,
+) -> Result<Vec<RestorePlan>, String> {
     let state = app.state::<AppState>();
     let journal = state.journal();
     Ok(match target {
@@ -176,7 +181,10 @@ fn plans_for<R: Runtime>(app: &AppHandle<R>, target: &RestoreTarget) -> Result<V
     })
 }
 
-pub fn restore_blocking<R: Runtime>(app: &AppHandle<R>, target: &RestoreTarget) -> Result<RestoreReport, String> {
+pub fn restore_blocking<R: Runtime>(
+    app: &AppHandle<R>,
+    target: &RestoreTarget,
+) -> Result<RestoreReport, String> {
     let plans = plans_for(app, target)?;
     let state = app.state::<AppState>();
     let sta = state.sta.clone();
@@ -234,12 +242,13 @@ pub async fn refresh_icons(app: AppHandle, level: RefreshLevel) -> CmdResult<()>
         state
             .sta
             .run(move || match level {
-                RefreshLevel::Notify => notify::assoc_changed(),
-                RefreshLevel::Rebuild => {
-                    notify::rebuild_icon_cache();
+                RefreshLevel::Notify => {
                     notify::assoc_changed();
+                    Ok(())
                 }
+                RefreshLevel::Rebuild => notify::rebuild_icon_cache(),
             })
+            .map_err(|e| e.to_string())?
             .map_err(|e| e.to_string())
     })
     .await
@@ -254,7 +263,10 @@ fn current_location(e: &HistoryEntry) -> reskin_core::Result<Option<String>> {
             if !path.exists() {
                 return Err(Error::NotFound(e.target.clone()));
             }
-            if path.extension().is_some_and(|x| x.eq_ignore_ascii_case("url")) {
+            if path
+                .extension()
+                .is_some_and(|x| x.eq_ignore_ascii_case("url"))
+            {
                 urlfile::read_url_icon(path)?.0
             } else {
                 shortcut::read_link(path)?.icon_location
@@ -273,7 +285,10 @@ fn current_location(e: &HistoryEntry) -> reskin_core::Result<Option<String>> {
 
 fn probe(e: &HistoryEntry) -> Probe {
     match current_location(e) {
-        Ok(Some(loc)) if Path::new(&loc) == Path::new(&e.icon_path) || loc.eq_ignore_ascii_case(&e.icon_path) => {
+        Ok(Some(loc))
+            if Path::new(&loc) == Path::new(&e.icon_path)
+                || loc.eq_ignore_ascii_case(&e.icon_path) =>
+        {
             Probe::PointsToIcon
         }
         Ok(_) => Probe::PointsElsewhere,

@@ -39,7 +39,11 @@ pub async fn settings_set(app: AppHandle, settings: Settings) -> CmdResult<Setti
 
 /// Applies OS-level effects of a settings change. Returns user-facing
 /// error messages for anything that failed.
-pub fn apply_side_effects<R: Runtime>(app: &AppHandle<R>, old: &Settings, new: &Settings) -> Vec<String> {
+pub fn apply_side_effects<R: Runtime>(
+    app: &AppHandle<R>,
+    old: &Settings,
+    new: &Settings,
+) -> Vec<String> {
     let mut errors = Vec::new();
     if old.hotkey != new.hotkey
         && let Err(e) = hotkey::apply(app, &accelerator(&new.hotkey))
@@ -48,7 +52,11 @@ pub fn apply_side_effects<R: Runtime>(app: &AppHandle<R>, old: &Settings, new: &
     }
     if old.autostart != new.autostart {
         let al = app.autolaunch();
-        let r = if new.autostart { al.enable() } else { al.disable() };
+        let r = if new.autostart {
+            al.enable()
+        } else {
+            al.disable()
+        };
         if let Err(e) = r {
             errors.push(format!("Start with Windows: {e}"));
         }
@@ -57,7 +65,9 @@ pub fn apply_side_effects<R: Runtime>(app: &AppHandle<R>, old: &Settings, new: &
         let r = if new.context_menu {
             std::env::current_exe()
                 .map_err(|e| e.to_string())
-                .and_then(|exe| reskin_core::win::contextmenu::install(&exe).map_err(|e| e.to_string()))
+                .and_then(|exe| {
+                    reskin_core::win::contextmenu::install(&exe).map_err(|e| e.to_string())
+                })
         } else {
             reskin_core::win::contextmenu::uninstall().map_err(|e| e.to_string())
         };
@@ -99,7 +109,11 @@ pub fn apply_at_startup<R: Runtime>(app: &AppHandle<R>, s: &Settings) {
     }
     let al = app.autolaunch();
     if al.is_enabled().unwrap_or(false) != s.autostart {
-        let _ = if s.autostart { al.enable() } else { al.disable() };
+        let _ = if s.autostart {
+            al.enable()
+        } else {
+            al.disable()
+        };
     }
     if s.context_menu {
         // Re-point the verb at this exe (it may have moved after an update).

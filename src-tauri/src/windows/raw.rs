@@ -46,7 +46,11 @@ pub fn set_topmost(h: isize, topmost: bool) {
         unsafe {
             let _ = SetWindowPos(
                 hwnd(h),
-                Some(if topmost { HWND_TOPMOST } else { HWND_NOTOPMOST }),
+                Some(if topmost {
+                    HWND_TOPMOST
+                } else {
+                    HWND_NOTOPMOST
+                }),
                 0,
                 0,
                 0,

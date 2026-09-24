@@ -51,6 +51,20 @@ pub fn build_label() -> String {
     }
 }
 
+/// A native error box for failures before any window exists.
+fn fatal_dialog(msg: &str) {
+    use ::windows::Win32::UI::WindowsAndMessaging::{MB_ICONERROR, MB_OK, MessageBoxW};
+    use ::windows::core::HSTRING;
+    unsafe {
+        MessageBoxW(
+            None,
+            &HSTRING::from(msg),
+            &HSTRING::from("Reskin"),
+            MB_OK | MB_ICONERROR,
+        );
+    }
+}
+
 pub fn run(args: AppArgs) {
     log::rotate();
     log::line(&format!(
@@ -58,21 +72,34 @@ pub fn run(args: AppArgs) {
         env!("CARGO_PKG_VERSION"),
         build_label()
     ));
-    let dirs = match AppDirs::from_env() {
-        Ok(d) => d,
-        Err(e) => {
-            log::line(&format!("fatal: app data folders unavailable: {e}"));
-            return;
-        }
-    };
+    let dirs = AppDirs::from_env();
     if let Err(e) = dirs.ensure() {
         log::line(&format!("creating app data folders failed: {e}"));
     }
     let (settings, first_run) = reskin_core::settings::load(&dirs.settings_file());
-    let journal = Journal::load(dirs.journal_file()).unwrap_or_else(|e| {
-        log::line(&format!("journal unreadable ({e}); starting a new one"));
-        Journal::empty(dirs.journal_file())
-    });
+    let journal = match Journal::load(dirs.journal_file()) {
+        Ok(j) => j,
+        Err(e) => {
+            // Only a journal written by a newer Reskin fails to load (a
+            // damaged one is backed up and replaced). Don't risk losing
+            // its history: refuse to start.
+            log::line(&format!("fatal: journal unreadable: {e}"));
+            fatal_dialog(&format!(
+                "Reskin could not read its history file:\n{e}\n\nIt may have been written by a newer version of Reskin."
+            ));
+            return;
+        }
+    };
+    let sta = match reskin_core::win::sta::Sta::spawn() {
+        Ok(s) => s,
+        Err(e) => {
+            log::line(&format!("fatal: COM worker failed to start: {e}"));
+            fatal_dialog(&format!(
+                "Reskin could not start its Windows shell worker:\n{e}"
+            ));
+            return;
+        }
+    };
     let smoke = args.smoke;
     let prewarm = if smoke {
         Duration::ZERO
@@ -82,7 +109,7 @@ pub fn run(args: AppArgs) {
         Duration::from_millis(1500)
     };
     let edit_paths = args.edit.clone();
-    let state = AppState::new(args, dirs, settings, first_run, journal);
+    let state = AppState::new(&args, dirs, settings, first_run, journal, sta);
 
     tauri::Builder::default()
         // Must be registered first so a second launch exits before doing work.

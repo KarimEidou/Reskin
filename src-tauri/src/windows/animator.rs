@@ -19,12 +19,16 @@ use reskin_core::geom;
 use reskin_core::model::{DragResult, Rect};
 use windows::Win32::Foundation::{HWND, POINT, RECT};
 use windows::Win32::Graphics::Dwm::DwmFlush;
-use windows::Win32::Graphics::Gdi::{GetMonitorInfoW, MONITOR_DEFAULTTONEAREST, MONITORINFO, MonitorFromPoint};
+use windows::Win32::Graphics::Gdi::{
+    GetMonitorInfoW, MONITOR_DEFAULTTONEAREST, MONITORINFO, MonitorFromPoint,
+};
 use windows::Win32::UI::HiDpi::GetDpiForWindow;
-use windows::Win32::UI::Input::KeyboardAndMouse::{GetAsyncKeyState, VK_ESCAPE, VK_LBUTTON, VK_RBUTTON};
+use windows::Win32::UI::Input::KeyboardAndMouse::{
+    GetAsyncKeyState, VK_ESCAPE, VK_LBUTTON, VK_RBUTTON,
+};
 use windows::Win32::UI::WindowsAndMessaging::{
-    GetCursorPos, GetSystemMetrics, GetWindowRect, SM_SWAPBUTTON, SWP_ASYNCWINDOWPOS, SWP_NOACTIVATE,
-    SWP_NOSIZE, SWP_NOZORDER, SetWindowPos,
+    GetCursorPos, GetSystemMetrics, GetWindowRect, SM_SWAPBUTTON, SWP_ASYNCWINDOWPOS,
+    SWP_NOACTIVATE, SWP_NOSIZE, SWP_NOZORDER, SetWindowPos,
 };
 
 /// Movement (logical px) that turns a press into a drag.
@@ -291,7 +295,13 @@ fn velocity(samples: &[(Instant, f64, f64)]) -> (f64, f64) {
 
 /// Critically damped spring from `from` with initial velocity to `to`.
 /// Returns a job that preempted the motion, if any.
-fn spring_to(h: isize, from: (f64, f64), vel: (f64, f64), to: (i32, i32), rx: &Receiver<Job>) -> Option<Job> {
+fn spring_to(
+    h: isize,
+    from: (f64, f64),
+    vel: (f64, f64),
+    to: (i32, i32),
+    rx: &Receiver<Job>,
+) -> Option<Job> {
     let (tx, ty) = (to.0 as f64, to.1 as f64);
     let (mut x, mut y) = from;
     let (mut vx, mut vy) = vel;
@@ -307,7 +317,8 @@ fn spring_to(h: isize, from: (f64, f64), vel: (f64, f64), to: (i32, i32), rx: &R
         last = now;
         (x, vx) = geom::spring_step(x, vx, tx, SPRING_OMEGA, dt);
         (y, vy) = geom::spring_step(y, vy, ty, SPRING_OMEGA, dt);
-        let settled = (x - tx).abs() < 0.5 && (y - ty).abs() < 0.5 && vx.abs() < 15.0 && vy.abs() < 15.0;
+        let settled =
+            (x - tx).abs() < 0.5 && (y - ty).abs() < 0.5 && vx.abs() < 15.0 && vy.abs() < 15.0;
         if settled || now.duration_since(start) > Duration::from_secs(3) {
             set_pos(h, to.0, to.1);
             return None;
@@ -316,7 +327,14 @@ fn spring_to(h: isize, from: (f64, f64), vel: (f64, f64), to: (i32, i32), rx: &R
     }
 }
 
-fn arc(h: isize, from: (f64, f64), to: (i32, i32), lift: f64, duration: Duration, rx: &Receiver<Job>) -> Option<Job> {
+fn arc(
+    h: isize,
+    from: (f64, f64),
+    to: (i32, i32),
+    lift: f64,
+    duration: Duration,
+    rx: &Receiver<Job>,
+) -> Option<Job> {
     let b = (to.0 as f64, to.1 as f64);
     let total = duration.as_secs_f64().max(0.001);
     let start = Instant::now();

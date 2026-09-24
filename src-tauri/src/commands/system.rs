@@ -48,9 +48,11 @@ pub async fn wallpaper_info(app: AppHandle) -> CmdResult<WallpaperInfo> {
             monitors::at_point(&app, cx, cy)
         })
         .map(|m| (m.rect.w as u32, m.rect.h as u32));
-    tauri::async_runtime::spawn_blocking(move || Ok(reskin_core::win::wallpaper::wallpaper_info(size)))
-        .await
-        .map_err(|e| e.to_string())?
+    tauri::async_runtime::spawn_blocking(move || {
+        Ok(reskin_core::win::wallpaper::wallpaper_info(size))
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 #[tauri::command]
@@ -78,7 +80,9 @@ pub fn open_external(app: AppHandle, link: String) -> CmdResult<()> {
         "license" => format!("{REPO}/blob/main/LICENSE"),
         other => return Err(format!("unknown link {other}")),
     };
-    app.opener().open_url(url, None::<&str>).map_err(|e| e.to_string())
+    app.opener()
+        .open_url(url, None::<&str>)
+        .map_err(|e| e.to_string())
 }
 
 #[tauri::command]

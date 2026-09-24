@@ -2,7 +2,7 @@
 //! (or opens the editor when the box is hidden by a fullscreen app).
 
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
-use tauri::{AppHandle, Manager, Runtime};
+use tauri::{AppHandle, Runtime};
 
 use crate::{actions, menu};
 

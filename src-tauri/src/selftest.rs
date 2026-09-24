@@ -11,11 +11,16 @@ pub fn run() -> i32 {
     checks.push(check("known-folders", || {
         let desktop = reskin_core::win::known::desktop().map_err(|e| e.to_string())?;
         let public = reskin_core::win::known::public_desktop().map_err(|e| e.to_string())?;
-        Ok(format!("desktop={} public={}", desktop.display(), public.display()))
+        Ok(format!(
+            "desktop={} public={}",
+            desktop.display(),
+            public.display()
+        ))
     }));
     checks.push(check("journal", || {
         let dirs = reskin_core::paths::AppDirs::from_env();
-        let j = reskin_core::history::Journal::load(dirs.journal_file()).map_err(|e| e.to_string())?;
+        let j =
+            reskin_core::history::Journal::load(dirs.journal_file()).map_err(|e| e.to_string())?;
         Ok(format!("{} entries", j.entries().len()))
     }));
     checks.push(check("icon-store", || {

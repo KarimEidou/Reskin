@@ -9,9 +9,9 @@ use std::time::{Duration, Instant};
 
 use reskin_core::history::NewEntry;
 use reskin_core::model::{
-    Access, ApplyMode, ApplyOutcome, ApplyRequest, BoxFlight, CollapseThen, DesktopSpot, ExportKind,
-    ExportRequest, FlightPhase, HistoryEntry, ItemKind, MotionPref, OriginalIcon, SizedPng, SystemIconId,
-    TargetKind,
+    Access, ApplyMode, ApplyOutcome, ApplyRequest, BoxFlight, CollapseThen, DesktopSpot,
+    ExportKind, ExportRequest, FlightPhase, HistoryEntry, ItemKind, MotionPref, OriginalIcon,
+    SizedPng, SystemIconId, TargetKind,
 };
 use reskin_core::pixels::b64_decode;
 use reskin_core::win::{desktop, folder, known, notify, shortcut, sysicons, urlfile};
@@ -53,7 +53,8 @@ impl Elevations {
 
     fn take(&self, ticket: &str) -> Option<PendingElevation> {
         let mut g = self.0.lock().unwrap_or_else(|e| e.into_inner());
-        g.remove(ticket).filter(|p| p.created.elapsed() < TICKET_TTL)
+        g.remove(ticket)
+            .filter(|p| p.created.elapsed() < TICKET_TTL)
     }
 }
 
@@ -61,9 +62,16 @@ impl Elevations {
 #[derive(Debug, Clone)]
 enum Target {
     /// `.lnk` (url=false) or `.url` (url=true) in place.
-    Link { path: PathBuf, url: bool },
-    Folder { path: PathBuf },
-    System { id: SystemIconId },
+    Link {
+        path: PathBuf,
+        url: bool,
+    },
+    Folder {
+        path: PathBuf,
+    },
+    System {
+        id: SystemIconId,
+    },
     /// A new desktop shortcut with the icon.
     NewShortcut {
         dest: PathBuf,
@@ -72,7 +80,11 @@ enum Target {
         description: String,
     },
     /// Copy of a (Public Desktop) link on the user's desktop.
-    PersonalCopy { src: PathBuf, dest: PathBuf, url: bool },
+    PersonalCopy {
+        src: PathBuf,
+        dest: PathBuf,
+        url: bool,
+    },
 }
 
 impl Target {
@@ -80,7 +92,9 @@ impl Target {
         match self {
             Target::Link { path, .. } | Target::Folder { path } => path.display().to_string(),
             Target::System { id } => id.slug().to_string(),
-            Target::NewShortcut { dest, .. } | Target::PersonalCopy { dest, .. } => dest.display().to_string(),
+            Target::NewShortcut { dest, .. } | Target::PersonalCopy { dest, .. } => {
+                dest.display().to_string()
+            }
         }
     }
 
@@ -109,7 +123,13 @@ fn unique_on_desktop(stem: &str, ext: &str) -> Result<PathBuf, String> {
     let desktop = known::desktop().map_err(|e| e.to_string())?;
     let clean: String = stem
         .chars()
-        .map(|c| if r#"<>:"/\|?*"#.contains(c) || c.is_control() { '_' } else { c })
+        .map(|c| {
+            if r#"<>:"/\|?*"#.contains(c) || c.is_control() {
+                '_'
+            } else {
+                c
+            }
+        })
         .collect();
     let clean = clean.trim().trim_end_matches('.');
     let clean = if clean.is_empty() { "Reskin" } else { clean };
@@ -127,10 +147,16 @@ fn unique_on_desktop(stem: &str, ext: &str) -> Result<PathBuf, String> {
     Err("could not find a free file name on the desktop".into())
 }
 
-fn resolve_target<R: Runtime>(app: &AppHandle<R>, rec: &ItemRecord, mode: ApplyMode) -> Result<Target, ApplyOutcome> {
+fn resolve_target<R: Runtime>(
+    app: &AppHandle<R>,
+    rec: &ItemRecord,
+    mode: ApplyMode,
+) -> Result<Target, ApplyOutcome> {
     let unsupported = |why: &str| ApplyOutcome::Unsupported { reason: why.into() };
     if !rec.info.modes.contains(&mode) {
-        return Err(unsupported("That kind of change isn't possible for this item."));
+        return Err(unsupported(
+            "That kind of change isn't possible for this item.",
+        ));
     }
     let path = rec.path.clone();
     match (rec.info.kind, mode) {
@@ -146,7 +172,9 @@ fn resolve_target<R: Runtime>(app: &AppHandle<R>, rec: &ItemRecord, mode: ApplyM
             path: path.ok_or_else(|| unsupported("missing path"))?,
         }),
         (ItemKind::SystemIcon, ApplyMode::InPlace) => Ok(Target::System {
-            id: rec.system_icon.ok_or_else(|| unsupported("missing system icon"))?,
+            id: rec
+                .system_icon
+                .ok_or_else(|| unsupported("missing system icon"))?,
         }),
         (ItemKind::Executable | ItemKind::File, ApplyMode::NewShortcut) => {
             let target = path.ok_or_else(|| unsupported("missing path"))?;
@@ -182,10 +210,13 @@ fn resolve_target<R: Runtime>(app: &AppHandle<R>, rec: &ItemRecord, mode: ApplyM
         (ItemKind::Shortcut | ItemKind::InternetShortcut, ApplyMode::PersonalCopy) => {
             let src = path.ok_or_else(|| unsupported("missing path"))?;
             let url = rec.info.kind == ItemKind::InternetShortcut;
-            let dest = unique_on_desktop(&rec.info.name, if url { ".url" } else { ".lnk" }).map_err(|e| unsupported(&e))?;
+            let dest = unique_on_desktop(&rec.info.name, if url { ".url" } else { ".lnk" })
+                .map_err(|e| unsupported(&e))?;
             Ok(Target::PersonalCopy { src, dest, url })
         }
-        _ => Err(unsupported("That kind of change isn't possible for this item.")),
+        _ => Err(unsupported(
+            "That kind of change isn't possible for this item.",
+        )),
     }
 }
 
@@ -306,7 +337,13 @@ fn flourish_enabled(state: &AppState, requested: bool) -> bool {
     requested && s.flourish && !reduced && !state.box_hidden_by_user()
 }
 
-fn emit_flight<R: Runtime>(app: &AppHandle<R>, phase: FlightPhase, icon: Option<String>, ms: u32, message: Option<String>) {
+fn emit_flight<R: Runtime>(
+    app: &AppHandle<R>,
+    phase: FlightPhase,
+    icon: Option<String>,
+    ms: u32,
+    message: Option<String>,
+) {
     let _ = app.emit_to(
         box_window::LABEL,
         "box:flight",
@@ -405,7 +442,8 @@ fn apply_blocking<R: Runtime>(app: &AppHandle<R>, req: ApplyRequest) -> ApplyOut
             state_sta.run(move || commit(&t, &p))?
         }
     };
-    let flourish = flourish_enabled(&state, req.flourish) && state.morph.phase() == morph::Phase::Open;
+    let flourish =
+        flourish_enabled(&state, req.flourish) && state.morph.phase() == morph::Phase::Open;
     let (result, landed) = if flourish {
         run_flourish(app, &target, preview.clone(), do_commit)
     } else {
@@ -420,7 +458,10 @@ fn apply_blocking<R: Runtime>(app: &AppHandle<R>, req: ApplyRequest) -> ApplyOut
         if let ApplyOutcome::Applied { entries, landed } = outcome {
             let mut all = entries;
             all.extend(extra);
-            return ApplyOutcome::Applied { entries: all, landed };
+            return ApplyOutcome::Applied {
+                entries: all,
+                landed,
+            };
         }
     }
     outcome
@@ -474,11 +515,19 @@ fn run_flourish<R: Runtime>(
     icon: Option<String>,
     commit: impl FnOnce() -> reskin_core::Result<()>,
 ) -> (reskin_core::Result<()>, bool) {
+    let mut commit = Some(commit);
+    let mut run_commit = move || match commit.take() {
+        Some(f) => f(),
+        None => Ok(()),
+    };
     let state = app.state::<AppState>();
     let speed = state.settings().animation_speed.clamp(0.5, 2.0);
     let ms = |base: f64| (base / speed) as u32;
     // Created shortcuts don't exist on the desktop until committed.
-    let creates = matches!(target, Target::NewShortcut { .. } | Target::PersonalCopy { .. });
+    let creates = matches!(
+        target,
+        Target::NewShortcut { .. } | Target::PersonalCopy { .. }
+    );
     let find = |path: &Path| -> Option<DesktopSpot> {
         let p = path.to_path_buf();
         state
@@ -491,7 +540,7 @@ fn run_flourish<R: Runtime>(
     };
     let mut result = None;
     if creates {
-        result = Some(commit());
+        result = Some(run_commit());
         // Give Explorer a moment to add the new icon to the desktop view.
         std::thread::sleep(Duration::from_millis(250));
     }
@@ -508,38 +557,51 @@ fn run_flourish<R: Runtime>(
         log::line(&format!("collapse before flight failed: {e}"));
     }
     let Some(spot) = spot else {
-        let r = result.unwrap_or_else(commit);
+        let r = result.unwrap_or_else(&mut run_commit);
         if r.is_ok() {
             emit_flight(app, FlightPhase::Celebrate, icon, ms(900.0), None);
         }
         return (r, false);
     };
     let Some(home) = morph::box_home(app) else {
-        return (result.unwrap_or_else(commit), false);
+        return (result.unwrap_or_else(&mut run_commit), false);
     };
     let bh = app
         .get_webview_window(box_window::LABEL)
         .map(|w| raw::hwnd_of(&w))
         .unwrap_or(0);
-    let size = raw::rect(bh).map(|r| (r.w, r.h)).unwrap_or((home.w, home.h));
+    let size = raw::rect(bh)
+        .map(|r| (r.w, r.h))
+        .unwrap_or((home.w, home.h));
     let (cx, cy) = spot.rect.center();
-    let dest = ((cx - size.0 / 2.0).round() as i32, (cy - size.1 / 2.0).round() as i32);
-    let lift = (home.y - spot.rect.y).abs().max(80.0).min(260.0);
+    let dest = (
+        (cx - size.0 / 2.0).round() as i32,
+        (cy - size.1 / 2.0).round() as i32,
+    );
+    let lift = (home.y - spot.rect.y).abs().clamp(80.0, 260.0);
     emit_flight(app, FlightPhase::Depart, icon.clone(), ms(650.0), None);
-    state.animator.arc_to(dest, lift, Duration::from_millis(ms(650.0) as u64));
-    let r = result.unwrap_or_else(commit);
+    state
+        .animator
+        .arc_to(dest, lift, Duration::from_millis(ms(650.0) as u64));
+    let r = result.unwrap_or_else(&mut run_commit);
     emit_flight(
         app,
-        if r.is_ok() { FlightPhase::Land } else { FlightPhase::Error },
+        if r.is_ok() {
+            FlightPhase::Land
+        } else {
+            FlightPhase::Error
+        },
         icon,
         ms(520.0),
         r.as_ref().err().map(|e| e.to_string()),
     );
     std::thread::sleep(Duration::from_millis(ms(560.0) as u64));
     emit_flight(app, FlightPhase::Return, None, ms(600.0), None);
-    state
-        .animator
-        .arc_to((home.x as i32, home.y as i32), lift * 0.6, Duration::from_millis(ms(600.0) as u64));
+    state.animator.arc_to(
+        (home.x as i32, home.y as i32),
+        lift * 0.6,
+        Duration::from_millis(ms(600.0) as u64),
+    );
     emit_flight(app, FlightPhase::Home, None, 0, None);
     (r, true)
 }
@@ -561,7 +623,10 @@ fn apply_to_pins<R: Runtime>(
         .unwrap_or_default();
     let mut out = Vec::new();
     for pin in matches {
-        let target = Target::Link { path: pin, url: false };
+        let target = Target::Link {
+            path: pin,
+            url: false,
+        };
         let t2 = target.clone();
         let Ok(Ok(original)) = state.sta.run(move || read_original(&t2)) else {
             continue;
@@ -607,12 +672,14 @@ fn matching_pins(link: &Path) -> Vec<PathBuf> {
     let Some(target) = info.target else {
         return Vec::new();
     };
-    let mut roots = Vec::new();
-    for r in [known::start_menu(), known::common_start_menu(), known::taskbar_pins()] {
-        if let Ok(p) = r {
-            roots.push(p);
-        }
-    }
+    let roots: Vec<PathBuf> = [
+        known::start_menu(),
+        known::common_start_menu(),
+        known::taskbar_pins(),
+    ]
+    .into_iter()
+    .flatten()
+    .collect();
     let mut out = Vec::new();
     for root in roots {
         walk_lnks(&root, 4, &mut |p| {
@@ -629,7 +696,8 @@ fn matching_pins(link: &Path) -> Vec<PathBuf> {
 }
 
 fn same_path(a: &Path, b: &Path) -> bool {
-    a.to_string_lossy().eq_ignore_ascii_case(&b.to_string_lossy())
+    a.to_string_lossy()
+        .eq_ignore_ascii_case(&b.to_string_lossy())
 }
 
 fn walk_lnks(dir: &Path, depth: u32, f: &mut dyn FnMut(&Path)) {
@@ -715,7 +783,10 @@ fn elevated_blocking<R: Runtime>(app: &AppHandle<R>, ticket: &str) -> ApplyOutco
         let _ = state.journal().fail(&entry_id, "cancelled");
         return ApplyOutcome::Cancelled;
     }
-    if result.is_ok() && flourish_enabled(&state, p.flourish) && state.morph.phase() == morph::Phase::Open {
+    if result.is_ok()
+        && flourish_enabled(&state, p.flourish)
+        && state.morph.phase() == morph::Phase::Open
+    {
         let (r, landed) = run_flourish(app, &target, p.preview.clone(), || Ok(()));
         let _ = r;
         return finish(app, &p.rec, &entry_id, result, landed);

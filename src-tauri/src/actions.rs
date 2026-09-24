@@ -4,7 +4,9 @@
 
 use std::path::PathBuf;
 
-use reskin_core::model::{BoxFlight, CollapseThen, EditorView, FlightPhase, ItemInfo, SystemIconId};
+use reskin_core::model::{
+    BoxFlight, CollapseThen, EditorView, FlightPhase, ItemInfo, SystemIconId,
+};
 use tauri::{AppHandle, Emitter, Manager, Runtime};
 use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind};
 
@@ -12,7 +14,11 @@ use crate::state::AppState;
 use crate::windows::{box_window, morph, raw};
 use crate::{items, log, restore, tray};
 
-fn spawn<R: Runtime>(app: &AppHandle<R>, name: &str, f: impl FnOnce(AppHandle<R>) + Send + 'static) {
+fn spawn<R: Runtime>(
+    app: &AppHandle<R>,
+    name: &str,
+    f: impl FnOnce(AppHandle<R>) + Send + 'static,
+) {
     let app = app.clone();
     let _ = std::thread::Builder::new()
         .name(format!("reskin-{name}"))
@@ -68,17 +74,21 @@ pub fn open_paths<R: Runtime>(app: &AppHandle<R>, paths: Vec<PathBuf>) {
 }
 
 pub fn open_system_icon<R: Runtime>(app: &AppHandle<R>, id: SystemIconId) {
-    spawn(app, "open-sys", move |app| match items::system_icon_blocking(&app, id) {
-        Ok(info) => {
-            if let Err(e) = morph::open(&app, vec![info], EditorView::Edit) {
+    spawn(
+        app,
+        "open-sys",
+        move |app| match items::system_icon_blocking(&app, id) {
+            Ok(info) => {
+                if let Err(e) = morph::open(&app, vec![info], EditorView::Edit) {
+                    box_error(&app, &e);
+                }
+            }
+            Err(e) => {
+                log::line(&format!("system icon {id:?}: {e}"));
                 box_error(&app, &e);
             }
-        }
-        Err(e) => {
-            log::line(&format!("system icon {id:?}: {e}"));
-            box_error(&app, &e);
-        }
-    });
+        },
+    );
 }
 
 /// Hotkey / tray click: close the editor if open, else show/hide the box.
