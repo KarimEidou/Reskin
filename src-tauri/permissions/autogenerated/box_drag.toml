@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-box-drag"
+description = "Enables the box_drag command without any pre-configured scope."
+commands.allow = ["box_drag"]
+
+[[permission]]
+identifier = "deny-box-drag"
+description = "Denies the box_drag command without any pre-configured scope."
+commands.deny = ["box_drag"]

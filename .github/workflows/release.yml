@@ -1,0 +1,79 @@
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+
+jobs:
+  release:
+    runs-on: windows-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v5
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22
+          cache: pnpm
+      - name: Toolchain (rust-toolchain.toml)
+        run: rustup toolchain install
+      - uses: Swatinem/rust-cache@v2
+      - run: pnpm install --frozen-lockfile
+      - name: Version matches tag
+        shell: pwsh
+        run: |
+          $tag = '${{ github.ref_name }}'.TrimStart('v')
+          $pkg = (Get-Content package.json -Raw | ConvertFrom-Json).version
+          $conf = (Get-Content src-tauri\tauri.conf.json -Raw | ConvertFrom-Json).version
+          if ($tag -ne $pkg -or $tag -ne $conf) { throw "tag $tag != package.json $pkg / tauri.conf.json $conf" }
+      - name: Ensure WebView2 Runtime
+        shell: pwsh
+        run: ./scripts/ensure-webview2.ps1
+      - name: Build bundles
+        run: pnpm tauri build
+      - name: Smoke test
+        shell: pwsh
+        run: |
+          $p = Start-Process -FilePath 'target\release\reskin.exe' -ArgumentList '--smoke-test' -PassThru -Wait
+          Get-Content "$env:TEMP\reskin.log" -ErrorAction SilentlyContinue
+          if ($p.ExitCode -ne 0) { throw "smoke test failed with exit code $($p.ExitCode)" }
+      - name: Stage release assets
+        shell: pwsh
+        run: |
+          $v = '${{ github.ref_name }}'.TrimStart('v')
+          New-Item -ItemType Directory -Force release-assets | Out-Null
+          Copy-Item "target\release\bundle\nsis\Reskin_${v}_x64-setup.exe" release-assets\
+          Copy-Item "target\release\bundle\msi\Reskin_${v}_x64_en-US.msi" release-assets\
+          Copy-Item 'target\release\reskin.exe' "release-assets\Reskin_${v}_x64_portable.exe"
+          Push-Location release-assets
+          $lines = Get-ChildItem -File | Sort-Object Name | ForEach-Object {
+            "$((Get-FileHash $_.FullName -Algorithm SHA256).Hash.ToLower())  $($_.Name)"
+          }
+          [IO.File]::WriteAllLines("$PWD\SHA256SUMS.txt", $lines)
+          Get-Content SHA256SUMS.txt
+          # Re-verify every hash from the written file.
+          foreach ($line in Get-Content SHA256SUMS.txt) {
+            $hash, $name = $line -split '  ', 2
+            $actual = (Get-FileHash $name -Algorithm SHA256).Hash.ToLower()
+            if ($actual -ne $hash) { throw "hash mismatch for $name" }
+          }
+          Pop-Location
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v3
+        with:
+          name: Reskin ${{ github.ref_name }}
+          draft: false
+          prerelease: false
+          generate_release_notes: true
+          fail_on_unmatched_files: true
+          files: |
+            release-assets/*.exe
+            release-assets/*.msi
+            release-assets/SHA256SUMS.txt

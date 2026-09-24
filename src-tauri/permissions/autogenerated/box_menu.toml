@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-box-menu"
+description = "Enables the box_menu command without any pre-configured scope."
+commands.allow = ["box_menu"]
+
+[[permission]]
+identifier = "deny-box-menu"
+description = "Denies the box_menu command without any pre-configured scope."
+commands.deny = ["box_menu"]

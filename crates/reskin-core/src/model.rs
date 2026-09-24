@@ -218,7 +218,7 @@ pub const ICO_SIZES: [u32; 12] = [16, 20, 24, 32, 40, 48, 60, 64, 72, 96, 128, 2
 // Boot
 // ---------------------------------------------------------------------------
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[cfg_attr(feature = "ts", derive(TS), ts(export))]
 #[serde(rename_all = "lowercase")]
 pub enum WindowKind {

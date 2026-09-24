@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-apply-icon-elevated"
+description = "Enables the apply_icon_elevated command without any pre-configured scope."
+commands.allow = ["apply_icon_elevated"]
+
+[[permission]]
+identifier = "deny-apply-icon-elevated"
+description = "Denies the apply_icon_elevated command without any pre-configured scope."
+commands.deny = ["apply_icon_elevated"]

@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-app-boot"
+description = "Enables the app_boot command without any pre-configured scope."
+commands.allow = ["app_boot"]
+
+[[permission]]
+identifier = "deny-app-boot"
+description = "Denies the app_boot command without any pre-configured scope."
+commands.deny = ["app_boot"]

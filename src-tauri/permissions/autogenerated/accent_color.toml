@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-accent-color"
+description = "Enables the accent_color command without any pre-configured scope."
+commands.allow = ["accent_color"]
+
+[[permission]]
+identifier = "deny-accent-color"
+description = "Denies the accent_color command without any pre-configured scope."
+commands.deny = ["accent_color"]

@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-wallpaper-info"
+description = "Enables the wallpaper_info command without any pre-configured scope."
+commands.allow = ["wallpaper_info"]
+
+[[permission]]
+identifier = "deny-wallpaper-info"
+description = "Denies the wallpaper_info command without any pre-configured scope."
+commands.deny = ["wallpaper_info"]

@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-item-frames"
+description = "Enables the item_frames command without any pre-configured scope."
+commands.allow = ["item_frames"]
+
+[[permission]]
+identifier = "deny-item-frames"
+description = "Denies the item_frames command without any pre-configured scope."
+commands.deny = ["item_frames"]

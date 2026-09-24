@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-editor-ack"
+description = "Enables the editor_ack command without any pre-configured scope."
+commands.allow = ["editor_ack"]
+
+[[permission]]
+identifier = "deny-editor-ack"
+description = "Denies the editor_ack command without any pre-configured scope."
+commands.deny = ["editor_ack"]

@@ -15,5 +15,6 @@ export default defineConfig({
     include: ['src/**/*.test.ts'],
     environment: 'node',
     pool: 'threads',
+    passWithNoTests: true,
   },
 });

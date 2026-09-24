@@ -1,0 +1,18 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "box",
+  "description": "The floating box: drag, drop, menu and opening the editor.",
+  "windows": ["box"],
+  "permissions": [
+    "core:event:allow-listen",
+    "core:event:allow-unlisten",
+    "allow-app-boot",
+    "allow-box-drag",
+    "allow-box-menu",
+    "allow-open-editor",
+    "allow-inspect-paths",
+    "allow-settings-get",
+    "allow-settings-set",
+    "allow-smoke-ready"
+  ]
+}

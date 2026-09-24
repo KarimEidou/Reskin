@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-set-box-visible"
+description = "Enables the set_box_visible command without any pre-configured scope."
+commands.allow = ["set_box_visible"]
+
+[[permission]]
+identifier = "deny-set-box-visible"
+description = "Denies the set_box_visible command without any pre-configured scope."
+commands.deny = ["set_box_visible"]

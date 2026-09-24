@@ -1,0 +1,146 @@
+name: CI
+
+on:
+  push:
+    branches: ['**']
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+
+jobs:
+  web:
+    name: web (check, unit, build, e2e)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v5
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm check
+      - run: pnpm test
+      - run: pnpm build
+      - run: pnpm bundle:budget
+      - run: pnpm exec playwright install --with-deps chromium
+      - run: pnpm e2e
+      - uses: actions/upload-artifact@v5
+        if: failure()
+        with:
+          name: playwright-report
+          path: |
+            playwright-report/
+            test-results/
+          retention-days: 7
+
+  rust-core:
+    name: rust-core (fmt, clippy, tests, bindings)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v5
+      - name: Toolchain (rust-toolchain.toml)
+        run: rustup toolchain install
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo fmt --all --check
+      - run: cargo clippy -p reskin-core --all-targets -- -D warnings
+      - name: clippy (Windows target)
+        run: cargo clippy -p reskin-core --all-targets --target x86_64-pc-windows-msvc -- -D warnings
+      - run: cargo test -p reskin-core
+      - name: ts-rs bindings are up to date
+        run: |
+          cargo test -p reskin-core --features ts export_bindings
+          git add -N src/lib/ipc/bindings
+          git diff --exit-code -- src/lib/ipc/bindings
+
+  windows:
+    name: windows (clippy, tests, bundle, smoke, installer)
+    runs-on: windows-latest
+    timeout-minutes: 75
+    steps:
+      - uses: actions/checkout@v5
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22
+          cache: pnpm
+      - name: Toolchain (rust-toolchain.toml)
+        run: rustup toolchain install
+      - uses: Swatinem/rust-cache@v2
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm build
+      - run: cargo clippy --workspace --all-targets -- -D warnings
+      - name: Tests (incl. real shell integration)
+        run: cargo test --workspace -- --include-ignored
+      - name: Ensure WebView2 Runtime
+        shell: pwsh
+        run: ./scripts/ensure-webview2.ps1
+      - name: Build bundles
+        run: pnpm tauri build
+      - name: Smoke test (packaged exe)
+        shell: pwsh
+        run: |
+          Remove-Item "$env:TEMP\reskin.log" -ErrorAction SilentlyContinue
+          $p = Start-Process -FilePath 'target\release\reskin.exe' -ArgumentList '--smoke-test', '--capture-handoff' -PassThru -Wait
+          Write-Host "exit code: $($p.ExitCode)"
+          Get-Content "$env:TEMP\reskin.log" -ErrorAction SilentlyContinue
+          if ($p.ExitCode -ne 0) { throw "smoke test failed with exit code $($p.ExitCode)" }
+      - name: Installer round-trip
+        shell: pwsh
+        run: |
+          $setup = Get-ChildItem 'target\release\bundle\nsis\*-setup.exe' | Select-Object -First 1
+          Write-Host "installing $($setup.Name)"
+          $p = Start-Process -FilePath $setup.FullName -ArgumentList '/S' -PassThru -Wait
+          if ($p.ExitCode -ne 0) { throw "installer failed: $($p.ExitCode)" }
+          $dir = Join-Path $env:LOCALAPPDATA 'Reskin'
+          $exe = Join-Path $dir 'reskin.exe'
+          if (-not (Test-Path $exe)) { throw "reskin.exe not installed at $exe" }
+          $out = Join-Path $env:TEMP 'reskin-self-test.json'
+          $p = Start-Process -FilePath $exe -ArgumentList '--self-test' -RedirectStandardOutput $out -PassThru -Wait
+          Get-Content $out
+          if ($p.ExitCode -ne 0) { throw "self-test failed: $($p.ExitCode)" }
+          $report = Get-Content $out -Raw | ConvertFrom-Json
+          if (-not $report.ok) { throw 'self-test reported failures' }
+          $p = Start-Process -FilePath (Join-Path $dir 'uninstall.exe') -ArgumentList '/S' -PassThru -Wait
+          for ($i = 0; $i -lt 60 -and (Test-Path $exe); $i++) { Start-Sleep -Milliseconds 500 }
+          if (Test-Path $exe) { throw 'uninstall left reskin.exe behind' }
+          Write-Host 'installer round-trip OK'
+      - name: Stage artifacts
+        shell: pwsh
+        run: |
+          $v = (Get-Content package.json -Raw | ConvertFrom-Json).version
+          New-Item -ItemType Directory -Force artifacts | Out-Null
+          Copy-Item "target\release\bundle\nsis\Reskin_${v}_x64-setup.exe" artifacts\
+          Copy-Item "target\release\bundle\msi\Reskin_${v}_x64_en-US.msi" artifacts\
+          Copy-Item 'target\release\reskin.exe' "artifacts\Reskin_${v}_x64_portable.exe"
+          Get-ChildItem artifacts | Format-Table Name, Length
+      - uses: actions/upload-artifact@v5
+        with:
+          name: reskin-windows
+          path: artifacts/*
+          retention-days: 14
+      - name: Collect logs
+        if: always()
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force logs | Out-Null
+          Copy-Item "$env:TEMP\reskin*.log", "$env:TEMP\reskin-*.png", "$env:TEMP\reskin-*.json" logs\ -ErrorAction SilentlyContinue
+      - uses: actions/upload-artifact@v5
+        if: always()
+        with:
+          name: windows-logs
+          path: logs/
+          if-no-files-found: ignore
+          retention-days: 7
