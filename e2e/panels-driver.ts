@@ -26,6 +26,16 @@ export async function openItem(page: Page, path: string = SAMPLE_PATHS.steam): P
   await expect(page.getByTestId('layer-row').first()).toBeVisible();
 }
 
+/**
+ * Freezes the page's wall clock (`Date`; timers keep running) — call it
+ * before the page opens. Undo steps of one control merge within a time
+ * window: on a loaded machine a single re-render between two key presses
+ * can outlast it, and what merges must not depend on that.
+ */
+export function freezeClock(page: Page): Promise<void> {
+  return page.clock.setFixedTime(Date.now());
+}
+
 export function sidebar(page: Page): Locator {
   return page.getByTestId('sidebar');
 }

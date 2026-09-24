@@ -109,7 +109,8 @@ export interface ReplaceLayersOptions {
   label: string;
   /**
    * The active layer afterwards (must be in the new stack; null for none).
-   * Default: the current active layer when it is kept, else the top layer.
+   * Default — also when it is a text layer that settling removed: the
+   * current active layer when it is kept, else the top layer.
    */
   activeLayerId?: string | null;
   /**
@@ -727,9 +728,11 @@ export class Engine {
    * Replaces the whole layer stack (bottom → top) and the active layer as
    * ONE undo step (style presets, inserted stickers and backdrops). Layers
    * are used as given (raster layers must match the document size; ids must
-   * be unique). Pending tool work and an inline text edit are settled first.
-   * Returns the id of the history entry (a merged replacement keeps its
-   * entry's id), or null when nothing was recorded.
+   * be unique). Pending tool work and an inline text edit are settled first;
+   * a text layer that closing the editor removes (left empty) stays removed
+   * even when the new stack was built with it. Returns the id of the history
+   * entry (a merged replacement keeps its entry's id), or null when nothing
+   * was recorded.
    */
   replaceLayers(layers: readonly Layer[], opts: ReplaceLayersOptions): number | null {
     if (this.disposed) return null;
@@ -743,18 +746,19 @@ export class Engine {
         throw new RangeError(`layer "${l.name}" does not match the document size`);
       }
     }
-    const current = this._doc.activeLayerId;
-    const active =
-      opts.activeLayerId !== undefined
-        ? opts.activeLayerId
-        : current !== null && ids.has(current)
-          ? current
-          : layers[layers.length - 1]!.id;
-    if (active !== null && !ids.has(active)) throw new RangeError(`the active layer "${active}" is not in the new stack`);
+    const wanted = opts.activeLayerId;
+    if (wanted !== undefined && wanted !== null && !ids.has(wanted)) throw new RangeError(`the active layer "${wanted}" is not in the new stack`);
+    const had = this._doc.layers.slice();
     this.endTextEdit();
     this.settle('commit');
+    const removed = had.filter((l) => !this._doc.layers.includes(l));
+    const stack = removed.length > 0 ? layers.filter((l) => !removed.includes(l)) : layers.slice();
+    if (stack.length === 0) return null;
+    const kept = (id: string | null) => id !== null && stack.some((l) => l.id === id);
+    const current = this._doc.activeLayerId;
+    const active = wanted === null || (wanted !== undefined && kept(wanted)) ? wanted : kept(current) ? current : stack[stack.length - 1]!.id;
     const merge = opts.mergeKey === undefined ? undefined : { mergeKey: `layers:${opts.mergeKey}`, mergeWindowMs: opts.mergeWindowMs };
-    const ok = this.run(() => new StackCommand(opts.label, captureStack(this._doc), { layers: layers.slice(), activeLayerId: active }), merge);
+    const ok = this.run(() => new StackCommand(opts.label, captureStack(this._doc), { layers: stack, activeLayerId: active }), merge);
     return ok ? this.history.currentId : null;
   }
 
@@ -839,7 +843,8 @@ export class Engine {
    * The preview goes stale — the original restored, a `preview` event with
    * state 'stale' — as soon as anything else changes the document or moves
    * the history: an edit of any layer (including locking or deleting its
-   * own), a gesture of an editing tool, redo / jump / clear, a new document.
+   * own), a gesture of an editing tool, a redo or jump that moves the
+   * history, clearing it, a new document.
    * Undo while it shows a change records it and undoes it at once, so redo
    * brings it back. Returns null (with a message) for a missing, text or
    * locked layer.
@@ -1139,7 +1144,8 @@ export class Engine {
 
   redo(): boolean {
     if (this.disposed) return false;
-    this.expirePreview();
+    // Nothing to redo leaves an open preview alone.
+    if (this.history.canRedo) this.expirePreview();
     this.settle('commit');
     this.closeTextEdit(false);
     const changes = this.history.redo(this._doc);
@@ -1152,7 +1158,8 @@ export class Engine {
   /** Jumps to a history position (0 = oldest reachable state). */
   jumpTo(index: number): void {
     if (this.disposed) return;
-    this.expirePreview();
+    // Staying where it is leaves an open preview alone.
+    if (Math.max(0, Math.min(this.history.length, Math.floor(index))) !== this.history.index) this.expirePreview();
     this.settle('commit');
     this.closeTextEdit(false);
     const changes = this.history.jumpTo(this._doc, index);
@@ -1167,9 +1174,10 @@ export class Engine {
   }
 
   /**
-   * Seals the newest entry: the next change starts a new step even if it
-   * uses the same merge key within the merge window (call it when a new
-   * slider drag begins, so two drags never become one step).
+   * Seals the newest entry (the one undo would revert next): the next change
+   * starts a new step even if it uses the same merge key within the merge
+   * window (call it when a new slider drag begins, so two drags never become
+   * one step).
    */
   sealHistory(): void {
     this.history.sealTop();

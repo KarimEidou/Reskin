@@ -326,6 +326,46 @@ describe('EditorSession style recipes', () => {
     expect(Array.from(c.data.subarray(0, 4))).toEqual([10, 20, 30, 255]);
     s.dispose();
   });
+
+  it('a kept preview adds its step to the recipe of its own design', async () => {
+    const { s } = await queued();
+    s.recipe = recipe('Neon');
+    const preview = s.engine.beginPreview('Invert', { layerId: s.engine.activeLayer!.id })!;
+    preview.update((surface) => surface.fill(10, 20, 30, 255));
+    s.previewRecipe = { preview, recipe: () => chainRecipes(s.recipe, filterRecipe('invert', 'Invert', {})) };
+    await s.select(1);
+    expect(s.previewRecipe).toBeNull();
+    expect(s.recipe).toBeNull();
+    await s.select(0);
+    expect(s.recipe?.label).toBe('Neon + Invert');
+    // A preview that is cancelled, or kept without a registered step, leaves the recipe alone.
+    const other = s.engine.beginPreview('Blur')!;
+    other.update((surface) => surface.fill(1, 2, 3, 255));
+    s.previewRecipe = { preview: other, recipe: () => recipe('Wrong') };
+    other.cancel();
+    expect(s.keepPreview()).toBe(false);
+    s.engine.beginPreview('Sharpen')!.update((surface) => surface.fill(4, 5, 6, 255));
+    expect(s.keepPreview()).toBe(true);
+    expect(s.recipe?.label).toBe('Neon + Invert');
+    s.dispose();
+  });
+
+  it('"Apply style to all" includes an adjustment still being tuned', async () => {
+    const { s } = await queued();
+    const look = recipe('Neon');
+    s.recipe = look;
+    const preview = s.engine.beginPreview('Invert')!;
+    preview.update((surface) => surface.fill(10, 20, 30, 255));
+    const tuned = recipe('Neon + Invert');
+    s.previewRecipe = { preview, recipe: () => tuned };
+    const res = await s.applyStyleToAll();
+    expect(res).toEqual({ applied: 2, failed: 0 });
+    expect(look.apply).not.toHaveBeenCalled();
+    expect(tuned.apply).toHaveBeenCalledTimes(2);
+    expect(preview.state).toBe('committed');
+    expect(s.recipe).toBe(tuned);
+    s.dispose();
+  });
 });
 
 describe('EditorSession workers', () => {

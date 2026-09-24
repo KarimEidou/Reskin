@@ -5,7 +5,7 @@
 
 import type { Page } from '@playwright/test';
 import type { SidebarTab } from '../src/editor/state/session.svelte';
-import { compositeHash, docToPage, history, layerHash, layers, openEditor, openItem, openTab, shoot, sidebar } from './panels-driver';
+import { compositeHash, docToPage, freezeClock, history, layerHash, layers, openEditor, openItem, openTab, shoot, sidebar } from './panels-driver';
 import { expect, openPage, SAMPLE_PATHS, simulateClose, test } from './support/fixtures';
 
 const TABS: SidebarTab[] = ['layers', 'color', 'adjust', 'effects', 'styles', 'backdrop', 'stickers', 'history'];
@@ -119,7 +119,9 @@ test.describe('layers', () => {
       }
     });
     const thumb = (name: string) => row(page, name).getByTestId('layer-thumb');
-    await expect(thumb('Left')).toHaveAttribute('title', /Ctrl\+click/);
+    // The thumbnail explains itself on hover.
+    await thumb('Left').hover();
+    await expect(page.getByRole('tooltip')).toContainText('Ctrl+click: select this layer’s pixels');
     /** Which of: only Left, both, only Right, neither are selected. */
     const selected = () =>
       page.evaluate(() => {
@@ -150,6 +152,8 @@ test.describe('layers', () => {
   });
 
   test('keyboard steps on the opacity slider are one undo step; every drag is a step of its own', async ({ page }) => {
+    // Every step lands inside the merge window, however slow the machine.
+    await freezeClock(page);
     await openEditor(page);
     const slider = page.getByTestId('layers-panel').getByRole('slider', { name: 'Opacity' });
     await slider.focus();
@@ -256,6 +260,15 @@ test.describe('adjust', () => {
     await expect.poll(() => layerHash(page)).toBe(preview);
   });
 
+  test('leaving the panel keeps the adjustment as one step of the design and of its recipe', async ({ page }) => {
+    await startInvert(page);
+    const inverted = await layerHash(page);
+    await openTab(page, 'styles');
+    expect(await layerHash(page)).toBe(inverted);
+    expect((await history(page)).labels).toEqual(['Invert']);
+    await expect(page.getByTestId('styles-panel')).toContainText('“Apply style to all” will use: Invert');
+  });
+
   test('Cancel restores the layer byte for byte and leaves no history', async ({ page }) => {
     await openEditor(page);
     await openTab(page, 'adjust');
@@ -333,6 +346,8 @@ test.describe('adjust', () => {
 
 test.describe('effects', () => {
   test('add, toggle and remove layer effects', async ({ page }) => {
+    // Every step lands inside the merge window, however slow the machine.
+    await freezeClock(page);
     await openEditor(page);
     await openTab(page, 'effects');
     const plain = await compositeHash(page);

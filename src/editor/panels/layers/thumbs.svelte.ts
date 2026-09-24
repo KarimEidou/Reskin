@@ -124,8 +124,8 @@ export class LayerThumbs {
       this.thumbs = next;
     } catch (e) {
       // A cancelled batch is retried (unless the worker is gone for good); a failing one is not (no busy loop).
-      if (isCancelled(e) && !this.worker.disposed) ids.forEach((id) => this.dirty.add(id));
-      else console.warn('layer thumbnails failed', e);
+      if (!isCancelled(e)) console.warn('layer thumbnails failed', e);
+      else if (!this.worker.disposed) ids.forEach((id) => this.dirty.add(id));
     } finally {
       this.busy = false;
       if (this.dirty.size && !this.disposed) this.schedule();

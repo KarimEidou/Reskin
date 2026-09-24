@@ -113,6 +113,23 @@ describe('Engine.replaceLayers', () => {
     expect(labels(engine)).toEqual(['Move', 'Replace']);
   });
 
+  it('leaves out a text layer that closing the inline editor removes (the stack was built with it)', () => {
+    const { engine, id } = setup();
+    // A text layer just added and left empty: closing its editor rolls it back.
+    const text = engine.addTextLayer({ text: '' })!;
+    engine.beginTextEdit(text);
+    const extra = solidLayer(engine, 'Sticker', [1, 2, 3, 255]);
+    const layers = [...engine.doc.layers, extra];
+    // Its editor's layer was active: it cannot stay active once it is gone.
+    engine.replaceLayers(layers, { label: 'Add sticker', activeLayerId: engine.doc.activeLayerId });
+    expect(engine.textEditLayerId).toBeNull();
+    expect(engine.doc.layers.map((l) => l.id)).toEqual([id, extra.id]);
+    expect(engine.doc.activeLayerId).toBe(id);
+    expect(labels(engine)).toEqual(['Add sticker']);
+    engine.undo();
+    expect(engine.doc.layers.map((l) => l.id)).toEqual([id]);
+  });
+
   describe('merging', () => {
     afterEach(() => {
       vi.useRealTimers();
@@ -173,6 +190,18 @@ describe('Engine.sealHistory', () => {
     engine.sealHistory();
     engine.replaceLayers([solidLayer(engine, 'B', [0, 255, 0, 255])], opts);
     expect(labels(engine)).toEqual(['Style', 'Style']);
+  });
+
+  it('seals the step an undo exposes, so the next drag does not merge into it', () => {
+    const { engine, id } = setup();
+    engine.setLayerProps(id, { opacity: 0.9 }, { merge: 'opacity' });
+    engine.addLayer();
+    engine.undo();
+    engine.sealHistory();
+    engine.setLayerProps(id, { opacity: 0.5 }, { merge: 'opacity' });
+    expect(engine.historyEntries).toHaveLength(2);
+    engine.undo();
+    expect(engine.getLayer(id)!.opacity).toBe(0.9);
   });
 
   it('is harmless on an empty history', () => {
@@ -339,8 +368,10 @@ describe('Engine.beginPreview', () => {
   });
 
   describe('goes stale (original restored, event observed)', () => {
-    function started() {
+    /** A preview showing a change; `prepare` runs on the engine first. */
+    function started(prepare?: (engine: Engine, id: string) => void) {
       const s = setup();
+      prepare?.(s.engine, s.id);
       const original = s.layer().surface.data.slice();
       const p = s.engine.beginPreview('Adjust: Test')!;
       p.update(image(variant(original, 40)));
@@ -379,14 +410,19 @@ describe('Engine.beginPreview', () => {
     });
 
     it('when the history moves underneath it (redo, jump, clear, another edit)', () => {
+      // A step that redo / a jump can bring back.
+      const undone = (e: Engine, id: string) => {
+        e.setLayerProps(id, { opacity: 0.5 });
+        e.undo();
+      };
       for (const move of [
         (e: Engine) => e.redo(),
-        (e: Engine) => e.jumpTo(0),
+        (e: Engine) => e.jumpTo(1),
         (e: Engine) => e.clearHistory(),
         (e: Engine) => e.selectAll(),
         (e: Engine) => e.addLayer(),
       ]) {
-        const { engine, layer, original, p, staleSeen } = started();
+        const { engine, layer, original, p, staleSeen } = started(undone);
         move(engine);
         expect(p.state).toBe('stale');
         expect(staleSeen()).toBe(true);
@@ -414,6 +450,16 @@ describe('Engine.beginPreview', () => {
         engine.pointerUp(pointer(100, 100));
       }
       expect(p.state).toBe('open');
+    });
+
+    it('but not when redo or a jump to the current step have nothing to do', () => {
+      const { engine, layer, original, p } = started();
+      const shown = layer().surface.data.slice();
+      expect(engine.redo()).toBe(false);
+      engine.jumpTo(engine.historyIndex);
+      expect(p.state).toBe('open');
+      expect(same(layer().surface.data, shown)).toBe(true);
+      expect(same(shown, original)).toBe(false);
     });
   });
 

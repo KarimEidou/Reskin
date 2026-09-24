@@ -61,6 +61,8 @@
   let values = $state<ControlValues>({});
   let busy = $state(false);
   let live: LayerPreview | null = null;
+  /** The settings of the result on the canvas (what keeping it adds to the recipe). */
+  let shown: Record<string, unknown> = {};
   let seq = 0;
   let latest: Promise<void> = Promise.resolve();
 
@@ -88,14 +90,20 @@
   function open(t: Target): void {
     const l = engine.activeLayer;
     if (!l || l.kind !== 'raster' || l.locked) return;
-    finish(true);
+    keep();
     const info = describe(t, l.name);
     // Commits a pending transform (the user's finished move) first.
     const preview = engine.beginPreview(info.label, { layerId: l.id });
     if (!preview) return;
     live = preview;
     values = initial(t);
+    shown = $state.snapshot(values) as Record<string, unknown>;
     editing = info;
+    // Kept, the adjustment on the canvas joins the design's recipe.
+    session.previewRecipe = {
+      preview,
+      recipe: () => chainRecipes(session.recipe, t.kind === 'filter' ? filterRecipe(t.id, info.label, shown) : helperRecipe(t.id, info.label, shown)),
+    };
     compute();
     void tick().then(() => editorEl?.querySelector<HTMLElement>('input, button:not(.back), select')?.focus());
   }
@@ -124,7 +132,8 @@
       (px) => {
         if (token !== seq || live !== edit) return;
         busy = false;
-        if (!edit.update(px)) staleEnd();
+        if (edit.update(px)) shown = params;
+        else staleEnd();
       },
       (err: unknown) => {
         if (isFilterCancelled(err) || isCancelled(err)) return;
@@ -140,6 +149,12 @@
     session.filters.cancel('adjust');
     session.panels.cancel('adjust-helper');
     seq++;
+    close();
+  }
+
+  /** Closes the settings: the preview and its recipe step are no longer ours. */
+  function close(): void {
+    if (session.previewRecipe?.preview === live) session.previewRecipe = null;
     live = null;
     editing = null;
     busy = false;
@@ -167,21 +182,14 @@
   }
 
   async function apply(): Promise<void> {
-    const e = editing;
     const edit = live;
-    if (!e || !edit) return;
+    if (!editing || !edit) return;
     await latest;
     if (live !== edit) return;
     park();
-    const kept = edit.commit();
-    const params = $state.snapshot(values) as Record<string, unknown>;
-    if (kept) {
-      const step = e.target.kind === 'filter' ? filterRecipe(e.target.id, e.label, params) : helperRecipe(e.target.id, e.label, params);
-      session.recipe = chainRecipes(session.recipe, step);
-    }
-    live = null;
-    editing = null;
-    busy = false;
+    // One undo step, and a step of the design's recipe.
+    if (engine.preview === edit) session.keepPreview();
+    close();
   }
 
   function cancel(): void {
@@ -190,25 +198,20 @@
     session.panels.cancel('adjust-helper');
     seq++;
     live?.cancel();
-    live = null;
-    editing = null;
-    busy = false;
+    close();
   }
 
-  /** Leaving the panel keeps what is on the canvas. */
-  function finish(keep: boolean): void {
+  /** Leaving the panel (or opening another adjustment) keeps what is on the canvas, as Apply does. */
+  function keep(): void {
     if (!live) return;
     session.filters.cancel('adjust');
     session.panels.cancel('adjust-helper');
     seq++;
-    if (keep) live.commit();
-    else live.cancel();
-    live = null;
-    editing = null;
-    busy = false;
+    if (engine.preview === live) session.keepPreview();
+    close();
   }
 
-  onDestroy(() => finish(true));
+  onDestroy(keep);
 
   function onEditorKey(e: KeyboardEvent): void {
     if (e.key === 'Escape' && !e.defaultPrevented) {

@@ -215,7 +215,8 @@ the lists, so both directions are byte-identical. Style presets, inserted
 stickers and backdrops use it (`applyPresetResult`, `insertLayer` in
 `$engine/presets`). The active layer defaults to the current one when it is
 kept, else the top layer. A pending transform and an inline text edit are
-settled first. Replacements with the same `mergeKey` within
+settled first (a text layer left empty that closing the editor removes stays
+removed, even when the new list was built with it). Replacements with the same `mergeKey` within
 `mergeWindowMs` (default 1000; `Infinity` = while it is the latest change)
 merge into one entry that keeps the first one's "before" and id — the
 Styles panel re-styles an applied look in place this way. Throws
@@ -304,8 +305,9 @@ and any other open preview. The engine ends a preview itself — restoring the
 original, state `'stale'` — as soon as anything else would change the
 document or move the history: any edit through the history (including
 locking or deleting its layer), a gesture of an editing tool (hand, zoom and
-eyedropper keep it), redo, `jumpTo`, `clearHistory`, a new document,
-`dispose()`. So tools never capture preview pixels as their "before".
+eyedropper keep it), a redo or `jumpTo` that moves the history,
+`clearHistory`, a new document, `dispose()`. So tools never capture preview
+pixels as their "before".
 **Undo** while it shows a change commits it and undoes it at once (redo
 brings it back); an unchanged preview just ends and undo proceeds.
 
@@ -323,7 +325,8 @@ edits store only changed 64×64 tiles; the stack drops its oldest entries past
 Continuous controls pass a merge key (`setLayerProps(…, { merge })`,
 `replaceLayers(…, { mergeKey })`) so one drag is one entry; call
 `sealHistory()` when a new drag begins so two drags within the merge window
-stay two steps (keyboard steps keep merging). Read `history` for
+stay two steps (keyboard steps keep merging). It seals the step undo would
+revert next, so after an undo the new drag cannot merge into an older step. Read `history` for
 information only — change it through the engine (`replaceLayers`, previews,
 `sealHistory`), never with `history.push` / `discardRedo`.
 

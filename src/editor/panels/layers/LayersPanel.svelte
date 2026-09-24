@@ -30,6 +30,7 @@
   import Menu from '$lib/ui/Menu.svelte';
   import Select from '$lib/ui/Select.svelte';
   import Slider from '$lib/ui/Slider.svelte';
+  import Tooltip from '$lib/ui/Tooltip.svelte';
   import NumField from '../common/NumField.svelte';
   import ToolButton from '../common/ToolButton.svelte';
   import { getSession } from '../../state/context';
@@ -45,6 +46,7 @@
 
   const ROW = 46; // row height incl. gap, px
   const THUMB = 34;
+  const THUMB_HINT = 'Ctrl+click: select this layer’s pixels (Shift adds, Alt subtracts, both intersect)';
 
   const BLEND_LABELS: Record<BlendMode, string> = {
     normal: 'Normal',
@@ -381,9 +383,11 @@
           onpointercancel={() => (drag = null)}
         >
           <span class="grip" aria-hidden="true"><GripVertical size={14} /></span>
-          <span class="thumb-hit" title="Ctrl+click: select this layer’s pixels (Shift adds, Alt subtracts, both intersect)" data-testid="layer-thumb">
-            <PixelThumb pixels={thumbs?.thumbs[row.id] ?? null} size={THUMB} />
-          </span>
+          <Tooltip text={THUMB_HINT} placement="bottom-start" describe={false}>
+            <span class="thumb-hit" data-testid="layer-thumb">
+              <PixelThumb pixels={thumbs?.thumbs[row.id] ?? null} size={THUMB} />
+            </span>
+          </Tooltip>
           {#if editing !== row.id}
             <span class="name">
               <span class="text">{row.name}</span>

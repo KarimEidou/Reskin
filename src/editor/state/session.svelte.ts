@@ -25,7 +25,7 @@ import { commands } from '$lib/ipc/commands';
 import { settings } from '$lib/settings/store.svelte';
 import { toast } from '$lib/ui/toasts.svelte';
 import { play } from '$lib/sound/synth';
-import { Engine, Surface, type EngineEvent, type EngineEventKind } from '$engine/index';
+import { Engine, Surface, type EngineEvent, type EngineEventKind, type LayerPreview } from '$engine/index';
 import { FilterClient } from '$engine/filters/client';
 import { PanelsClient } from '../panels/worker/client';
 
@@ -144,6 +144,11 @@ export class EditorSession {
   hasDesign = $state(false);
   /** The current design's style recipe (Styles/Backdrop/Adjust panels), replayed by "Apply style to all". */
   recipe = $state.raw<StyleRecipe | null>(null);
+  /**
+   * The design's recipe once the open layer preview is kept: set by the
+   * Adjust panel for the adjustment being tuned, used by `keepPreview`.
+   */
+  previewRecipe: { preview: LayerPreview; recipe: () => StyleRecipe } | null = null;
   /** Bumped on every engine event of that kind; read to re-derive. */
   rev = $state<Rev>(Object.fromEntries(REV_KINDS.map((k) => [k, 0])) as Rev);
 
@@ -311,12 +316,26 @@ export class EditorSession {
     this.hasDesign = true;
   }
 
+  /**
+   * Keeps the open layer preview (an adjustment being tuned) as a step of
+   * the design, and its step in the recipe (see `previewRecipe`). Returns
+   * true when a step was recorded.
+   */
+  keepPreview(): boolean {
+    const preview = this.engine.preview;
+    const pending = this.previewRecipe;
+    this.previewRecipe = null;
+    if (!preview?.commit()) return false;
+    if (pending?.preview === preview) this.recipe = pending.recipe();
+    return true;
+  }
+
   /** Keeps the current item's design and recipe in its queue entry. */
   private async stashCurrent(): Promise<void> {
     const entry = this.current;
     if (!entry) return;
     // An adjustment still being previewed is kept, as when leaving its panel.
-    this.engine.preview?.commit();
+    this.keepPreview();
     entry.recipe = this.recipe;
     try {
       entry.project = await this.engine.serialize();
@@ -495,13 +514,16 @@ export class EditorSession {
    * current item. Each styled item keeps the recipe as its own.
    */
   async applyStyleToAll(): Promise<{ applied: number; failed: number }> {
-    const recipe = this.recipe;
     const result = { applied: 0, failed: 0 };
-    if (!recipe || this.busy) return result;
+    if (this.busy) return result;
     const others = this.queue
       .map((entry, index) => ({ entry, index }))
       .filter(({ entry, index }) => index !== this.currentIndex && entry.status !== 'applied');
     if (others.length === 0) return result;
+    // An adjustment still being tuned is part of the design, so of its recipe.
+    this.keepPreview();
+    const recipe = this.recipe;
+    if (!recipe) return result;
     await this.stashCurrent();
     const back = this.currentIndex;
     const scratch = new Engine();
@@ -691,6 +713,7 @@ export class EditorSession {
     this.busy = null;
     this.original = null;
     this.recipe = null;
+    this.previewRecipe = null;
     this.compare = 'off';
     this.hasDesign = false;
   }

@@ -47,14 +47,17 @@ describe('LayerThumbs', () => {
     const engine = new Engine();
     const client = new PanelsClient(inlineWorker());
     const request = vi.spyOn(client, 'request');
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
     const thumbs = new LayerThumbs(engine, client, 16);
     await vi.advanceTimersByTimeAsync(500);
     client.dispose();
     const before = request.mock.calls.length;
     paint(engine, 200);
     await vi.advanceTimersByTimeAsync(5000);
-    // One attempt for the new pixels, then nothing: no timer loop.
+    // One attempt for the new pixels, then nothing: no timer loop, and no failure reported.
     expect(request.mock.calls.length).toBe(before + 1);
+    expect(warn).not.toHaveBeenCalled();
+    warn.mockRestore();
     thumbs.dispose();
   });
 });

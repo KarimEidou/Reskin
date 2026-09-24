@@ -173,10 +173,12 @@ export class History<T> {
     if (this.applied < this.list.length) this.list.length = this.applied;
   }
 
-  /** Stops the top entry from absorbing later pushes (the next push starts a new entry). */
+  /**
+   * Stops the newest applied entry (and any redo entry) from absorbing later
+   * pushes: the next push starts a new entry, also after an undo.
+   */
   sealTop(): void {
-    const top = this.list[this.list.length - 1];
-    if (top) top.mergeKey = null;
+    for (let i = Math.max(0, this.applied - 1); i < this.list.length; i++) this.list[i].mergeKey = null;
   }
 
   clear(): void {
