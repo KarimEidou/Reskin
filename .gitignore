@@ -1,0 +1,12 @@
+node_modules/
+dist/
+dist-e2e/
+target/
+test-results/
+playwright-report/
+blob-report/
+*.log
+.DS_Store
+.vite/
+src-tauri/gen/schemas/
+coverage/

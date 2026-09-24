@@ -1,0 +1,32 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#7c5cff"/>
+      <stop offset="0.55" stop-color="#4f7dff"/>
+      <stop offset="1" stop-color="#1fc8e3"/>
+    </linearGradient>
+    <linearGradient id="glass" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#ffffff" stop-opacity="0.55"/>
+      <stop offset="1" stop-color="#ffffff" stop-opacity="0.12"/>
+    </linearGradient>
+    <linearGradient id="stroke" x1="0" y1="1" x2="1" y2="0">
+      <stop offset="0" stop-color="#ff7ab6"/>
+      <stop offset="1" stop-color="#ffd36e"/>
+    </linearGradient>
+    <radialGradient id="shine" cx="0.3" cy="0.2" r="0.8">
+      <stop offset="0" stop-color="#ffffff" stop-opacity="0.35"/>
+      <stop offset="1" stop-color="#ffffff" stop-opacity="0"/>
+    </radialGradient>
+  </defs>
+  <!-- squircle base -->
+  <path d="M512 64c300 0 448 148 448 448s-148 448-448 448S64 812 64 512 212 64 512 64z" fill="url(#bg)"/>
+  <path d="M512 64c300 0 448 148 448 448s-148 448-448 448S64 812 64 512 212 64 512 64z" fill="url(#shine)"/>
+  <!-- the glass box -->
+  <rect x="262" y="262" width="500" height="500" rx="128" fill="url(#glass)" stroke="#ffffff" stroke-opacity="0.75" stroke-width="18"/>
+  <!-- brush swoosh re-skinning the box -->
+  <path d="M318 640c96-12 150-70 206-150s120-150 214-170" fill="none" stroke="url(#stroke)" stroke-width="64" stroke-linecap="round"/>
+  <circle cx="318" cy="640" r="32" fill="#ff7ab6"/>
+  <!-- sparkle -->
+  <path d="M720 214l22 58 58 22-58 22-22 58-22-58-58-22 58-22z" fill="#ffffff"/>
+  <path d="M808 360l11 29 29 11-29 11-11 29-11-29-29-11 29-11z" fill="#ffffff" fill-opacity="0.85"/>
+</svg>
