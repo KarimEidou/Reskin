@@ -6,26 +6,37 @@
 #[cfg(not(windows))]
 compile_error!("Reskin is a Windows application; build it for a Windows target.");
 
+mod actions;
+mod apply;
+mod capture;
 pub mod cli;
 mod commands;
 mod console;
+mod fullscreen;
 mod helper;
+mod hotkey;
+mod items;
 mod log;
+mod menu;
+mod restore;
 mod selftest;
 mod smoke;
 mod state;
+mod tray;
 pub mod windows;
 
 use std::time::Duration;
 
-use reskin_core::model::Settings;
+use reskin_core::history::Journal;
+use reskin_core::model::EditorView;
+use reskin_core::paths::AppDirs;
 use tauri::Manager;
 
 use crate::cli::AppArgs;
 use crate::state::AppState;
 
 /// Bundle identifier; also the app-data folder name.
-pub const APP_ID: &str = "com.karimeidou.reskin";
+pub const APP_ID: &str = reskin_core::paths::APP_ID;
 
 /// "release 1a2b3c4" / "debug".
 pub fn build_label() -> String {
@@ -40,26 +51,28 @@ pub fn build_label() -> String {
     }
 }
 
-fn load_settings() -> (Settings, bool) {
-    let Some(base) = std::env::var_os("APPDATA") else {
-        return (Settings::default(), true);
-    };
-    let path = std::path::Path::new(&base)
-        .join(APP_ID)
-        .join("settings.json");
-    match std::fs::read(&path) {
-        Ok(bytes) => (serde_json::from_slice(&bytes).unwrap_or_default(), false),
-        Err(_) => (Settings::default(), true),
-    }
-}
-
 pub fn run(args: AppArgs) {
-    let (settings, first_run) = load_settings();
+    log::rotate();
     log::line(&format!(
         "Reskin {} starting ({}) args={args:?}",
         env!("CARGO_PKG_VERSION"),
         build_label()
     ));
+    let dirs = match AppDirs::from_env() {
+        Ok(d) => d,
+        Err(e) => {
+            log::line(&format!("fatal: app data folders unavailable: {e}"));
+            return;
+        }
+    };
+    if let Err(e) = dirs.ensure() {
+        log::line(&format!("creating app data folders failed: {e}"));
+    }
+    let (settings, first_run) = reskin_core::settings::load(&dirs.settings_file());
+    let journal = Journal::load(dirs.journal_file()).unwrap_or_else(|e| {
+        log::line(&format!("journal unreadable ({e}); starting a new one"));
+        Journal::empty(dirs.journal_file())
+    });
     let smoke = args.smoke;
     let prewarm = if smoke {
         Duration::ZERO
@@ -68,13 +81,19 @@ pub fn run(args: AppArgs) {
     } else {
         Duration::from_millis(1500)
     };
-    let state = AppState::new(args, settings, first_run);
+    let edit_paths = args.edit.clone();
+    let state = AppState::new(args, dirs, settings, first_run, journal);
 
     tauri::Builder::default()
         // Must be registered first so a second launch exits before doing work.
-        .plugin(tauri_plugin_single_instance::init(|_app, argv, _cwd| {
+        .plugin(tauri_plugin_single_instance::init(|app, argv, _cwd| {
             let forwarded = AppArgs::parse(&argv);
             log::line(&format!("second instance: {forwarded:?}"));
+            if forwarded.edit.is_empty() {
+                actions::set_box_hidden(app, false);
+            } else {
+                actions::open_paths(app, forwarded.edit);
+            }
         }))
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
@@ -84,34 +103,84 @@ pub fn run(args: AppArgs) {
         ))
         .plugin(tauri_plugin_global_shortcut::Builder::new().build())
         .manage(state)
+        .on_menu_event(|app, event| menu::dispatch(app, event.id().as_ref()))
         .setup(move |app| {
             let handle = app.handle().clone();
-            let settings = app.state::<AppState>().settings();
-            windows::box_window::create(&handle, &settings)?;
-            if smoke {
+            let state = app.state::<AppState>();
+            let settings = state.settings();
+            state.set_system_reduced_motion(!reskin_core::win::wallpaper::client_area_animation());
+
+            let box_win = windows::box_window::create(&handle, &settings)?;
+            state.animator.set_hwnd(windows::raw::hwnd_of(&box_win));
+            if let Err(e) = tray::create(&handle) {
+                log::line(&format!("tray: {e}"));
+            }
+            if !smoke {
+                commands::settings::apply_at_startup(&handle, &settings);
+                fullscreen::start_watcher(&handle);
+            } else {
                 smoke::start_watchdog();
             }
+            restore::reconcile_at_startup(&handle);
+
+            let first_run = state.first_run && !smoke;
             // Pre-warm the editor off the main thread: building a webview
             // from the event-loop thread outside `setup` can deadlock on
             // Windows, and the build call dispatches to the loop anyway.
             std::thread::spawn(move || {
-                std::thread::sleep(prewarm);
+                std::thread::sleep(if first_run || !edit_paths.is_empty() {
+                    Duration::from_millis(300)
+                } else {
+                    prewarm
+                });
                 let settings = handle.state::<AppState>().settings();
                 if let Err(e) = windows::editor_window::create(&handle, &settings) {
                     log::line(&format!("editor pre-warm failed: {e}"));
+                    return;
+                }
+                if first_run {
+                    actions::open_editor(&handle, vec![], EditorView::Welcome);
+                } else if !edit_paths.is_empty() {
+                    actions::open_paths(&handle, edit_paths);
                 }
             });
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
             commands::boot::app_boot,
+            commands::box_cmds::box_drag,
+            commands::box_cmds::box_menu,
+            commands::box_cmds::open_editor,
             commands::editor_cmds::editor_next,
             commands::editor_cmds::editor_ack,
-            commands::system::smoke_ready,
-            commands::system::settings_get,
-            commands::system::settings_set,
+            commands::editor_cmds::editor_close,
+            items::inspect_paths,
+            items::inspect_system_icon,
+            items::item_frames,
+            items::pick_files,
+            items::read_project,
+            apply::apply_icon,
+            apply::apply_icon_elevated,
+            apply::export_file,
+            restore::restore,
+            restore::history_list,
+            restore::refresh_icons,
+            commands::library::library_list,
+            commands::library::library_save,
+            commands::library::library_load,
+            commands::library::library_delete,
+            commands::library::autosave,
+            commands::library::autosave_load,
+            commands::system::wallpaper,
+            commands::system::wallpaper_info,
+            commands::system::system_fonts,
+            commands::system::accent_color,
+            commands::settings::settings_get,
+            commands::settings::settings_set,
+            commands::system::open_external,
             commands::system::set_box_visible,
             commands::system::quit_app,
+            commands::system::smoke_ready,
         ])
         .build(tauri::generate_context!())
         .expect("error while building Reskin")
