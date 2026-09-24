@@ -669,15 +669,19 @@ fn run_flourish<R: Runtime>(
         // Give Explorer a moment to add the new icon to the desktop view.
         std::thread::sleep(Duration::from_millis(250));
     }
-    let spot = target.desktop_item().and_then(|item| {
-        state
-            .sta
-            .run(move || desktop::find_desktop_icon(&item))
-            .ok()
-            .and_then(|r| r.ok())
-            .flatten()
-            .filter(|s| s.visible)
-    });
+    // Both the Recycle Bin query and the icon lookup are shell calls: they
+    // belong on the COM thread.
+    let shown_by = target.clone();
+    let spot = state
+        .sta
+        .run(move || match shown_by.desktop_item() {
+            Some(item) => desktop::find_desktop_icon(&item),
+            None => Ok(None),
+        })
+        .ok()
+        .and_then(|r| r.ok())
+        .flatten()
+        .filter(|s| s.visible);
     let then = if spot.is_some() {
         CollapseThen::Fly
     } else {

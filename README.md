@@ -102,7 +102,8 @@ touches anything and offers the personal copy for shortcuts.
   icons…**, **History → Restore all…**, or run `reskin.exe --restore-all`
   from a terminal — also while Reskin is running. It exits with code 0 when
   every icon is back and 3 otherwise. Public-Desktop items ask for
-  administrator approval once (per 64 items).
+  administrator approval once (per 64 items). An item you have deleted
+  since counts as restored: nothing of it is left to put back.
 
 ### Uninstalling
 
@@ -112,7 +113,10 @@ touches anything and offers the personal copy for shortcuts.
   if Public-Desktop items need it); if any icon can't be put back, it says
   so and keeps its data, so your icons keep working and can still be
   restored. For a silent uninstall that does the same, run
-  `uninstall.exe /S /DELETEAPPDATA`.
+  `uninstall.exe /S /DELETEAPPDATA`. The restore also deletes the
+  Public-Desktop icons it no longer needs (unless a Public Desktop shortcut
+  still shows them); the shared `%ProgramData%\Reskin` folder itself stays,
+  since other accounts on the PC may use its icons.
 - **MSI package:** uninstalling removes the Explorer entry but leaves
   Reskin's data and the icons it applied alone. Use **Restore all icons…**
   and turn off **Start with Windows** first.

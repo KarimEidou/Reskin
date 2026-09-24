@@ -148,13 +148,18 @@ jobs:
           $roaming = Join-Path $env:APPDATA 'com.karimeidou.reskin'
           New-Item -ItemType Directory -Force $roaming | Out-Null
           $journal = Join-Path $roaming 'journal.json'
-          $entry = [ordered]@{
-            id = 'ci-fixture'; kind = 'shortcut'; target = $lnk; name = 'Fixture'; systemIcon = $null
-            iconPath = $ico; original = [ordered]@{ location = $null; index = 0; existed = $false }
-            state = 'applied'; elevated = $false; thumb = $null; designName = $null
-            appliedAt = 1; restoredAt = $null; supersedes = $null
+          function New-Entry($id, $target) {
+            [ordered]@{
+              id = $id; kind = 'shortcut'; target = $target; name = (Split-Path $target -Leaf); systemIcon = $null
+              iconPath = $ico; original = [ordered]@{ location = $null; index = 0; existed = $false }
+              state = 'applied'; elevated = $false; thumb = $null; designName = $null
+              appliedAt = 1; restoredAt = $null; supersedes = $null
+            }
           }
-          [ordered]@{ version = 1; entries = @($entry) } | ConvertTo-Json -Depth 5 | Set-Content -Encoding utf8 $journal
+          # The user has since deleted the second shortcut: nothing is left to
+          # put back there, and it must not keep the data forever.
+          $entries = @((New-Entry 'ci-fixture' $lnk), (New-Entry 'ci-gone' (Join-Path $fixtures 'Gone.lnk')))
+          [ordered]@{ version = 1; entries = $entries } | ConvertTo-Json -Depth 5 | Set-Content -Encoding utf8 $journal
           function Test-FixtureCustomised { $shell.CreateShortcut($lnk).IconLocation -like '*fixture-0123456789ab.ico*' }
 
           # When the icon cannot be put back, the data stays.

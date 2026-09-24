@@ -115,12 +115,17 @@ pub fn modes_for(kind: ItemKind, access: Access, store_app: bool) -> Vec<ApplyMo
 
 fn notes_for(ins: &Inspected) -> Vec<String> {
     let mut notes = Vec::new();
-    match ins.location {
-        ItemLocation::PublicDesktop => notes.push(
+    match (ins.location, ins.access) {
+        // Only what the elevated helper can change is offered elevation
+        // (`access::probe_writable`).
+        (_, Access::NeedsElevation) => notes.push(
             "On the Public Desktop (all users) — changing it needs administrator approval, or Reskin can make a personal copy."
                 .into(),
         ),
-        ItemLocation::TaskbarPin => notes.push("A taskbar pin — Explorer may cache its icon until you sign out.".into()),
+        (ItemLocation::PublicDesktop, _) => {
+            notes.push("On the Public Desktop — every user of this PC sees it.".into())
+        }
+        (ItemLocation::TaskbarPin, _) => notes.push("A taskbar pin — Explorer may cache its icon until you sign out.".into()),
         _ => {}
     }
     if ins.store_app {
@@ -376,6 +381,47 @@ pub(crate) mod tests {
             system_icon: None,
             notes: Vec::new(),
             skipped: None,
+        }
+    }
+
+    fn inspected(kind: ItemKind, location: ItemLocation, access: Access) -> Inspected {
+        Inspected {
+            kind,
+            name: "App".into(),
+            path: PathBuf::from(r"C:\Users\Public\Desktop\App"),
+            target: None,
+            location,
+            access,
+            icon: None,
+            icon_source: reskin_core::model::IconSource::Shell,
+            custom_icon: false,
+            store_app: false,
+            link: None,
+        }
+    }
+
+    #[test]
+    fn only_what_the_helper_can_change_is_said_to_need_administrator_approval() {
+        let asks = |notes: &[String]| notes.iter().any(|n| n.contains("administrator approval"));
+        let notes = notes_for(&inspected(
+            ItemKind::Shortcut,
+            ItemLocation::PublicDesktop,
+            Access::NeedsElevation,
+        ));
+        assert!(asks(&notes), "{notes:?}");
+        // A folder, a program, or a shortcut this user may change: no
+        // elevation is offered for them.
+        for (kind, access) in [
+            (ItemKind::Folder, Access::ReadOnly),
+            (ItemKind::Executable, Access::ReadOnly),
+            (ItemKind::Shortcut, Access::Writable),
+        ] {
+            let notes = notes_for(&inspected(kind, ItemLocation::PublicDesktop, access));
+            assert!(!asks(&notes), "{kind:?} {access:?}: {notes:?}");
+            assert!(
+                notes.iter().any(|n| n.starts_with("On the Public Desktop")),
+                "{notes:?}"
+            );
         }
     }
 

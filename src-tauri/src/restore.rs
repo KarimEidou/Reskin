@@ -86,6 +86,22 @@ pub fn execute(plan: &RestorePlan) -> reskin_core::Result<()> {
     Ok(())
 }
 
+/// Whether the item `plan` restores is gone — deleted, or moved away —
+/// while the drive or share it was on is there: its custom icon went with
+/// it, so nothing is left to put back. An item on a drive (or share) that
+/// is not reachable right now is not gone.
+pub fn is_gone(plan: &RestorePlan) -> bool {
+    if plan.kind == TargetKind::SystemIcon {
+        return false;
+    }
+    let path = Path::new(&plan.target);
+    let missing = matches!(
+        std::fs::symlink_metadata(path),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound
+    );
+    missing && path.ancestors().last().is_some_and(Path::is_dir)
+}
+
 /// The helper op that restores an elevated (Public Desktop) plan.
 fn elevated_op(plan: &RestorePlan) -> reskin_core::Result<job::JobOp> {
     let original = match &plan.to {
@@ -105,7 +121,8 @@ fn elevated_op(plan: &RestorePlan) -> reskin_core::Result<job::JobOp> {
 /// What became of one step run under the journal lock.
 enum Ran {
     Restored,
-    /// Nothing (left) to do: another process got there first.
+    /// Nothing (left) to do: another process got there first, or the item
+    /// is gone ([`is_gone`]).
     Nothing,
     /// A Public-Desktop step, left for the elevated helper.
     Elevated,
@@ -117,14 +134,19 @@ enum Ran {
 ///
 /// `journal` hands out the journal (the app's behind its mutex, or
 /// `--restore-all`'s own); `run` writes a plan's target back on a COM
-/// thread. Every step is planned, run and recorded in one hold of the
-/// journal lock, so it restores what the journal on disk says at that
-/// moment. Public-Desktop steps then go to the elevated helper together
+/// thread; `gone` tells an item that no longer exists ([`is_gone`]): its
+/// whole chain is recorded as restored without touching anything (there
+/// is nothing to go back to), where it would otherwise fail on every
+/// restore and make the uninstaller keep Reskin's data for good. Every
+/// step is planned, run and recorded in one hold of the journal lock, so
+/// it restores what the journal on disk says at that moment.
+/// Public-Desktop steps then go to the elevated helper together
 /// ([`execute_elevated`]).
 pub fn execute_steps<'a>(
     dirs: &AppDirs,
     journal: &dyn Fn() -> MutexGuard<'a, Journal>,
     run: &dyn Fn(&RestorePlan) -> reskin_core::Result<()>,
+    gone: &dyn Fn(&RestorePlan) -> bool,
     progress: &mut dyn FnMut(u32, u32),
     steps: Vec<RestoreStep>,
 ) -> RestoreReport {
@@ -137,6 +159,11 @@ pub fn execute_steps<'a>(
             let Some(plan) = j.plan_step(&step)? else {
                 return Ok(Ran::Nothing);
             };
+            if gone(&plan) {
+                log::line(&format!("restore {}: the item is gone", plan.target));
+                let chain = j.plan_restore_target(&plan.target).unwrap_or(plan);
+                return j.finish_plan(&chain, true).map(|()| Ran::Nothing);
+            }
             if plan.elevated {
                 return Ok(Ran::Elevated);
             }
@@ -351,7 +378,7 @@ pub fn restore_blocking<R: Runtime>(
             );
         }
     };
-    let report = execute_steps(&state.dirs, &journal, &run, &mut progress, steps);
+    let report = execute_steps(&state.dirs, &journal, &run, &is_gone, &mut progress, steps);
     // Items whose chain is gone are no longer "reskinned".
     if let RestoreTarget::Item { item } = target {
         state.items.update(item, |i| i.reskinned = false);
@@ -491,6 +518,7 @@ pub fn reconcile_at_startup<R: Runtime>(app: &AppHandle<R>) {
 #[cfg(test)]
 mod tests {
     use std::cell::RefCell;
+    use std::path::PathBuf;
     use std::sync::Mutex;
 
     use reskin_core::history::NewEntry;
@@ -550,7 +578,14 @@ mod tests {
             }
         };
         let mut progress = Vec::new();
-        let report = execute_steps(&dirs, &lock, &run, &mut |d, t| progress.push((d, t)), steps);
+        let report = execute_steps(
+            &dirs,
+            &lock,
+            &run,
+            &|_| false,
+            &mut |d, t| progress.push((d, t)),
+            steps,
+        );
 
         assert_eq!(*ran.borrow(), [a, c]);
         assert_eq!(report.restored, 1);
@@ -573,6 +608,108 @@ mod tests {
             ]
         );
         drop(journal);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn an_item_that_is_gone_is_recorded_as_restored_without_touching_it() {
+        let root = std::env::temp_dir().join(format!(
+            "reskin-restore-gone-{}-{}",
+            std::process::id(),
+            reskin_core::now_ms() as u64
+        ));
+        let dirs = AppDirs::at(&root);
+        let [kept, deleted] = [
+            r"C:\Users\Kim\Desktop\Kept.lnk",
+            r"C:\Users\Kim\Desktop\Deleted.lnk",
+        ];
+        let mut app = Journal::load(dirs.journal_file()).unwrap();
+        let kept_id = apply(&mut app, kept);
+        // Reskinned twice, then deleted by the user.
+        let chain = [apply(&mut app, deleted), apply(&mut app, deleted)];
+        // Undo the newer change (as the History does), then restore the rest.
+        let mut steps = app.undo_steps(&chain[1]).unwrap();
+        steps.push(RestoreStep::Target(kept.into()));
+
+        let journal = Mutex::new(app);
+        let lock = || journal.lock().unwrap();
+        let ran = RefCell::new(Vec::new());
+        let run = |plan: &RestorePlan| {
+            ran.borrow_mut().push(plan.target.clone());
+            Ok(())
+        };
+        let gone = |plan: &RestorePlan| plan.target == deleted;
+        let mut progress = Vec::new();
+        let report = execute_steps(
+            &dirs,
+            &lock,
+            &run,
+            &gone,
+            &mut |d, t| progress.push((d, t)),
+            steps,
+        );
+
+        // Nothing is written for the deleted item and nothing fails, so a
+        // restore — the uninstaller's too — finds everything back; with
+        // nothing to go back to, its whole chain is done.
+        assert_eq!(*ran.borrow(), [kept]);
+        assert_eq!(report.restored, 1);
+        assert!(report.failed.is_empty(), "{:?}", report.failed);
+        assert_eq!(report.needs_elevation, 0);
+        assert_eq!(progress, [(1, 2), (2, 2)]);
+        let on_disk = Journal::load(dirs.journal_file()).unwrap();
+        for id in chain.iter().chain([&kept_id]) {
+            assert_eq!(on_disk.get(id).unwrap().state, EntryState::Restored);
+        }
+        assert!(on_disk.restore_all_steps().is_empty());
+        drop(journal);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn only_a_missing_item_on_a_drive_that_is_there_is_gone() {
+        let root = std::env::temp_dir().join(format!(
+            "reskin-is-gone-{}-{}",
+            std::process::id(),
+            reskin_core::now_ms() as u64
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let plan = |kind: TargetKind, target: &Path| RestorePlan {
+            entry_id: "e".into(),
+            kind,
+            target: target.display().to_string(),
+            name: "Item".into(),
+            system_icon: None,
+            elevated: false,
+            to: RestoreTo::Original(OriginalIcon::default()),
+            scope: reskin_core::history::PlanScope::Full {
+                chain: vec!["e".into()],
+            },
+        };
+        let there = root.join("There.lnk");
+        std::fs::write(&there, b"x").unwrap();
+        assert!(!is_gone(&plan(TargetKind::Shortcut, &there)));
+        assert!(!is_gone(&plan(TargetKind::Folder, &root)));
+        assert!(is_gone(&plan(
+            TargetKind::Shortcut,
+            &root.join("Deleted.lnk")
+        )));
+        // Its folder went too.
+        assert!(is_gone(&plan(TargetKind::Folder, &root.join(r"Games\Old"))));
+        // A drive that isn't connected: the item may come back with it.
+        let unplugged = ('D'..='Z')
+            .map(|d| PathBuf::from(format!(r"{d}:\")))
+            .find(|drive| !drive.exists())
+            .expect("a free drive letter");
+        assert!(!is_gone(&plan(
+            TargetKind::Shortcut,
+            &unplugged.join(r"Desktop\App.lnk")
+        )));
+        // System icons are always there.
+        assert!(!is_gone(&plan(
+            TargetKind::SystemIcon,
+            Path::new("this-pc")
+        )));
         let _ = std::fs::remove_dir_all(&root);
     }
 }

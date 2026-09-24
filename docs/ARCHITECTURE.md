@@ -325,7 +325,11 @@ Windows (`win/`, `#[cfg(windows)]`, type-checked on Linux with
   changed). Matching pins join the apply's group, also after an elevated
   apply; `box:undo` carries the main entry.
 * `restore.rs`: `execute_steps` plans, runs and records each step under the
-  journal lock; Public-Desktop steps go to the helper in jobs of at most 64
+  journal lock; an item that no longer exists while its drive is there
+  (`is_gone`) has nothing left to put back, so its whole chain is recorded
+  as restored without touching anything (else it would fail every restore
+  and keep the uninstaller from deleting Reskin's data); Public-Desktop
+  steps go to the helper in jobs of at most 64
   ops (a declined prompt ends the batch), the last job also deleting the
   Public-Desktop icons no entry needs any more; their results are recorded
   under the lock only if the step still plans the same. Restore all emits

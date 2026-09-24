@@ -254,7 +254,14 @@ pub fn restore_all(quiet: bool) -> i32 {
     }
     let journal = Mutex::new(journal);
     let lock = || journal.lock().unwrap_or_else(|e| e.into_inner());
-    let report = restore::execute_steps(&dirs, &lock, &restore::execute, &mut |_, _| {}, steps);
+    let report = restore::execute_steps(
+        &dirs,
+        &lock,
+        &restore::execute,
+        &restore::is_gone,
+        &mut |_, _| {},
+        steps,
+    );
     let icons = dirs.icons_dir();
     if let Err(e) = lock().locked(|j| j.gc_icons(&icons)) {
         log::line(&format!("restore-all: gc: {e}"));
