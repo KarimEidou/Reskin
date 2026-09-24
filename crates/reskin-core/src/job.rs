@@ -4,20 +4,23 @@
 //! itself never runs elevated: it writes a self-contained job file
 //! (absolute targets plus the embedded `.ico` bytes) to its jobs folder,
 //! launches itself with `runas`, and reads the result back from
-//! `%ProgramData%\Reskin\results\<job id>.json` ([`result_file`]).
+//! `%ProgramData%\Reskin\results\<job id>.json` ([`result_file`]), a
+//! folder only administrators can write to. It trusts that file only when
+//! it agrees with the helper's exit code ([`result_for`]).
 //!
-//! The elevated side trusts nothing in the job. It reads the file once and
-//! works on those bytes only ([`run_job`]), so nothing can change between
-//! validation and use. [`validate_job`] accepts only `.lnk` / `.url` files
-//! directly on the Public Desktop ([`is_elevation_target`], the same rule
-//! the app's access probe uses), icon names matching
-//! `^[a-z0-9-]{1,64}\.ico$` that are not DOS device names (written into or
-//! deleted from `%ProgramData%\Reskin\icons`; one name never carries two
-//! different icons, and is never both written and deleted, in one job), and
-//! icons that parse and are at most [`ico::MAX_ICO_BYTES`]. [`execute_job`]
-//! then runs the validated ops through a [`JobExec`] (the real one lives in
-//! the app's `helper.rs`). How the helper keeps its file system work away
-//! from links planted in user-writable folders is described in
+//! The elevated side trusts nothing in the job. It checks the path it was
+//! given ([`job_id_of`]), reads the file once and works on those bytes only
+//! ([`run_job`]), so nothing can change between validation and use.
+//! [`validate_job`] accepts only `.lnk` / `.url` files directly on the
+//! Public Desktop ([`is_elevation_target`], the same rule the app's access
+//! probe uses), icon names matching `^[a-z0-9-]{1,64}\.ico$` that are not
+//! DOS device names (written into or deleted from
+//! `%ProgramData%\Reskin\icons`; one name never carries two different
+//! icons, and is never both written and deleted, in one job), and icons
+//! that parse and are at most [`ico::MAX_ICO_BYTES`]. [`execute_job`] then
+//! runs the validated ops through a [`JobExec`] (the real one lives in the
+//! app's `helper.rs`). How the helper keeps its file system work away from
+//! links planted in user-writable folders is described in
 //! `docs/ARCHITECTURE.md` ("Elevation").
 //!
 //! Exit codes of the helper: [`EXIT_OK`], [`EXIT_INVALID`] (unreadable or
@@ -66,8 +69,11 @@ pub const ICONS_DIR: &str = "icons";
 /// Folder of `%ProgramData%\Reskin` the helper writes its results to.
 pub const RESULTS_DIR: &str = "results";
 /// Result files at least this old are removed by the next helper run (the
-/// app reads its result as soon as the helper exits).
+/// app reads its result as soon as the helper exits, but cannot delete it).
 pub const RESULT_TTL: Duration = Duration::from_secs(60 * 60);
+/// Largest result file the app reads: [`MAX_JOB_OPS`] results with long
+/// messages fit many times over.
+pub const MAX_RESULT_FILE_BYTES: u64 = 1024 * 1024;
 
 /// A job file.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -563,14 +569,15 @@ pub fn validate_job(
                 Some(&first) => {
                     let name = paths::file_name_of(dest);
                     let conflict = match (&ops[first], &validated) {
-                        (ValidatedOp::SetIcon { ico: a, .. }, ValidatedOp::SetIcon { ico: b, .. }) => {
-                            (a != b).then(|| {
-                                format!(
-                                    "{name} is also written by operation {} with different content",
-                                    first + 1
-                                )
-                            })
-                        }
+                        (
+                            ValidatedOp::SetIcon { ico: a, .. },
+                            ValidatedOp::SetIcon { ico: b, .. },
+                        ) => (a != b).then(|| {
+                            format!(
+                                "{name} is also written by operation {} with different content",
+                                first + 1
+                            )
+                        }),
                         (ValidatedOp::DeleteIcon { .. }, ValidatedOp::DeleteIcon { .. }) => None,
                         _ => Some(format!(
                             "{name} is both written and deleted (with operation {})",
@@ -789,13 +796,20 @@ pub fn execute_job(job: &ValidatedJob, exec: &mut impl JobExec) -> JobResult {
 // Files
 // ---------------------------------------------------------------------------
 
-/// The id of the job in `job_path`, whose file name must be `<id>.json`
-/// with a valid id ([`is_valid_job_id`]).
-pub fn job_id_of(job_path: &Path) -> Result<String> {
-    let name = job_path
-        .file_name()
-        .and_then(|n| n.to_str())
-        .unwrap_or_default();
+/// The id of the job in `job_path` (the helper's command-line argument):
+/// an absolute path on a local drive, without `..`, naming `<id>.json`
+/// with a valid id ([`is_valid_job_id`]). Network and device paths are
+/// refused before the elevated helper opens anything.
+pub fn job_id_of(job_path: &str) -> Result<String> {
+    if paths::is_unc(job_path)
+        || !paths::is_absolute_drive_path(job_path)
+        || paths::has_parent_traversal(job_path)
+    {
+        return Err(invalid(format!(
+            "{job_path:?} is not an absolute path on a local drive"
+        )));
+    }
+    let name = paths::file_name_of(job_path);
     match name.strip_suffix(".json") {
         Some(id) if is_valid_job_id(id) => Ok(id.to_owned()),
         _ => Err(invalid(format!("{name:?} is not a job file name"))),
@@ -855,9 +869,14 @@ pub fn run_job(
     }
 }
 
+/// The name of job `id`'s result file: `<id>.json`.
+pub fn result_file_name(id: &str) -> String {
+    format!("{id}.json")
+}
+
 /// Where the helper writes the result of job `id`: `<results_dir>\<id>.json`.
 pub fn result_file(results_dir: &Path, id: &str) -> PathBuf {
-    results_dir.join(format!("{id}.json"))
+    results_dir.join(result_file_name(id))
 }
 
 /// The bytes of a result file.
@@ -867,26 +886,43 @@ pub fn encode_result(result: &JobResult) -> Result<Vec<u8>> {
     Ok(bytes)
 }
 
-/// Reads the result of job `id` from `results_dir`; `None` when the helper
-/// left none. A result naming another job is an error.
-pub fn read_result(results_dir: &Path, id: &str) -> Result<Option<JobResult>> {
-    let result: Option<JobResult> = store::read_json(&result_file(results_dir, id))?;
-    match result {
-        Some(r) if r.id != id => Err(Error::Other(format!(
-            "the result for job {id} names job {:?}",
-            r.id
-        ))),
-        other => Ok(other),
-    }
+/// What the app records for job `id` with `ops` ops, which the helper
+/// finished with exit code `code`, given the result file it read (`None`
+/// when there was none it could trust). The file counts only when it is
+/// the result of this job and agrees with the exit code: one op result per
+/// op, or none for a rejected job. Otherwise the exit code alone decides
+/// ([`JobResult::from_exit_code`]).
+pub fn result_for(id: &str, code: i32, ops: usize, file: Option<&[u8]>) -> JobResult {
+    file.and_then(|bytes| serde_json::from_slice::<JobResult>(store::strip_bom(bytes)).ok())
+        .filter(|r| {
+            let consistent = match r.error {
+                Some(_) => !r.ok && r.results.is_empty(),
+                None => r.results.len() == ops && r.ok == r.results.iter().all(|o| o.ok),
+            };
+            consistent && r.id == id && r.exit_code() == code
+        })
+        .unwrap_or_else(|| JobResult::from_exit_code(id, code, ops))
 }
 
 /// A file in the results folder that the helper may remove: a result file
 /// ([`result_file`]) at least [`RESULT_TTL`] old.
 pub fn is_stale_result(file_name: &str, age: Duration) -> bool {
-    file_name
-        .strip_suffix(".json")
-        .is_some_and(is_valid_job_id)
-        && age >= RESULT_TTL
+    file_name.strip_suffix(".json").is_some_and(is_valid_job_id) && age >= RESULT_TTL
+}
+
+/// A name the helper may create, open or delete inside one of its folders:
+/// one path component of at most 255 characters, without separators,
+/// wildcards, control or other characters Windows refuses, not `.`/`..`,
+/// not ending in a dot or space (Windows would strip them and open another
+/// name), and not a DOS device name.
+pub fn is_plain_file_name(name: &str) -> bool {
+    !name.is_empty()
+        && name.chars().count() <= 255
+        && !name
+            .chars()
+            .any(|c| is_illegal_path_char(c) || c == '\\' || c == '/')
+        && !name.ends_with(['.', ' '])
+        && !is_reserved_device_name(name)
 }
 
 /// Whether the final path of an opened file (`GetFinalPathNameByHandleW`,

@@ -613,9 +613,9 @@ pub enum ApplyOutcome {
         entries: Vec<HistoryEntry>,
         /// The box flew to the icon on the desktop (false = celebrated in place).
         landed: bool,
-        /// Matching Start-menu / taskbar-pin shortcuts left unchanged because
-        /// they are read-only (e.g. in the all-users Start menu); absent when
-        /// none were.
+        /// How many matching Start-menu / taskbar-pin shortcuts were left
+        /// unchanged because Windows won't let Reskin change them (e.g. in
+        /// the all-users Start menu); absent when there were none.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         #[cfg_attr(feature = "ts", ts(optional))]
         skipped_pins: Option<u32>,

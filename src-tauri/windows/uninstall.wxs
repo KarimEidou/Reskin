@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Clean-up for the MSI package (the NSIS installer's is in hooks.nsh).
+  Settings > "Reskin this icon" adds an Explorer verb for the user in HKCU
+  that starts reskin.exe; uninstalling removes it with the app. An MSI
+  uninstall keeps Reskin's data and the icons it applied (README,
+  "Uninstalling").
+-->
+<Wix xmlns="http://schemas.microsoft.com/wix/2006/wi">
+  <Fragment>
+    <DirectoryRef Id="TARGETDIR">
+      <Component Id="ReskinUninstallCleanup" Guid="*">
+        <RegistryValue
+          Root="HKCU"
+          Key="Software\com.karimeidou.reskin"
+          Name="UninstallCleanup"
+          Type="integer"
+          Value="1"
+          KeyPath="yes"
+        />
+        <RemoveRegistryKey Action="removeOnUninstall" Root="HKCU" Key="Software\Classes\lnkfile\shell\Reskin" />
+        <RemoveRegistryKey Action="removeOnUninstall" Root="HKCU" Key="Software\Classes\InternetShortcut\shell\Reskin" />
+        <RemoveRegistryKey Action="removeOnUninstall" Root="HKCU" Key="Software\Classes\Directory\shell\Reskin" />
+      </Component>
+    </DirectoryRef>
+  </Fragment>
+</Wix>

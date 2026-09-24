@@ -21,6 +21,12 @@ use crate::commands::CmdResult;
 use crate::state::AppState;
 
 const MAX_ITEMS: usize = 4096;
+/// Most paths one `inspect_paths` call inspects. Each costs shell work on
+/// the single STA thread (icon extraction) and a preview of up to 256 px in
+/// the answer, which the box waits for while the user is still dragging;
+/// 64 keeps even a drop of a whole desktop responsive. How many were left
+/// out is reported in the first item's `skipped`.
+const MAX_INSPECT: usize = 64;
 /// Largest project file Reskin will read.
 const MAX_PROJECT_BYTES: u64 = 64 * 1024 * 1024;
 
@@ -168,6 +174,7 @@ fn to_info(state: &AppState, ins: &Inspected) -> ItemInfo {
         store_app: ins.store_app,
         system_icon: None,
         notes: notes_for(ins),
+        skipped: None,
     }
 }
 
@@ -239,12 +246,31 @@ fn frames_to_ipc(frames: Vec<Rgba>) -> Vec<IconFrame> {
 // Commands
 // ---------------------------------------------------------------------------
 
+/// Inspects the first [`MAX_INSPECT`] of `paths`; the first item says how
+/// many more there were ([`with_skipped`]).
 #[tauri::command]
 pub async fn inspect_paths(app: AppHandle, paths: Vec<String>) -> CmdResult<Vec<ItemInfo>> {
-    let paths: Vec<PathBuf> = paths.into_iter().take(64).map(PathBuf::from).collect();
-    tauri::async_runtime::spawn_blocking(move || inspect_blocking(&app, &paths))
-        .await
-        .map_err(|e| e.to_string())
+    let skipped = paths.len().saturating_sub(MAX_INSPECT);
+    let paths: Vec<PathBuf> = paths
+        .into_iter()
+        .take(MAX_INSPECT)
+        .map(PathBuf::from)
+        .collect();
+    tauri::async_runtime::spawn_blocking(move || {
+        with_skipped(inspect_blocking(&app, &paths), skipped)
+    })
+    .await
+    .map_err(|e| e.to_string())
+}
+
+/// Sets `skipped` on the first item when paths were left out.
+fn with_skipped(mut items: Vec<ItemInfo>, skipped: usize) -> Vec<ItemInfo> {
+    if skipped > 0
+        && let Some(first) = items.first_mut()
+    {
+        first.skipped = Some(u32::try_from(skipped).unwrap_or(u32::MAX));
+    }
+    items
 }
 
 #[tauri::command]
@@ -328,8 +354,40 @@ fn read_limited(path: &Path) -> Result<String, String> {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
+
+    /// A plain desktop shortcut's info.
+    pub(crate) fn info(name: &str) -> ItemInfo {
+        ItemInfo {
+            id: ItemId(name.into()),
+            kind: ItemKind::Shortcut,
+            name: name.into(),
+            path: format!(r"C:\Users\Kim\Desktop\{name}.lnk"),
+            target: None,
+            location: ItemLocation::UserDesktop,
+            access: Access::Writable,
+            modes: vec![ApplyMode::InPlace],
+            icon: None,
+            icon_source: reskin_core::model::IconSource::Shell,
+            custom_icon: false,
+            reskinned: false,
+            store_app: false,
+            system_icon: None,
+            notes: Vec::new(),
+            skipped: None,
+        }
+    }
+
+    #[test]
+    fn paths_left_out_are_counted_on_the_first_item() {
+        let items = with_skipped(vec![info("a"), info("b")], 36);
+        assert_eq!(items[0].skipped, Some(36));
+        assert_eq!(items[1].skipped, None);
+        let items = with_skipped(vec![info("a")], 0);
+        assert_eq!(items[0].skipped, None);
+        assert!(with_skipped(Vec::new(), 3).is_empty());
+    }
 
     #[test]
     fn modes() {

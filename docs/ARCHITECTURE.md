@@ -36,6 +36,14 @@ src-tauri/                      the Tauri app (windows, animator, mailbox, comma
   the message string.
 * Rust → box: events in `src/lib/ipc/events.ts` (`box:flight`, `box:progress`,
   `box:collapse`, `box:shown`, `settings:changed`, `box:undo`).
+* `inspect_paths(paths)` inspects at most the first 64 paths (each costs
+  shell work on the STA and a ≤256 px preview, while the user is still
+  dragging); the first returned item's optional `skipped` says how many
+  were left out. `history_list` reads the journal as it is on disk (another
+  Reskin process may have changed it). `restore({type:'entry', id})` undoes
+  the entry and the entries applied with it (its `group`: the matching
+  pins); `ApplyOutcome.applied.skippedPins` counts matching pins Reskin could
+  not change.
 * Rust → editor: **mailbox only** (`editor_next(after)` long-poll, returns
   `Envelope[]` with increasing `seq`; returns `[{seq, cmd:{type:'heartbeat'}}]`
   after 25 s of silence). The editor processes envelopes strictly in order and
@@ -122,7 +130,9 @@ and more); the report is its only answer.
 
 `box:flight` (`BoxFlight{phase, icon, durationMs, message}`) — depart/land/
 return/home legs of the fly-to-icon, `celebrate`, and `error` (shake, with
-message). `box:progress` (batch ring), `box:collapse` (`BoxCollapse{session,
+message; exactly one per failed apply, sent only once the editor has
+collapsed). `box:progress` (`BoxProgress{done, total}`: the batch ring while
+Restore all runs; `done == total` clears it), `box:collapse` (`BoxCollapse{session,
 then, icon}`, see the close handoff; answered with `box_painted(session)`),
 `box:shown` (keeps a picture taken over with `box:collapse`, else resets the
 box), `settings:changed`, and `box:undo` (payload: history entry id) — after
@@ -204,19 +214,34 @@ Pure (all hosts, unit tested on Linux):
   `entries`, `get`, `failure(id)`, `pending`, `entries_for`, `active_for`,
   `original_for`, `begin(NewEntry) -> id` (persists *pending* first; applying
   over an active entry inherits the chain's first `original`, sets
-  `supersedes`; refuses a second pending entry for the same target), `commit`,
-  `fail`, `mark_restored`; planning: `plan_undo(id)`, `plan_restore_target`,
-  `plan_restore_all` → `RestorePlan { entry_id, kind, target, name,
-  system_icon, elevated, to: RestoreTo::{Original, Icon, Delete}, scope }`,
-  `finish_plan(&plan, ok)`; `reconcile(probe)`; `referenced_icons`,
-  `gc_icons` (10-minute grace), `gc_icons_older_than`.
+  `supersedes`; refuses a second pending entry for the same target;
+  `NewEntry.group` = the apply's main entry for the pins it also changed),
+  `commit`, `fail`, `mark_restored`; planning: `plan_undo(id)`,
+  `plan_restore_target`, `plan_restore_all` → `RestorePlan { entry_id, kind,
+  target, name, system_icon, elevated, to: RestoreTo::{Original, Icon,
+  Delete}, scope }`, `finish_plan(&plan, ok)`; steps planned when they run:
+  `undo_steps(id)` (the entry and its group), `restore_all_steps()`,
+  `plan_step(&RestoreStep::{Undo, Target})`; `reconcile(probe)`,
+  `reconcile_settled(probe, IN_FLIGHT_GRACE)` (leaves young pending entries
+  to the process making them); `referenced_icons`, `gc_icons` (10-minute
+  grace), `gc_icons_older_than`, `icons_released_by(plans, dir)`.
+  **Sharing between processes:** every read-modify-write holds an exclusive
+  lock on `journal.json.lock` (`LockFileEx`; waits up to `LOCK_TIMEOUT` =
+  30 s, then fails saying another Reskin process holds it) and reloads the
+  file first (skipped when its SHA-256 is unchanged); `locked(f)` holds it
+  across several steps, `refresh()` just reloads. The app keeps one
+  `Journal` behind a mutex and takes that first. Holders keep the lock for
+  one read-modify-write or one shell write, never across a UAC prompt.
 * `job` — `ElevatedJob { version, id, created_at, ops }`,
-  `JobOp::{SetShortcutIcon, SetUrlIcon, RestoreShortcutIcon, RestoreUrlIcon}`
-  (`JobOp::set_icon`, `JobOp::restore_icon`), `new_job`, `validate_job`,
-  `trait JobExec`, `execute_job`, `write_job`, `read_job`, `write_result`,
-  `read_result`, `result_path`, and `run_job_file` (the whole
-  `--elevated-apply` helper). Exit codes `EXIT_OK` 0 / `EXIT_INVALID` 2 /
-  `EXIT_FAILED` 3.
+  `JobOp::{SetShortcutIcon, SetUrlIcon, RestoreShortcutIcon, RestoreUrlIcon,
+  DeleteIcon}` (`JobOp::set_icon`, `restore_icon`, `delete_icon`), `new_job`,
+  `validate_job`, `is_elevation_target` (shared with the access probe),
+  `trait JobExec`, `execute_job` (deletions last), `write_job`, `job_id_of`
+  (the helper's argument: a local absolute `…\<id>.json`), `parse_job`,
+  `run_job(id, bytes, …)`, `result_file`, `encode_result`, `result_for(id,
+  code, ops, file)` (the app's reading of a result), `is_stale_result`,
+  `is_plain_file_name`, `final_path_matches`. Exit codes `EXIT_OK` 0 /
+  `EXIT_INVALID` 2 / `EXIT_FAILED` 3.
 
 Windows (`win/`, `#[cfg(windows)]`, type-checked on Linux with
 `--target x86_64-pc-windows-msvc`, run on Windows CI):
@@ -241,7 +266,13 @@ Windows (`win/`, `#[cfg(windows)]`, type-checked on Linux with
 * `sysicons` — `read_system_icon`, `set_system_icon`, `restore_system_icon`,
   `effective_system_icon`.
 * `notify` — `item_updated`, `assoc_changed`, `rebuild_icon_cache() -> Result`.
-* `access` — `probe_writable(path) -> Access`, `location_of(path) -> ItemLocation`.
+* `access` — `probe_writable(path) -> Access` (`NeedsElevation` only for a
+  denied `.lnk` / `.url` directly on the Public Desktop, else `ReadOnly`),
+  `probe_creatable(dir)`, `location_of(path) -> ItemLocation`; for the
+  elevated helper (see "Elevation"): `AdminDir::open(base, parts)` with
+  `read`, `create`, `put`, `remove`, `files`; `TrustedDir::open(dir)` with
+  `check_file`; `read_plain_file(path, max)`; and for the app
+  `read_admin_file(path, max)`.
 * `desktop` — `find_desktop_icon(path) -> Result<Option<DesktopSpot>>` (also
   `::{CLSID}`), `desktop_icon_size()`.
 * `elevate` — `run_elevated(exe, args) -> Result<i32>` (blocks ≤ 5 min; call
@@ -282,9 +313,92 @@ Windows (`win/`, `#[cfg(windows)]`, type-checked on Linux with
   `ScaleFactorChanged`); `windows/mailbox.rs` (seq queue + long-poll);
   `windows/morph.rs` (handoff FSM with acks/timeouts/fallback);
   `windows/animator.rs` (box motion, drag loop, fling/snap, flights).
+* `apply.rs`: Save & Apply. Before anything is journaled or collapsed it
+  probes the target again (`access::probe_writable`, or `probe_creatable`
+  on the desktop for a new shortcut / personal copy): a Public-Desktop link
+  gets an elevation ticket, anything else Windows refuses a `Failed`
+  outcome with a hint. With the flourish a new shortcut is created before
+  the collapse (a failure leaves the editor open); a failure after the
+  collapse reaches the box as exactly one `error` flight; without a
+  visible desktop icon the box celebrates in place and glides home. System
+  icons fly to `::{CLSID}` (the Recycle Bin only in the state whose icon
+  changed). Matching pins join the apply's group, also after an elevated
+  apply; `box:undo` carries the main entry.
+* `restore.rs`: `execute_steps` plans, runs and records each step under the
+  journal lock; Public-Desktop steps go to the helper in jobs of at most 64
+  ops (a declined prompt ends the batch), the last job also deleting the
+  Public-Desktop icons no entry needs any more; their results are recorded
+  under the lock only if the step still plans the same. Restore all emits
+  `box:progress {done, total}` after each step and `done == total` at the
+  end.
+* `helper.rs`: `--elevated-apply`, `run_elevated_job` and `--restore-all`
+  (see "Elevation"; `--restore-all` runs alongside the app thanks to the
+  journal lock, asks once for approval — also under `--quiet` — and exits
+  3 unless everything is back, so the uninstaller keeps Reskin's data).
 * `commands/*.rs`: `boot, box_cmds, editor_cmds, items, apply, library, system, settings`.
 * Permissions: `build.rs` lists every command in `AppManifest::commands`;
   `capabilities/box.json` and `capabilities/editor.json` grant per window.
+
+## Elevation
+
+The app never runs elevated. A Public-Desktop `.lnk` / `.url` the user may
+not change (`probe_writable` → `NeedsElevation`, the same rule as
+`job::is_elevation_target`) is changed by `reskin.exe --elevated-apply
+<job>` started through UAC (`runas`), after the user agreed; so are the
+restores of such items (one prompt per 64 of them, the uninstaller's
+restore included). Following Microsoft's guidance for code that runs
+with administrator rights, the helper treats everything a standard user can
+touch as hostile:
+
+* **Input.** The job path must be a local absolute `…\<id>.json`
+  (`job_id_of`). The file is opened once without following a link at its
+  name, must be a plain file with a single name, is read up to
+  `MAX_JOB_FILE_BYTES`, and only those bytes are parsed and validated
+  (`run_job`): targets directly on the Public Desktop, icon names
+  `[a-z0-9-]{1,64}.ico` that are not device names, icons that parse and
+  are ≤ 1 MiB, local icon locations for restores. A malformed file is
+  reported by position only. Folders come from the known-folder API
+  (`FOLDERID_ProgramData`, `FOLDERID_PublicDesktop`), never from
+  environment variables. The helper writes no log (`%TEMP%` is the
+  user's).
+* **Where it writes.** Only inside `%ProgramData%\Reskin` (`AdminDir`):
+  `icons\` (Public-Desktop icons) and `results\` (its result files). Each
+  folder of that tree is created owned by Administrators with a protected
+  DACL — SYSTEM and Administrators full control, Users read — so standard
+  users can create nothing in it. An existing folder must be a real folder
+  (not a reparse point) owned by Administrators or SYSTEM, else the helper
+  refuses ("delete it so that Reskin can create it again"); its DACL is
+  then reset (earlier versions left it writable for Users, as
+  `%ProgramData%` makes every new folder). The helper holds every folder of
+  the tree open without `FILE_SHARE_DELETE` while it works, so none can be
+  renamed or replaced, and checks that each one's final path continues its
+  parent's.
+* **How it writes.** Every file is opened with
+  `FILE_FLAG_OPEN_REPARSE_POINT`; reparse points, folders and hard-linked
+  files are refused, and so is any file whose final path
+  (`GetFinalPathNameByHandleW`) is not directly in the folder it expects.
+  Files are created with `CREATE_NEW` (owner Administrators, the same
+  DACL), never overwritten: an icon file that already holds exactly the
+  new bytes and belongs to an administrator is kept, anything else by that
+  name is deleted through its own handle (a link goes, never what it leads
+  to) and created anew. `DeleteIcon` ops delete the same way, and only
+  icons no Public Desktop shortcut still shows.
+* **Public Desktop shortcuts** are edited in place by the shell objects
+  (`IShellLinkW` / `CLSID_InternetShortcut`). Only administrators can write
+  to that folder; before each edit the helper still checks that the target
+  is a plain file with a single name directly in it, by final path
+  (`TrustedDir::check_file`).
+* **The result.** The helper writes `results\<job id>.json` there (and
+  removes results older than an hour nobody read) and exits with 0 / 2 / 3.
+  The app, which cannot delete it, reads it only when it is a plain file
+  owned by Administrators or SYSTEM (`read_admin_file`) that agrees with
+  the exit code (`job::result_for`); otherwise the exit code alone decides
+  (a failure then counts every op as failed).
+
+Icons of `%ProgramData%\Reskin\icons` are machine-wide: one content-hashed
+name may serve several accounts' shortcuts. A restore deletes those its own
+journal no longer needs (`icons_released_by`, existing files only), and the
+helper keeps any a Public Desktop shortcut still shows.
 
 ## Web conventions
 

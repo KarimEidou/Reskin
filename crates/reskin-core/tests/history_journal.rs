@@ -12,7 +12,7 @@ use std::time::{Duration, SystemTime};
 use reskin_core::Error;
 use reskin_core::history::{
     GC_GRACE, IN_FLIGHT_GRACE, Journal, MAX_INACTIVE_ENTRIES, NewEntry, PlanScope, Probe,
-    RestoreTo,
+    RestorePlan, RestoreStep, RestoreTo,
 };
 use reskin_core::model::{EntryState, HistoryEntry, OriginalIcon, SystemIconId, TargetKind};
 use reskin_core::store;
@@ -855,8 +855,7 @@ fn journal_cap_falls_back_to_the_oldest_superseded_entries() {
 // ---------------------------------------------------------------------------
 
 const PIN_1: &str = r"C:\Users\Kim\AppData\Roaming\Microsoft\Windows\Start Menu\Programs\App.lnk";
-const PIN_2: &str =
-    r"C:\Users\Kim\AppData\Roaming\Microsoft\Internet Explorer\Quick Launch\User Pinned\TaskBar\App.lnk";
+const PIN_2: &str = r"C:\Users\Kim\AppData\Roaming\Microsoft\Internet Explorer\Quick Launch\User Pinned\TaskBar\App.lnk";
 
 /// An apply of `icon` to `APP` that also changed both pins.
 fn apply_with_pins(j: &mut Journal, icon: &str) -> [String; 3] {
@@ -885,7 +884,15 @@ fn undoing_an_apply_undoes_the_pins_it_changed() {
         Some(main.as_str())
     );
 
-    let plans = j.plan_undo_group(&main).unwrap();
+    let steps = j.undo_steps(&main).unwrap();
+    assert_eq!(
+        steps,
+        [&main, &pin_1, &pin_2].map(|id| RestoreStep::Undo(id.clone()))
+    );
+    let plans: Vec<RestorePlan> = steps
+        .iter()
+        .map(|s| j.plan_step(s).unwrap().unwrap())
+        .collect();
     let targets: Vec<&str> = plans.iter().map(|p| p.target.as_str()).collect();
     assert_eq!(targets, [APP, PIN_1, PIN_2]);
     assert_eq!(plans[0], j.plan_undo(&main).unwrap());
@@ -896,18 +903,79 @@ fn undoing_an_apply_undoes_the_pins_it_changed() {
     for id in [&main, &pin_1, &pin_2] {
         assert_eq!(state(&j, id), EntryState::Restored, "{id}");
     }
+    // Done steps plan nothing.
+    for step in &steps {
+        assert_eq!(j.plan_step(step).unwrap(), None);
+    }
 
     // Undoing a pin on its own leaves the rest of the group alone.
     let [main, pin_1, pin_2] = apply_with_pins(&mut j, "b.ico");
-    assert_eq!(j.plan_undo_group(&pin_1).unwrap().len(), 1);
+    assert_eq!(
+        j.undo_steps(&pin_1).unwrap(),
+        [RestoreStep::Undo(pin_1.clone())]
+    );
     // A pin changed again since is no longer undone with the group.
     let later = apply(&mut j, PIN_2, "c.ico", original("b.ico", 0));
-    let plans = j.plan_undo_group(&main).unwrap();
-    let ids: Vec<&str> = plans.iter().map(|p| p.entry_id.as_str()).collect();
-    assert_eq!(ids, [main.as_str(), pin_1.as_str()]);
+    assert_eq!(
+        j.undo_steps(&main).unwrap(),
+        [RestoreStep::Undo(main.clone()), RestoreStep::Undo(pin_1)]
+    );
     assert_eq!(state(&j, &pin_2), EntryState::Superseded);
     assert_eq!(j.active_for(PIN_2).unwrap().id, later);
-    assert!(j.plan_undo_group("missing").is_err());
+    // Only a target's current icon can be undone.
+    assert!(j.undo_steps(&pin_2).is_err());
+    assert!(j.undo_steps("missing").is_err());
+}
+
+#[test]
+fn steps_are_planned_against_the_journal_as_it_is_when_they_run() {
+    let tmp = TempDir::new("steps");
+    let other = r"C:\Users\Kim\Desktop\Other.lnk";
+    let mut app = Journal::load(tmp.journal_path()).unwrap();
+    let first = apply(&mut app, APP, "a.ico", original("app.exe", 0));
+    let second = apply(&mut app, other, "o.ico", original("o.exe", 0));
+    let steps = app.restore_all_steps();
+    assert_eq!(
+        steps,
+        [
+            RestoreStep::Target(APP.into()),
+            RestoreStep::Target(other.into())
+        ]
+    );
+    let undo_second = app.undo_steps(&second).unwrap();
+
+    // Meanwhile another process restores `APP` and re-applies `other`.
+    let mut cli = Journal::load(tmp.journal_path()).unwrap();
+    let plan = cli.plan_restore_target(APP).unwrap();
+    cli.finish_plan(&plan, true).unwrap();
+    let third = apply(&mut cli, other, "p.ico", original("o.ico", 0));
+
+    // Planned under the lock, each step sees what happened meanwhile.
+    let (restore_app, restore_other, undo) = app
+        .locked(|j| {
+            Ok((
+                j.plan_step(&steps[0])?,
+                j.plan_step(&steps[1])?,
+                j.plan_step(&undo_second[0]),
+            ))
+        })
+        .unwrap();
+    // `APP` was restored elsewhere: nothing left to do.
+    assert_eq!(restore_app, None);
+    // `other` restores its whole chain, the change made elsewhere included.
+    let full = restore_other.unwrap();
+    assert_eq!(full.entry_id, third);
+    assert_eq!(
+        full.scope,
+        PlanScope::Full {
+            chain: vec![second.clone(), third.clone()]
+        }
+    );
+    assert_eq!(full.to, RestoreTo::Original(original("o.exe", 0)));
+    // `second` is no longer the current icon of `other`.
+    let err = undo.unwrap_err().to_string();
+    assert!(err.contains("only the current icon"), "{err}");
+    assert_eq!(state(&app, &first), EntryState::Restored);
 }
 
 #[test]
@@ -916,7 +984,11 @@ fn entries_from_before_groups_still_load() {
     let old = fabricated("old", APP, EntryState::Applied);
     let raw = serde_json::to_value(&old).unwrap();
     assert!(raw.get("group").is_none(), "an unset group is not written");
-    write_journal(&tmp.journal_path(), &[old.clone()], &BTreeMap::new());
+    write_journal(
+        &tmp.journal_path(),
+        std::slice::from_ref(&old),
+        &BTreeMap::new(),
+    );
     let j = Journal::load(tmp.journal_path()).unwrap();
     assert_eq!(j.get("old").unwrap(), &old);
     assert_eq!(j.recovered_backup(), None);
@@ -1025,9 +1097,9 @@ fn reconcile_leaves_changes_another_process_may_still_be_making() {
             IN_FLIGHT_GRACE,
         )
         .unwrap();
-    assert_eq!(report.applied, [done.clone()]);
+    assert_eq!(report.applied, std::slice::from_ref(&done));
     assert_eq!(report.failed, ["stale"]);
-    assert_eq!(report.in_flight, [in_flight.clone()]);
+    assert_eq!(report.in_flight, std::slice::from_ref(&in_flight));
     assert_eq!(state(&cli, &in_flight), EntryState::Pending);
     // The app finishes its apply as if nothing happened.
     app.commit(&in_flight).unwrap();
@@ -1055,8 +1127,18 @@ fn icons_released_by_plans_are_only_this_journals_unneeded_ones() {
     let mut j = Journal::load(tmp.journal_path()).unwrap();
     apply(&mut j, one, &icon("one-aaaaaaaaaaaa.ico"), original("x", 0));
     let one_b = apply(&mut j, one, &icon("one-bbbbbbbbbbbb.ico"), original("x", 0));
-    apply(&mut j, two, &icon("shared-cccccccccccc.ico"), original("y", 0));
-    apply(&mut j, three, &icon("shared-cccccccccccc.ico"), original("z", 0));
+    apply(
+        &mut j,
+        two,
+        &icon("shared-cccccccccccc.ico"),
+        original("y", 0),
+    );
+    apply(
+        &mut j,
+        three,
+        &icon("shared-cccccccccccc.ico"),
+        original("z", 0),
+    );
     // An earlier elevated apply failed after writing its icon.
     let failed = j
         .begin(entry(two, &icon("left-dddddddddddd.ico"), original("y", 0)))

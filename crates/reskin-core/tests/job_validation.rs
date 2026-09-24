@@ -810,12 +810,25 @@ fn job_files_are_named_after_their_id() {
     let j = job::new_job(vec![set_lnk(r"C:\Users\Public\Desktop\App.lnk")]);
     let path = job::write_job(tmp.path(), &j).unwrap();
     assert_eq!(path, tmp.path().join(format!("{}.json", j.id)));
-    assert_eq!(job::job_id_of(&path).unwrap(), j.id);
     assert_eq!(
         job::parse_job(&fs::read(&path).unwrap()).unwrap(),
         j,
         "write_job writes what parse_job reads"
     );
+    // Bad ids are refused before touching the file system.
+    let mut bad = job::new_job(Vec::new());
+    bad.id = "../escape".into();
+    assert!(job::write_job(tmp.path(), &bad).is_err());
+}
+
+#[test]
+fn the_helper_takes_its_job_only_from_a_local_job_file_path() {
+    let jobs = r"C:\Users\Kim\AppData\Local\com.karimeidou.reskin\jobs";
+    assert_eq!(
+        job::job_id_of(&format!(r"{jobs}\0123abcd-job.json")).unwrap(),
+        "0123abcd-job"
+    );
+    assert_eq!(job::job_id_of("c:/jobs/abc.json").unwrap(), "abc");
     for name in [
         "Job.json",
         "a b.json",
@@ -824,16 +837,63 @@ fn job_files_are_named_after_their_id() {
         ".json",
         "abc.json.lnk",
     ] {
-        assert!(
-            job::job_id_of(&tmp.path().join(name)).is_err(),
-            "{name:?}"
-        );
+        let path = format!(r"{jobs}\{name}");
+        let err = job::job_id_of(&path).unwrap_err().to_string();
+        assert!(err.contains("not a job file name"), "{path}: {err}");
     }
-    assert!(job::job_id_of(Path::new("")).is_err());
-    // Bad ids are refused before touching the file system.
-    let mut bad = job::new_job(Vec::new());
-    bad.id = "../escape".into();
-    assert!(job::write_job(tmp.path(), &bad).is_err());
+    for path in [
+        r"\\server\share\jobs\abc.json",
+        r"//server/share/jobs/abc.json",
+        r"\\?\C:\jobs\abc.json",
+        r"\\.\pipe\abc.json",
+        r"C:\jobs\..\abc.json",
+        r"C:\jobs\.. \abc.json",
+        r"jobs\abc.json",
+        r"C:abc.json",
+        "",
+    ] {
+        let err = job::job_id_of(path).unwrap_err().to_string();
+        assert!(err.contains("not an absolute path"), "{path}: {err}");
+    }
+}
+
+#[test]
+fn plain_file_names_are_single_safe_components() {
+    for name in [
+        ICON_NAME,
+        "0123abcd.json",
+        "Reskin",
+        "icons",
+        "a b.txt",
+        "Café.lnk",
+        ".hidden",
+    ] {
+        assert!(job::is_plain_file_name(name), "{name:?}");
+    }
+    assert!(job::is_plain_file_name(&"a".repeat(255)));
+    let long = "a".repeat(256);
+    for name in [
+        "",
+        ".",
+        "..",
+        r"a\b",
+        "a/b",
+        "C:x",
+        "x.ico.",
+        "x ",
+        "con",
+        "NUL.ico",
+        "com1.json",
+        "a*b",
+        "a?b",
+        "a\"b",
+        "a<b",
+        "a|b",
+        "a\u{1}b",
+        &long,
+    ] {
+        assert!(!job::is_plain_file_name(name), "{name:?}");
+    }
 }
 
 #[test]
@@ -850,7 +910,13 @@ fn the_helper_runs_a_job_from_the_bytes_it_read() {
 
     // A byte-order mark (hand-edited files) is fine.
     let with_bom = [b"\xEF\xBB\xBF".as_slice(), &bytes].concat();
-    let result = job::run_job(&j.id, Ok(with_bom), DESKTOP, ICONS, &mut FakeExec::default());
+    let result = job::run_job(
+        &j.id,
+        Ok(with_bom),
+        DESKTOP,
+        ICONS,
+        &mut FakeExec::default(),
+    );
     assert!(result.ok);
 
     // The job must carry the id its file is named after.
@@ -906,25 +972,70 @@ fn the_helper_rejects_invalid_unreadable_and_oversize_jobs() {
 }
 
 #[test]
-fn results_come_back_through_the_results_folder() {
-    let tmp = TempDir::new("results");
+fn the_app_trusts_a_result_file_only_when_it_agrees_with_the_exit_code() {
     assert_eq!(
         job::result_file(Path::new("results"), "abc"),
         Path::new("results").join("abc.json")
     );
-    let validated = validate(vec![set_lnk(r"C:\Users\Public\Desktop\App.lnk")]).unwrap();
-    let result = job::execute_job(&validated, &mut FakeExec::default());
+    assert_eq!(job::result_file_name("abc"), "abc.json");
+    let a = r"C:\Users\Public\Desktop\A.lnk";
+    let b = r"C:\Users\Public\Desktop\B.lnk";
+    let validated = validate(vec![set_lnk(a), restore_lnk(b, None, 0)]).unwrap();
+    let mut exec = FakeExec {
+        fail_set: [b.to_owned()].into(),
+        ..FakeExec::default()
+    };
+    let result = job::execute_job(&validated, &mut exec);
+    assert_eq!(result.exit_code(), EXIT_FAILED);
     let bytes = job::encode_result(&result).unwrap();
-    fs::write(job::result_file(tmp.path(), "job-1"), bytes).unwrap();
-    assert_eq!(job::read_result(tmp.path(), "job-1").unwrap(), Some(result));
-    assert_eq!(job::read_result(tmp.path(), "missing").unwrap(), None);
-    // A file that names another job is not this job's result.
-    fs::copy(
-        job::result_file(tmp.path(), "job-1"),
-        job::result_file(tmp.path(), "job-2"),
-    )
-    .unwrap();
-    assert!(job::read_result(tmp.path(), "job-2").is_err());
+    assert_eq!(
+        job::result_for("job-1", EXIT_FAILED, 2, Some(&bytes)),
+        result
+    );
+    let with_bom = [b"\xEF\xBB\xBF".as_slice(), &bytes].concat();
+    assert_eq!(
+        job::result_for("job-1", EXIT_FAILED, 2, Some(&with_bom)),
+        result
+    );
+
+    // Without a file it can trust, the exit code decides.
+    let mut forged = result.clone();
+    forged.ok = true;
+    let forged = job::encode_result(&forged).unwrap();
+    let cases: [(&str, i32, usize, Option<&[u8]>); 6] = [
+        ("job-1", EXIT_FAILED, 2, None),
+        // Another job's result.
+        ("job-2", EXIT_FAILED, 2, Some(&bytes)),
+        // Another outcome than the helper exited with.
+        ("job-1", EXIT_OK, 2, Some(&bytes)),
+        // Another number of ops than the job had.
+        ("job-1", EXIT_FAILED, 3, Some(&bytes)),
+        // Claims success for a failed op.
+        ("job-1", EXIT_OK, 2, Some(&forged)),
+        ("job-1", EXIT_FAILED, 2, Some(b"{ not json")),
+    ];
+    for (id, code, ops, file) in cases {
+        assert_eq!(
+            job::result_for(id, code, ops, file),
+            JobResult::from_exit_code(id, code, ops),
+            "{id} {code} {ops}"
+        );
+    }
+
+    // A refused job's reason comes through.
+    let refused = JobResult::rejected("job-1", &Error::Other("bad target".into()));
+    let bytes = job::encode_result(&refused).unwrap();
+    assert_eq!(
+        job::result_for("job-1", EXIT_INVALID, 2, Some(&bytes)),
+        refused
+    );
+    let mut padded = refused.clone();
+    padded.results = result.results.clone();
+    let bytes = job::encode_result(&padded).unwrap();
+    assert_eq!(
+        job::result_for("job-1", EXIT_INVALID, 2, Some(&bytes)),
+        JobResult::from_exit_code("job-1", EXIT_INVALID, 2)
+    );
 }
 
 #[test]
@@ -1050,12 +1161,25 @@ fn icon_deletions_are_validated_like_icon_writes() {
     );
     assert_eq!(v.ops[0].target(), None);
     assert_eq!(v.ops[0].link(), None);
-    for name in ["App.ico", "../x.ico", r"..\x.ico", "a/b.ico", "icon.png", ""] {
+    for name in [
+        "App.ico",
+        "../x.ico",
+        r"..\x.ico",
+        "a/b.ico",
+        "icon.png",
+        "",
+    ] {
         assert_rejected(JobOp::delete_icon(name), "icon name");
     }
     assert_rejected(JobOp::delete_icon("nul.ico"), "reserved device name");
     // Deleting one icon twice is harmless; writing and deleting it is not.
-    assert!(validate(vec![JobOp::delete_icon(ICON_NAME), JobOp::delete_icon(ICON_NAME)]).is_ok());
+    assert!(
+        validate(vec![
+            JobOp::delete_icon(ICON_NAME),
+            JobOp::delete_icon(ICON_NAME)
+        ])
+        .is_ok()
+    );
     let lnk = r"C:\Users\Public\Desktop\App.lnk";
     for ops in [
         vec![set_lnk(lnk), JobOp::delete_icon(ICON_NAME)],
@@ -1065,7 +1189,13 @@ fn icon_deletions_are_validated_like_icon_writes() {
         assert!(err.contains("both written and deleted"), "{err}");
         assert!(err.contains("operation 2"), "{err}");
     }
-    assert!(validate(vec![set_lnk(lnk), JobOp::delete_icon("other-0123456789ab.ico")]).is_ok());
+    assert!(
+        validate(vec![
+            set_lnk(lnk),
+            JobOp::delete_icon("other-0123456789ab.ico")
+        ])
+        .is_ok()
+    );
 }
 
 #[test]

@@ -23,12 +23,15 @@
 //!   entry becomes `Superseded` on commit. At most one entry per target is
 //!   `Applied`.
 //! * Restores are planned purely ([`Journal::plan_undo`],
-//!   [`Journal::plan_undo_group`], [`Journal::plan_restore_target`],
-//!   [`Journal::plan_restore_all`]), executed by the caller, then recorded
-//!   with [`Journal::finish_plan`].
+//!   [`Journal::plan_restore_target`], [`Journal::plan_restore_all`]),
+//!   executed by the caller, then recorded with [`Journal::finish_plan`].
+//!   A restore that may meet other processes is asked for as
+//!   [`RestoreStep`]s ([`Journal::undo_steps`],
+//!   [`Journal::restore_all_steps`]), each planned with
+//!   [`Journal::plan_step`] under the lock right before it runs.
 //! * The extra entries of one apply (matching Start-menu and taskbar pins)
 //!   carry the main entry's id as their `group`; undoing the main entry
-//!   undoes them too ([`Journal::plan_undo_group`]).
+//!   undoes them too ([`Journal::undo_steps`]).
 //!
 //! Targets are compared case-insensitively after
 //! [`paths::normalize_for_compare`]; system icons use their slug as the
@@ -39,9 +42,10 @@
 //! read-modify-write therefore holds an exclusive lock on
 //! `journal.json.lock` (`LockFileEx` on Windows) and starts from the file as
 //! it is on disk: each mutation takes the lock and reloads first, and
-//! [`Journal::locked`] holds it across several steps (build a plan,
-//! execute it, record it). A journal never writes back entries another
-//! process has changed since it last read them.
+//! [`Journal::locked`] holds it across several steps (plan a step, execute
+//! it, record it). A journal never writes back entries another process has
+//! changed since it last read them; readers catch up with
+//! [`Journal::refresh`].
 
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::fs::{self, OpenOptions, TryLockError};
@@ -159,6 +163,18 @@ pub enum PlanScope {
     Full { chain: Vec<String> },
 }
 
+/// One restore, planned with [`Journal::plan_step`] under the journal lock
+/// right before it runs, so that it matches the journal as it is on disk
+/// then — whatever other processes did since it was asked for.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RestoreStep {
+    /// Undo this entry ([`Journal::plan_undo`]).
+    Undo(String),
+    /// Put this target back as it was before Reskin changed it
+    /// ([`Journal::plan_restore_target`]).
+    Target(String),
+}
+
 /// A restore to carry out on one target.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RestorePlan {
@@ -257,7 +273,10 @@ impl FileLock {
                 }
                 Err(TryLockError::WouldBlock) => {
                     return Err(Error::Other(format!(
-                        "{} is in use by another Reskin process",
+                        "Reskin's history is in use by another Reskin process (restoring \
+                         icons, or the uninstaller); waited {} s for {}. Try again when it \
+                         has finished.",
+                        timeout.as_secs(),
                         path.display()
                     )));
                 }
@@ -319,7 +338,11 @@ impl Journal {
             held: false,
         };
         // No folder, no journal: don't create one just to lock it.
-        if journal.path.parent().is_some_and(|d| !d.as_os_str().is_empty() && !d.exists()) {
+        if journal
+            .path
+            .parent()
+            .is_some_and(|d| !d.as_os_str().is_empty() && !d.exists())
+        {
             return Ok(journal);
         }
         journal.locked(|_| Ok(()))?;
@@ -713,17 +736,43 @@ impl Journal {
         Ok(self.plan_for(entry, to, scope))
     }
 
-    /// Plans undoing entry `id` ([`Journal::plan_undo`]) together with the
-    /// entries applied with it — its group, e.g. matching pins — that are
-    /// still their targets' applied entries. The entry's own plan is first.
-    pub fn plan_undo_group(&self, id: &str) -> Result<Vec<RestorePlan>> {
-        let mut plans = vec![self.plan_undo(id)?];
-        for e in &self.entries {
-            if e.group.as_deref() == Some(id) && e.state == EntryState::Applied {
-                plans.push(self.plan_undo(&e.id)?);
-            }
+    /// The steps undoing entry `id` together with the entries applied with
+    /// it — its group, e.g. matching pins — that are still their targets'
+    /// applied entries; `id` comes first. Fails, like
+    /// [`Journal::plan_undo`], when `id` is not its target's current icon.
+    pub fn undo_steps(&self, id: &str) -> Result<Vec<RestoreStep>> {
+        self.plan_undo(id)?;
+        let group = self
+            .entries
+            .iter()
+            .filter(|e| e.group.as_deref() == Some(id) && e.state == EntryState::Applied)
+            .map(|e| RestoreStep::Undo(e.id.clone()));
+        Ok(std::iter::once(RestoreStep::Undo(id.to_owned()))
+            .chain(group)
+            .collect())
+    }
+
+    /// One step per target Reskin has an applied change on, oldest first
+    /// (the targets of [`Journal::plan_restore_all`]).
+    pub fn restore_all_steps(&self) -> Vec<RestoreStep> {
+        self.plan_restore_all()
+            .into_iter()
+            .map(|p| RestoreStep::Target(p.target))
+            .collect()
+    }
+
+    /// Plans `step` on the journal as it is now. `None` when nothing is
+    /// left to do: the target has no applied change any more, or the entry
+    /// to undo was restored meanwhile. Undoing an entry that a newer change
+    /// replaced since fails, as [`Journal::plan_undo`] does.
+    pub fn plan_step(&self, step: &RestoreStep) -> Result<Option<RestorePlan>> {
+        match step {
+            RestoreStep::Undo(id) => match self.get(id) {
+                Some(e) if e.state == EntryState::Restored => Ok(None),
+                _ => self.plan_undo(id).map(Some),
+            },
+            RestoreStep::Target(target) => Ok(self.plan_restore_target(target)),
         }
-        Ok(plans)
     }
 
     /// Full restore of the chain whose applied entry is `active`.
@@ -781,9 +830,10 @@ impl Journal {
     /// If the journal changed in between (another apply superseded the
     /// entry), the plan is stale: nothing is recorded and an error is
     /// returned, since marking it would leave two applied entries for one
-    /// target. Build, execute and finish a plan within one
-    /// [`Journal::locked`] call, or rebuild it there right before executing
-    /// it and check that nothing changed.
+    /// target. Plan, execute and finish within one [`Journal::locked`]
+    /// call; a plan executed outside the lock (behind a UAC prompt) is
+    /// planned again there afterwards ([`Journal::plan_step`]) and finished
+    /// only if nothing changed.
     pub fn finish_plan(&mut self, plan: &RestorePlan, ok: bool) -> Result<()> {
         if !ok {
             return Ok(());
@@ -838,7 +888,10 @@ impl Journal {
     /// icon, and failed otherwise. Only for the app at startup, when no
     /// apply can be under way; other processes use
     /// [`Journal::reconcile_settled`].
-    pub fn reconcile(&mut self, probe: impl FnMut(&HistoryEntry) -> Probe) -> Result<ReconcileReport> {
+    pub fn reconcile(
+        &mut self,
+        probe: impl FnMut(&HistoryEntry) -> Probe,
+    ) -> Result<ReconcileReport> {
         self.reconcile_settled(probe, Duration::ZERO)
     }
 
@@ -1076,5 +1129,32 @@ impl Journal {
         store::write_atomic(&self.path, &bytes)?;
         self.seen = Some(paths::sha256_hex(&bytes));
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_held_lock_times_out_with_a_clear_error_and_frees_on_drop() {
+        let dir = std::env::temp_dir().join(format!(
+            "reskin-lock-timeout-{}-{}",
+            std::process::id(),
+            now_ms() as u64
+        ));
+        let path = dir.join("journal.json.lock");
+        let held = FileLock::acquire(&path, Duration::ZERO).unwrap();
+        let started = Instant::now();
+        let err = FileLock::acquire(&path, Duration::from_millis(150))
+            .err()
+            .unwrap()
+            .to_string();
+        assert!(started.elapsed() >= Duration::from_millis(150));
+        assert!(err.contains("in use by another Reskin process"), "{err}");
+        assert!(err.contains("journal.json.lock"), "{err}");
+        drop(held);
+        assert!(FileLock::acquire(&path, Duration::ZERO).is_ok());
+        let _ = fs::remove_dir_all(&dir);
     }
 }

@@ -105,21 +105,74 @@ jobs:
         shell: pwsh
         run: |
           $setup = Get-ChildItem 'target\release\bundle\nsis\*-setup.exe' | Select-Object -First 1
-          Write-Host "installing $($setup.Name)"
-          $p = Start-Process -FilePath $setup.FullName -ArgumentList '/S' -PassThru -Wait
-          if ($p.ExitCode -ne 0) { throw "installer failed: $($p.ExitCode)" }
           $dir = Join-Path $env:LOCALAPPDATA 'Reskin'
           $exe = Join-Path $dir 'reskin.exe'
-          if (-not (Test-Path $exe)) { throw "reskin.exe not installed at $exe" }
+          function Install-Reskin {
+            Write-Host "installing $($setup.Name)"
+            $p = Start-Process -FilePath $setup.FullName -ArgumentList '/S' -PassThru -Wait
+            if ($p.ExitCode -ne 0) { throw "installer failed: $($p.ExitCode)" }
+            if (-not (Test-Path $exe)) { throw "reskin.exe not installed at $exe" }
+          }
+          # Uninstalls silently, ticking "Delete app data" (the uninstaller
+          # first restores every icon Reskin changed, and keeps the data if
+          # it cannot). -Wait also waits for the uninstaller's copy in %TEMP%.
+          function Uninstall-Reskin {
+            Start-Process -FilePath (Join-Path $dir 'uninstall.exe') -ArgumentList '/S', '/DELETEAPPDATA' -Wait
+            for ($i = 0; $i -lt 60 -and (Test-Path $exe); $i++) { Start-Sleep -Milliseconds 500 }
+            if (Test-Path $exe) { throw 'uninstall left reskin.exe behind' }
+          }
+
+          Install-Reskin
           $out = Join-Path $env:TEMP 'reskin-self-test.json'
           $p = Start-Process -FilePath $exe -ArgumentList '--self-test' -RedirectStandardOutput $out -PassThru -Wait
           Get-Content $out
           if ($p.ExitCode -ne 0) { throw "self-test failed: $($p.ExitCode)" }
           $report = Get-Content $out -Raw | ConvertFrom-Json
           if (-not $report.ok) { throw 'self-test reported failures' }
-          $p = Start-Process -FilePath (Join-Path $dir 'uninstall.exe') -ArgumentList '/S' -PassThru -Wait
-          for ($i = 0; $i -lt 60 -and (Test-Path $exe); $i++) { Start-Sleep -Milliseconds 500 }
-          if (Test-Path $exe) { throw 'uninstall left reskin.exe behind' }
+
+          # A shortcut with an icon Reskin applied, journaled as Reskin does.
+          $shell = New-Object -ComObject WScript.Shell
+          $fixtures = Join-Path $env:TEMP 'reskin-uninstall-fixture'
+          New-Item -ItemType Directory -Force $fixtures | Out-Null
+          $lnk = Join-Path $fixtures 'Fixture.lnk'
+          $link = $shell.CreateShortcut($lnk)
+          $link.TargetPath = Join-Path $env:SystemRoot 'notepad.exe'
+          $link.Save()
+          $icons = Join-Path $env:LOCALAPPDATA 'com.karimeidou.reskin\icons'
+          New-Item -ItemType Directory -Force $icons | Out-Null
+          $ico = Join-Path $icons 'fixture-0123456789ab.ico'
+          Copy-Item 'src-tauri\icons\icon.ico' $ico
+          $link = $shell.CreateShortcut($lnk)
+          $link.IconLocation = "$ico,0"
+          $link.Save()
+          $roaming = Join-Path $env:APPDATA 'com.karimeidou.reskin'
+          New-Item -ItemType Directory -Force $roaming | Out-Null
+          $journal = Join-Path $roaming 'journal.json'
+          $entry = [ordered]@{
+            id = 'ci-fixture'; kind = 'shortcut'; target = $lnk; name = 'Fixture'; systemIcon = $null
+            iconPath = $ico; original = [ordered]@{ location = $null; index = 0; existed = $false }
+            state = 'applied'; elevated = $false; thumb = $null; designName = $null
+            appliedAt = 1; restoredAt = $null; supersedes = $null
+          }
+          [ordered]@{ version = 1; entries = @($entry) } | ConvertTo-Json -Depth 5 | Set-Content -Encoding utf8 $journal
+          function Test-FixtureCustomised { $shell.CreateShortcut($lnk).IconLocation -like '*fixture-0123456789ab.ico*' }
+
+          # When the icon cannot be put back, the data stays.
+          Set-ItemProperty $lnk -Name IsReadOnly -Value $true
+          Uninstall-Reskin
+          if (-not (Test-Path $journal)) { throw 'uninstall deleted the app data although an icon could not be restored' }
+          if (-not (Test-Path $ico)) { throw 'uninstall deleted an icon that is still in use' }
+          if (-not (Test-FixtureCustomised)) { throw 'the read-only fixture changed' }
+
+          # Otherwise every icon goes back first, then the data goes.
+          Set-ItemProperty $lnk -Name IsReadOnly -Value $false
+          Install-Reskin
+          Uninstall-Reskin
+          if (Test-FixtureCustomised) { throw "uninstall did not restore the fixture's icon" }
+          for ($i = 0; $i -lt 60 -and (Test-Path $roaming); $i++) { Start-Sleep -Milliseconds 500 }
+          if (Test-Path $roaming) { throw 'uninstall kept the app data' }
+          if (Test-Path (Join-Path $env:LOCALAPPDATA 'com.karimeidou.reskin')) { throw 'uninstall kept the local app data' }
+          Remove-Item -Recurse -Force $fixtures
           Write-Host 'installer round-trip OK'
       - name: Stage artifacts
         shell: pwsh

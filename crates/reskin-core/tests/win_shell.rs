@@ -1,7 +1,8 @@
 //! Windows shell integration against the real shell, file system and HKCU.
 //!
 //! Every test is `#[ignore]`d: they run on Windows CI with
-//! `cargo test -- --include-ignored`. Each works in its own temporary
+//! `cargo test -- --include-ignored` (the elevation tests need
+//! administrator rights, which CI has). Each works in its own temporary
 //! directory, removes what it creates and restores any registry state it
 //! touches (also when an assertion fails, via drop guards). All shell work
 //! goes through one shared [`Sta`], exercising it concurrently.
@@ -17,14 +18,23 @@ use reskin_core::ico::{build_ico, parse_ico};
 use reskin_core::model::{Access, IconSource, ItemKind, ItemLocation, OriginalIcon, SystemIconId};
 use reskin_core::pixels::Rgba;
 use reskin_core::urlini::{UrlFile, decode_text};
+use reskin_core::win::access::{AdminDir, TrustedDir};
 use reskin_core::win::sta::Sta;
 use reskin_core::win::{
     access, contextmenu, desktop, extract, folder, fonts, fullscreen, known, notify, shortcut,
     sysicons, urlfile, wallpaper,
 };
-use windows::Win32::Foundation::{ERROR_SUCCESS, HWND, POINT};
+use windows::Win32::Foundation::{ERROR_SUCCESS, HANDLE, HWND, POINT};
 use windows::Win32::Globalization::{CP_ACP, WC_NO_BEST_FIT_CHARS, WideCharToMultiByte};
 use windows::Win32::Graphics::Dwm::{DWMWA_CLOAKED, DwmGetWindowAttribute};
+use windows::Win32::Security::{
+    DACL_SECURITY_INFORMATION, GetKernelObjectSecurity, GetSecurityDescriptorControl,
+    GetSecurityDescriptorOwner, IsWellKnownSid, OWNER_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR,
+    PSID, SE_DACL_PROTECTED, WinBuiltinAdministratorsSid,
+};
+use windows::Win32::Storage::FileSystem::{
+    FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, READ_CONTROL,
+};
 use windows::Win32::System::Environment::ExpandEnvironmentStringsW;
 use windows::Win32::System::Registry::{
     HKEY, HKEY_CURRENT_USER, KEY_READ, REG_VALUE_TYPE, RRF_NOEXPAND, RRF_RT_ANY, RegCloseKey,
@@ -37,7 +47,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
     DestroyIcon, GA_ROOT, GetAncestor, GetClassNameW, HICON, IMAGE_ICON, LR_LOADFROMFILE,
     LoadImageW, PostQuitMessage, WindowFromPoint,
 };
-use windows::core::{PCSTR, PCWSTR};
+use windows::core::{BOOL, PCSTR, PCWSTR};
 
 // ---------------------------------------------------------------------------
 // Fixtures
@@ -1010,4 +1020,325 @@ fn desktop_icon_lookup() {
             .unwrap(),
         None
     );
+}
+
+// ---------------------------------------------------------------------------
+// Elevation: who is offered it, and the elevated helper's file access.
+//
+// These need administrator rights, as Windows CI has: they write to the
+// Public Desktop, set owners and create symbolic links.
+// ---------------------------------------------------------------------------
+
+/// Runs a command-line tool; the test fails when it does.
+fn run_tool(program: &str, args: &[&str]) {
+    let status = std::process::Command::new(program)
+        .args(args)
+        .status()
+        .unwrap();
+    assert!(status.success(), "{program} {args:?}: {status}");
+}
+
+/// Lets everybody only read the file `path` (no inherited rights either).
+fn deny_writes(path: &Path) {
+    let p = path.display().to_string();
+    run_tool(
+        "icacls",
+        &[&p, "/inheritance:r", "/grant:r", "*S-1-1-0:(R)"],
+    );
+}
+
+/// A file with [`deny_writes`]: its rights are reset and it is removed on drop.
+struct Denied(PathBuf);
+
+impl Denied {
+    fn new(path: PathBuf) -> Denied {
+        std::fs::write(&path, b"x").unwrap();
+        deny_writes(&path);
+        Denied(path)
+    }
+}
+
+impl Drop for Denied {
+    fn drop(&mut self) {
+        let p = self.0.display().to_string();
+        let _ = std::process::Command::new("icacls")
+            .args([p.as_str(), "/reset"])
+            .status();
+        let _ = std::fs::remove_file(&self.0);
+    }
+}
+
+fn set_owner(path: &Path, owner: &str) {
+    run_tool("icacls", &[&path.display().to_string(), "/setowner", owner]);
+}
+
+/// The account running the tests, as icacls names it.
+fn current_user() -> String {
+    format!(
+        r"{}\{}",
+        std::env::var("USERDOMAIN").unwrap(),
+        std::env::var("USERNAME").unwrap()
+    )
+}
+
+const ADMINISTRATORS: &str = "*S-1-5-32-544";
+
+/// (owned by Administrators, DACL protected from inheritance) of `path`
+/// itself (a link is not followed).
+fn security_of(path: &Path) -> (bool, bool) {
+    use std::os::windows::fs::OpenOptionsExt;
+    use std::os::windows::io::AsRawHandle;
+    let file = std::fs::OpenOptions::new()
+        .access_mode(READ_CONTROL.0)
+        .custom_flags((FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT).0)
+        .open(path)
+        .unwrap();
+    let handle = HANDLE(file.as_raw_handle());
+    let info = (OWNER_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION).0;
+    let mut needed = 0u32;
+    // SAFETY (whole block): a size query, then a buffer of that size; the
+    // owner SID points into the buffer, which outlives its use.
+    unsafe {
+        let _ = GetKernelObjectSecurity(handle, info, None, 0, &mut needed);
+        let mut buf = vec![0u64; (needed as usize).div_ceil(8)];
+        let sd = PSECURITY_DESCRIPTOR(buf.as_mut_ptr().cast());
+        GetKernelObjectSecurity(handle, info, Some(sd), needed, &mut needed).unwrap();
+        let mut owner = PSID::default();
+        let mut defaulted = BOOL::default();
+        GetSecurityDescriptorOwner(sd, &mut owner, &mut defaulted).unwrap();
+        let mut control = 0u16;
+        let mut revision = 0u32;
+        GetSecurityDescriptorControl(sd, &mut control, &mut revision).unwrap();
+        (
+            IsWellKnownSid(owner, WinBuiltinAdministratorsSid).as_bool(),
+            control & SE_DACL_PROTECTED.0 != 0,
+        )
+    }
+}
+
+fn mklink_junction(link: &Path, target: &Path) {
+    run_tool(
+        "cmd",
+        &[
+            "/c",
+            "mklink",
+            "/J",
+            &link.display().to_string(),
+            &target.display().to_string(),
+        ],
+    );
+}
+
+#[test]
+#[ignore = "Windows shell integration as administrator (run with --include-ignored)"]
+fn elevation_is_offered_only_for_links_on_the_public_desktop() {
+    let public = known::public_desktop().unwrap();
+    let name = unique("elevate");
+    let lnk = Denied::new(public.join(format!("{name}.lnk")));
+    let url = Denied::new(public.join(format!("{name}.url")));
+    let txt = Denied::new(public.join(format!("{name}.txt")));
+    assert_eq!(access::probe_writable(&lnk.0), Access::NeedsElevation);
+    assert_eq!(access::probe_writable(&url.0), Access::NeedsElevation);
+    // The helper changes nothing but .lnk / .url files there.
+    assert_eq!(access::probe_writable(&txt.0), Access::ReadOnly);
+
+    // A denied shortcut anywhere else — here under %ProgramData%, which
+    // once counted — is read-only.
+    let dir = TempDir(known::program_data().unwrap().join(unique("elevate")));
+    std::fs::create_dir(&dir.0).unwrap();
+    let elsewhere = Denied::new(dir.join("App.lnk"));
+    assert_eq!(access::probe_writable(&elsewhere.0), Access::ReadOnly);
+
+    // Where the user may create files, a new shortcut can be made.
+    assert_eq!(access::probe_creatable(&dir.0), Access::Writable);
+    assert_eq!(
+        access::probe_creatable(&dir.join("missing")),
+        Access::ReadOnly
+    );
+}
+
+#[test]
+#[ignore = "Windows shell integration as administrator (run with --include-ignored)"]
+fn the_helpers_tree_is_created_owned_by_administrators_and_locked_down() {
+    let base = TempDir::new("admin-tree");
+    let icons = AdminDir::open(&base.0, &["Reskin", "icons"]).unwrap();
+    assert!(same_path(icons.path(), &base.join(r"Reskin\icons")));
+    for dir in [base.join("Reskin"), base.join(r"Reskin\icons")] {
+        assert_eq!(security_of(&dir), (true, true), "{}", dir.display());
+    }
+
+    let name = "app-0123456789ab.ico";
+    let file = icons.path().join(name);
+    icons.put(name, b"one").unwrap();
+    assert_eq!(std::fs::read(&file).unwrap(), b"one");
+    assert_eq!(security_of(&file), (true, true));
+    assert_eq!(icons.read(name, 16).unwrap().as_deref(), Some(&b"one"[..]));
+    assert!(icons.read(name, 2).is_err(), "larger than asked for");
+    // The same bytes are kept as they are; other bytes replace them.
+    let written = std::fs::metadata(&file).unwrap().modified().unwrap();
+    icons.put(name, b"one").unwrap();
+    assert_eq!(
+        std::fs::metadata(&file).unwrap().modified().unwrap(),
+        written
+    );
+    icons.put(name, b"two").unwrap();
+    assert_eq!(std::fs::read(&file).unwrap(), b"two");
+    // Nothing is ever overwritten in place.
+    let err = icons.create(name, b"three").unwrap_err().to_string();
+    assert!(err.contains("already exists"), "{err}");
+    assert_eq!(std::fs::read(&file).unwrap(), b"two");
+    let files: Vec<String> = icons.files().unwrap().into_iter().map(|(n, _)| n).collect();
+    assert_eq!(files, [name]);
+    assert!(icons.remove(name).unwrap());
+    assert!(!icons.remove(name).unwrap());
+    assert_eq!(icons.read(name, 16).unwrap(), None);
+    for bad in ["..", r"..\x.ico", "a/b.ico", "nul.ico", "x.ico."] {
+        assert!(icons.put(bad, b"x").is_err(), "{bad}");
+    }
+    drop(icons);
+
+    // A folder an earlier Reskin left writable for Users is locked down.
+    let old = TempDir::new("admin-old");
+    std::fs::create_dir_all(old.join(r"Reskin\results")).unwrap();
+    for dir in [old.join("Reskin"), old.join(r"Reskin\results")] {
+        set_owner(&dir, ADMINISTRATORS);
+        assert_eq!(security_of(&dir), (true, false));
+    }
+    let results = AdminDir::open(&old.0, &["Reskin", "results"]).unwrap();
+    for dir in [old.join("Reskin"), old.join(r"Reskin\results")] {
+        assert_eq!(security_of(&dir), (true, true), "{}", dir.display());
+    }
+    drop(results);
+
+    // A folder another account owns is refused, and nothing is made in it.
+    let foreign = TempDir::new("admin-foreign");
+    std::fs::create_dir(foreign.join("Reskin")).unwrap();
+    set_owner(&foreign.join("Reskin"), &current_user());
+    let err = AdminDir::open(&foreign.0, &["Reskin", "icons"])
+        .err()
+        .unwrap()
+        .to_string();
+    assert!(err.contains("belongs to another account"), "{err}");
+    assert!(!foreign.join(r"Reskin\icons").exists());
+}
+
+#[test]
+#[ignore = "Windows shell integration as administrator (run with --include-ignored)"]
+fn the_helper_never_follows_a_planted_link() {
+    let base = TempDir::new("admin-links");
+    let victim = base.join("victim.txt");
+    std::fs::write(&victim, b"keep").unwrap();
+
+    // A junction where a folder of the tree belongs.
+    let elsewhere = base.join("elsewhere");
+    std::fs::create_dir(&elsewhere).unwrap();
+    mklink_junction(&base.join("Reskin"), &elsewhere);
+    let err = AdminDir::open(&base.0, &["Reskin", "icons"])
+        .err()
+        .unwrap()
+        .to_string();
+    assert!(err.contains("is a link"), "{err}");
+    assert!(!elsewhere.join("icons").exists());
+    std::fs::remove_dir(base.join("Reskin")).unwrap();
+
+    let icons = AdminDir::open(&base.0, &["Reskin", "icons"]).unwrap();
+    let entry = |name: &str| icons.path().join(name);
+    // A symbolic link and a hard link by icon names: read refuses them, put
+    // replaces the link and leaves what it leads to alone.
+    std::os::windows::fs::symlink_file(&victim, entry("soft-0123456789ab.ico")).unwrap();
+    std::fs::hard_link(&victim, entry("hard-0123456789ab.ico")).unwrap();
+    for name in ["soft-0123456789ab.ico", "hard-0123456789ab.ico"] {
+        let err = icons.read(name, 16).unwrap_err().to_string();
+        assert!(err.contains("refusing"), "{name}: {err}");
+        icons.put(name, b"icon").unwrap();
+        assert_eq!(std::fs::read(&victim).unwrap(), b"keep", "{name}");
+        assert_eq!(icons.read(name, 16).unwrap().as_deref(), Some(&b"icon"[..]));
+    }
+    // Removing a link removes the link.
+    std::os::windows::fs::symlink_file(&victim, entry("gone-0123456789ab.ico")).unwrap();
+    assert!(icons.remove("gone-0123456789ab.ico").unwrap());
+    assert!(std::fs::symlink_metadata(entry("gone-0123456789ab.ico")).is_err());
+    assert_eq!(std::fs::read(&victim).unwrap(), b"keep");
+    // A junction by an icon's name is replaced, never entered.
+    let folder = base.join("folder");
+    std::fs::create_dir(&folder).unwrap();
+    std::fs::write(folder.join("file.txt"), b"keep").unwrap();
+    mklink_junction(&entry("junction-0123456789ab.ico"), &folder);
+    icons.put("junction-0123456789ab.ico", b"icon").unwrap();
+    assert_eq!(std::fs::read(folder.join("file.txt")).unwrap(), b"keep");
+    assert_eq!(std::fs::read_dir(&folder).unwrap().count(), 1);
+    assert_eq!(
+        icons
+            .read("junction-0123456789ab.ico", 16)
+            .unwrap()
+            .as_deref(),
+        Some(&b"icon"[..])
+    );
+}
+
+#[test]
+#[ignore = "Windows shell integration as administrator (run with --include-ignored)"]
+fn jobs_results_and_public_desktop_shortcuts_must_be_plain_files() {
+    let dir = TempDir::new("plain-files");
+    // The job: read once, capped, never through a link.
+    let job = dir.join("0123abcd.json");
+    std::fs::write(&job, b"{}").unwrap();
+    assert_eq!(access::read_plain_file(&job, 16).unwrap(), b"{}");
+    let err = access::read_plain_file(&job, 1).unwrap_err().to_string();
+    assert!(err.contains("larger than"), "{err}");
+    std::os::windows::fs::symlink_file(&job, dir.join("soft.json")).unwrap();
+    let err = access::read_plain_file(&dir.join("soft.json"), 16).unwrap_err();
+    assert!(err.to_string().contains("is a link"), "{err}");
+    assert!(access::read_plain_file(&dir.0, 16).is_err(), "a folder");
+    assert!(matches!(
+        access::read_plain_file(&dir.join("missing.json"), 16),
+        Err(Error::NotFound(_))
+    ));
+
+    // A Public Desktop shortcut: a plain file directly in the folder.
+    let trusted = TrustedDir::open(&dir.0).unwrap();
+    let lnk = dir.join("App.lnk");
+    std::fs::write(&lnk, b"x").unwrap();
+    trusted.check_file(&lnk).unwrap();
+    std::os::windows::fs::symlink_file(&lnk, dir.join("Soft.lnk")).unwrap();
+    let err = trusted.check_file(&dir.join("Soft.lnk")).unwrap_err();
+    assert!(err.to_string().contains("is a link"), "{err}");
+    let sub = dir.join("sub");
+    std::fs::create_dir(&sub).unwrap();
+    std::fs::write(sub.join("App.lnk"), b"x").unwrap();
+    let err = trusted.check_file(&sub.join("App.lnk")).unwrap_err();
+    assert!(err.to_string().contains("not directly in"), "{err}");
+    assert!(matches!(
+        trusted.check_file(&dir.join("Missing.lnk")),
+        Err(Error::NotFound(_))
+    ));
+    // Hard links: every name of the file is refused (writing one would
+    // change the others).
+    std::fs::hard_link(&lnk, dir.join("Hard.lnk")).unwrap();
+    for name in ["App.lnk", "Hard.lnk"] {
+        let err = trusted.check_file(&dir.join(name)).unwrap_err();
+        assert!(err.to_string().contains("hard links"), "{name}: {err}");
+    }
+    let err = access::read_plain_file(&lnk, 16).unwrap_err();
+    assert!(err.to_string().contains("hard links"), "{err}");
+
+    // Results: the app reads only an administrator's plain files.
+    let tree = TempDir::new("admin-results");
+    let results = AdminDir::open(&tree.0, &["Reskin", "results"]).unwrap();
+    results.create("abc.json", b"{}").unwrap();
+    assert_eq!(
+        access::read_admin_file(&results.path().join("abc.json"), 16)
+            .unwrap()
+            .as_deref(),
+        Some(&b"{}"[..])
+    );
+    assert_eq!(
+        access::read_admin_file(&results.path().join("none.json"), 16).unwrap(),
+        None
+    );
+    let mine = dir.join("mine.json");
+    std::fs::write(&mine, b"{}").unwrap();
+    set_owner(&mine, &current_user());
+    let err = access::read_admin_file(&mine, 16).unwrap_err().to_string();
+    assert!(err.contains("does not belong to an administrator"), "{err}");
 }

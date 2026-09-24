@@ -9,15 +9,17 @@ use std::time::{Duration, Instant};
 
 use reskin_core::history::NewEntry;
 use reskin_core::model::{
-    Access, ApplyMode, ApplyOutcome, ApplyRequest, BoxFlight, CollapseThen, DesktopSpot,
-    ExportKind, ExportRequest, FlightPhase, HistoryEntry, ItemKind, MotionPref, OriginalIcon,
-    SizedPng, SystemIconId, TargetKind,
+    Access, ApplyMode, ApplyOutcome, ApplyRequest, BoxFlight, CollapseThen, ExportKind,
+    ExportRequest, FlightPhase, HistoryEntry, ItemKind, MotionPref, OriginalIcon, Rect, SizedPng,
+    SystemIconId, TargetKind,
 };
 use reskin_core::pixels::b64_decode;
-use reskin_core::win::{desktop, folder, known, notify, shortcut, sysicons, urlfile};
+use reskin_core::win::{access, desktop, folder, known, notify, shortcut, sysicons, urlfile};
 use reskin_core::{Error, ico, job, store};
 use tauri::{AppHandle, Emitter, Manager, Runtime};
 use tauri_plugin_dialog::DialogExt;
+use windows::Win32::UI::Shell::{SHQUERYRBINFO, SHQueryRecycleBinW};
+use windows::core::PCWSTR;
 
 use crate::commands::CmdResult;
 use crate::items::ItemRecord;
@@ -36,6 +38,7 @@ pub struct PendingElevation {
     design_name: Option<String>,
     preview: Option<String>,
     flourish: bool,
+    update_pins: bool,
     created: Instant,
 }
 
@@ -108,14 +111,58 @@ impl Target {
         }
     }
 
-    /// The file whose desktop icon shows the change (for the flight).
-    fn desktop_path(&self) -> Option<&Path> {
+    /// What the desktop shows the change on, for the flight: the file, or
+    /// a system icon's `::{CLSID}` parsing name — the Recycle Bin's only
+    /// while the bin is in the state (empty / full) whose icon changed.
+    fn desktop_item(&self) -> Option<PathBuf> {
         match self {
-            Target::Link { path, .. } | Target::Folder { path } => Some(path),
-            Target::NewShortcut { dest, .. } | Target::PersonalCopy { dest, .. } => Some(dest),
-            Target::System { .. } => None,
+            Target::Link { path, .. } | Target::Folder { path } => Some(path.clone()),
+            Target::NewShortcut { dest, .. } | Target::PersonalCopy { dest, .. } => {
+                Some(dest.clone())
+            }
+            Target::System { id } => system_desktop_item(*id, recycle_bin_is_full),
         }
     }
+
+    /// Whether Windows lets Reskin make the change now. Probed at apply
+    /// time, before anything is journaled or collapsed: the item may have
+    /// changed since it was inspected.
+    fn probe(&self) -> Access {
+        match self {
+            Target::Link { path, .. } | Target::Folder { path } => access::probe_writable(path),
+            Target::NewShortcut { dest, .. } | Target::PersonalCopy { dest, .. } => dest
+                .parent()
+                .map_or(Access::ReadOnly, access::probe_creatable),
+            Target::System { .. } => Access::Writable,
+        }
+    }
+}
+
+/// The desktop item that shows system icon `id`: `::{CLSID}`, except for a
+/// Recycle Bin variant while the bin is in the other state (or Windows
+/// can't tell which), whose icon the desktop does not show.
+fn system_desktop_item(
+    id: SystemIconId,
+    bin_is_full: impl Fn() -> Option<bool>,
+) -> Option<PathBuf> {
+    let shown = match id {
+        SystemIconId::RecycleBinEmpty => bin_is_full() == Some(false),
+        SystemIconId::RecycleBinFull => bin_is_full() == Some(true),
+        _ => true,
+    };
+    shown.then(|| PathBuf::from(format!("::{}", id.clsid())))
+}
+
+/// Whether the Recycle Bin (all drives) holds items; `None` when Windows
+/// can't tell.
+fn recycle_bin_is_full() -> Option<bool> {
+    let mut info = SHQUERYRBINFO {
+        cbSize: size_of::<SHQUERYRBINFO>() as u32,
+        ..Default::default()
+    };
+    // SAFETY: NULL root = every drive; `info` is a valid out struct.
+    unsafe { SHQueryRecycleBinW(PCWSTR::null(), &mut info) }.ok()?;
+    Some(info.i64NumItems > 0)
 }
 
 /// `<desktop>\<stem><ext>`, or `<stem> (2)<ext>` … when taken.
@@ -327,6 +374,52 @@ fn failed(e: &Error) -> ApplyOutcome {
     }
 }
 
+/// What an apply does given the access probed at apply time.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Gate {
+    Go,
+    /// Ask for administrator approval (a Public-Desktop link).
+    Elevate,
+    /// Windows won't allow it; say so before anything happens.
+    Refuse,
+}
+
+fn gate(access: Access, target: &Target) -> Gate {
+    match access {
+        Access::Writable => Gate::Go,
+        // Only `.lnk` / `.url` files on the Public Desktop are probed so.
+        Access::NeedsElevation if matches!(target, Target::Link { .. }) => Gate::Elevate,
+        Access::NeedsElevation | Access::ReadOnly => Gate::Refuse,
+    }
+}
+
+/// The outcome when Windows won't let Reskin make the change and no
+/// administrator approval would help. Nothing was journaled or collapsed.
+fn refused(rec: &ItemRecord, target: &Target) -> ApplyOutcome {
+    let name = &rec.info.name;
+    let (message, hint) = match target {
+        Target::Link { .. } => (
+            format!("Windows won't let Reskin change \"{name}\"."),
+            Some(
+                "Make a personal copy on your desktop instead: drop the shortcut on the box again and apply it as a personal copy.",
+            ),
+        ),
+        Target::Folder { .. } => (
+            format!("Windows won't let Reskin change the folder \"{name}\"."),
+            Some("Only an account that may change the folder can give it an icon."),
+        ),
+        Target::NewShortcut { .. } | Target::PersonalCopy { .. } => (
+            "Windows won't let Reskin create a shortcut on your desktop.".to_string(),
+            Some("Check that your desktop folder isn't read-only."),
+        ),
+        Target::System { .. } => (format!("Windows won't let Reskin change \"{name}\"."), None),
+    };
+    ApplyOutcome::Failed {
+        message,
+        hint: hint.map(str::to_owned),
+    }
+}
+
 fn flourish_enabled(state: &AppState, requested: bool) -> bool {
     let s = state.settings();
     let reduced = match s.motion {
@@ -385,23 +478,28 @@ fn apply_blocking<R: Runtime>(app: &AppHandle<R>, req: ApplyRequest) -> ApplyOut
         Ok(t) => t,
         Err(outcome) => return outcome,
     };
-    if matches!(target, Target::Link { .. }) && rec.info.access == Access::NeedsElevation {
-        let ticket = state.elevations.put(PendingElevation {
-            rec: rec.clone(),
-            ico,
-            thumb: thumb(&req.images),
-            design_name: req.design_name.clone(),
-            preview,
-            flourish: req.flourish,
-            created: Instant::now(),
-        });
-        return ApplyOutcome::NeedsElevation {
-            ticket,
-            reason: format!(
-                "\"{}\" is on the Public Desktop, shared by all users. Changing it needs administrator approval.",
-                rec.info.name
-            ),
-        };
+    match gate(target.probe(), &target) {
+        Gate::Go => {}
+        Gate::Elevate => {
+            let ticket = state.elevations.put(PendingElevation {
+                rec: rec.clone(),
+                ico,
+                thumb: thumb(&req.images),
+                design_name: req.design_name.clone(),
+                preview,
+                flourish: req.flourish,
+                update_pins: req.update_pins,
+                created: Instant::now(),
+            });
+            return ApplyOutcome::NeedsElevation {
+                ticket,
+                reason: format!(
+                    "\"{}\" is on the Public Desktop, shared by all users. Changing it needs administrator approval.",
+                    rec.info.name
+                ),
+            };
+        }
+        Gate::Refuse => return refused(&rec, &target),
     }
 
     let icon_path = match store::store_icon(&state.dirs.icons_dir(), &rec.info.name, &ico) {
@@ -426,6 +524,7 @@ fn apply_blocking<R: Runtime>(app: &AppHandle<R>, req: ApplyRequest) -> ApplyOut
             elevated: false,
             thumb: thumb(&req.images),
             design_name: req.design_name.clone(),
+            group: None,
         }) {
             Ok(id) => id,
             Err(e) => return failed(&e),
@@ -444,36 +543,57 @@ fn apply_blocking<R: Runtime>(app: &AppHandle<R>, req: ApplyRequest) -> ApplyOut
     };
     let flourish =
         flourish_enabled(&state, req.flourish) && state.morph.phase() == morph::Phase::Open;
-    let (result, landed) = if flourish {
-        run_flourish(app, &target, preview.clone(), do_commit)
+    let (result, shown) = if flourish {
+        run_flourish(app, &target, preview, do_commit)
     } else {
-        (do_commit(), false)
+        (do_commit(), Shown::default())
     };
-    let outcome = finish(app, &rec, &entry_id, result, landed);
-    if let ApplyOutcome::Applied { .. } = &outcome
-        && req.update_pins
-        && let Target::Link { path, url: false } = &target
-    {
-        let extra = apply_to_pins(app, path, &icon_path, &rec, &req);
-        if let ApplyOutcome::Applied { entries, landed } = outcome {
-            let mut all = entries;
-            all.extend(extra);
-            return ApplyOutcome::Applied {
-                entries: all,
-                landed,
-            };
-        }
-    }
+    let outcome = finish(app, &rec, &entry_id, result, shown);
+    let outcome = match &target {
+        Target::Link { path, url: false } if req.update_pins => with_pins(
+            app,
+            outcome,
+            path,
+            &icon_path,
+            &rec,
+            thumb(&req.images),
+            req.design_name.clone(),
+        ),
+        _ => outcome,
+    };
+    announce_undo(app, &outcome);
     outcome
 }
 
-/// Journals the result and builds the outcome.
+/// What the box showed of an apply.
+#[derive(Debug, Clone, Copy, Default)]
+struct Shown {
+    /// It flew to the icon on the desktop.
+    landed: bool,
+    /// The editor collapsed into it: from then on the box is where the
+    /// user looks for what happens.
+    collapsed: bool,
+    /// An `error` flight already told it what went wrong.
+    error: bool,
+}
+
+impl Shown {
+    /// A failure is the box's to tell — with one `error` flight — once the
+    /// editor collapsed into it, unless a flight already told it.
+    fn owes_error_flight(self) -> bool {
+        self.collapsed && !self.error
+    }
+}
+
+/// Journals the result and builds the outcome. A failure after the editor
+/// collapsed reaches the box as exactly one `error` flight carrying the
+/// message; before that the editor, still open, shows it.
 fn finish<R: Runtime>(
     app: &AppHandle<R>,
     rec: &ItemRecord,
     entry_id: &str,
     result: reskin_core::Result<()>,
-    landed: bool,
+    shown: Shown,
 ) -> ApplyOutcome {
     let state = app.state::<AppState>();
     match result {
@@ -489,32 +609,47 @@ fn finish<R: Runtime>(
                 i.reskinned = true;
                 i.custom_icon = true;
             });
-            if let Some(e) = &entry {
-                let _ = app.emit_to(box_window::LABEL, "box:undo", e.id.clone());
-            }
             ApplyOutcome::Applied {
                 entries: entry.into_iter().collect(),
-                landed,
+                landed: shown.landed,
+                skipped_pins: None,
             }
         }
         Err(e) => {
             log::line(&format!("apply failed: {e}"));
-            let _ = state.journal().fail(entry_id, &e.to_string());
-            emit_flight(app, FlightPhase::Error, None, 480, Some(e.to_string()));
+            if let Err(je) = state.journal().fail(entry_id, &e.to_string()) {
+                log::line(&format!("journal fail failed: {je}"));
+            }
+            if shown.owes_error_flight() {
+                emit_flight(app, FlightPhase::Error, None, 480, Some(e.to_string()));
+            }
             failed(&e)
         }
     }
 }
 
-/// Collapses the editor into the box, flies to the icon on the desktop
-/// and commits the change at landing (or celebrates in place when the
-/// icon isn't visible). Returns the commit result and whether it landed.
+/// After a successful apply the box offers **Undo** for its main entry,
+/// which undoes the matching pins with it.
+fn announce_undo<R: Runtime>(app: &AppHandle<R>, outcome: &ApplyOutcome) {
+    if let ApplyOutcome::Applied { entries, .. } = outcome
+        && let Some(main) = entries.first()
+    {
+        let _ = app.emit_to(box_window::LABEL, "box:undo", main.id.clone());
+    }
+}
+
+/// Collapses the editor into the box, flies to the icon on the desktop and
+/// commits the change at landing, or — when the icon isn't visible —
+/// commits, celebrates in place and glides home. A new shortcut has to
+/// exist before it can be found on the desktop, so it is created first,
+/// and a failure there returns before anything collapses. Returns the
+/// commit result and what the box showed.
 fn run_flourish<R: Runtime>(
     app: &AppHandle<R>,
     target: &Target,
     icon: Option<String>,
     commit: impl FnOnce() -> reskin_core::Result<()>,
-) -> (reskin_core::Result<()>, bool) {
+) -> (reskin_core::Result<()>, Shown) {
     let mut commit = Some(commit);
     let mut run_commit = move || match commit.take() {
         Some(f) => f(),
@@ -524,30 +659,25 @@ fn run_flourish<R: Runtime>(
     let speed = state.settings().animation_speed.clamp(0.5, 2.0);
     let ms = |base: f64| (base / speed) as u32;
     // Created shortcuts don't exist on the desktop until committed.
-    let creates = matches!(
+    if matches!(
         target,
         Target::NewShortcut { .. } | Target::PersonalCopy { .. }
-    );
-    let find = |path: &Path| -> Option<DesktopSpot> {
-        let p = path.to_path_buf();
+    ) {
+        if let Err(e) = run_commit() {
+            return (Err(e), Shown::default());
+        }
+        // Give Explorer a moment to add the new icon to the desktop view.
+        std::thread::sleep(Duration::from_millis(250));
+    }
+    let spot = target.desktop_item().and_then(|item| {
         state
             .sta
-            .run(move || desktop::find_desktop_icon(&p))
+            .run(move || desktop::find_desktop_icon(&item))
             .ok()
             .and_then(|r| r.ok())
             .flatten()
             .filter(|s| s.visible)
-    };
-    let mut result = None;
-    if creates {
-        result = Some(run_commit());
-        // Give Explorer a moment to add the new icon to the desktop view.
-        std::thread::sleep(Duration::from_millis(250));
-    }
-    let spot = match (&result, target.desktop_path()) {
-        (Some(Err(_)), _) | (_, None) => None,
-        (_, Some(p)) => find(p),
-    };
+    });
     let then = if spot.is_some() {
         CollapseThen::Fly
     } else {
@@ -556,15 +686,37 @@ fn run_flourish<R: Runtime>(
     if let Err(e) = morph::close(app, then, icon.clone()) {
         log::line(&format!("collapse before flight failed: {e}"));
     }
+    let collapsed = Shown {
+        collapsed: true,
+        ..Shown::default()
+    };
     let Some(spot) = spot else {
-        let r = result.unwrap_or_else(&mut run_commit);
-        if r.is_ok() {
-            emit_flight(app, FlightPhase::Celebrate, icon, ms(900.0), None);
-        }
-        return (r, false);
+        let r = run_commit();
+        let pause = match &r {
+            Ok(()) => {
+                emit_flight(app, FlightPhase::Celebrate, icon, ms(900.0), None);
+                ms(900.0)
+            }
+            Err(e) => {
+                emit_flight(
+                    app,
+                    FlightPhase::Error,
+                    None,
+                    ms(480.0),
+                    Some(e.to_string()),
+                );
+                ms(480.0)
+            }
+        };
+        // The editor collapsed onto the box wherever it was; once the box
+        // has had its moment there, it goes home.
+        std::thread::sleep(Duration::from_millis(u64::from(pause)));
+        glide_home(app);
+        let error = r.is_err();
+        return (r, Shown { error, ..collapsed });
     };
     let Some(home) = morph::box_home(app) else {
-        return (result.unwrap_or_else(&mut run_commit), false);
+        return (run_commit(), collapsed);
     };
     let bh = app
         .get_webview_window(box_window::LABEL)
@@ -583,7 +735,7 @@ fn run_flourish<R: Runtime>(
     state
         .animator
         .arc_to(dest, lift, Duration::from_millis(ms(650.0) as u64));
-    let r = result.unwrap_or_else(&mut run_commit);
+    let r = run_commit();
     emit_flight(
         app,
         if r.is_ok() {
@@ -603,21 +755,90 @@ fn run_flourish<R: Runtime>(
         Duration::from_millis(ms(600.0) as u64),
     );
     emit_flight(app, FlightPhase::Home, None, 0, None);
-    (r, true)
+    let error = r.is_err();
+    (
+        r,
+        Shown {
+            landed: true,
+            error,
+            ..collapsed
+        },
+    )
 }
 
-/// Start-menu / taskbar-pin shortcuts that launch the same program get the
-/// same icon (each journaled on its own).
+/// Glides the box back home when it isn't there, unless the user hid it.
+fn glide_home<R: Runtime>(app: &AppHandle<R>) {
+    let state = app.state::<AppState>();
+    if state.box_hidden_by_user() {
+        return;
+    }
+    if let (Some(home), Some(now)) = (morph::box_home(app), state.animator.rect())
+        && let Some(to) = way_home(home, now)
+    {
+        state.animator.glide_to(to);
+    }
+}
+
+/// Where the box at `now` must glide to reach `home` (physical px), if
+/// anywhere.
+fn way_home(home: Rect, now: Rect) -> Option<(i32, i32)> {
+    let home_at = (home.x.round() as i32, home.y.round() as i32);
+    (home_at != (now.x.round() as i32, now.y.round() as i32)).then_some(home_at)
+}
+
+/// Adds the matching Start-menu and taskbar-pin shortcuts to a successful
+/// apply ([`apply_to_pins`]), reporting those Reskin had to leave alone.
+fn with_pins<R: Runtime>(
+    app: &AppHandle<R>,
+    outcome: ApplyOutcome,
+    link: &Path,
+    icon: &Path,
+    rec: &ItemRecord,
+    thumb: Option<String>,
+    design_name: Option<String>,
+) -> ApplyOutcome {
+    match outcome {
+        ApplyOutcome::Applied {
+            mut entries,
+            landed,
+            skipped_pins,
+        } => {
+            let Some(main) = entries.first().map(|e| e.id.clone()) else {
+                return ApplyOutcome::Applied {
+                    entries,
+                    landed,
+                    skipped_pins,
+                };
+            };
+            let (pins, skipped) = apply_to_pins(app, link, icon, rec, thumb, design_name, &main);
+            entries.extend(pins);
+            ApplyOutcome::Applied {
+                entries,
+                landed,
+                skipped_pins: (skipped > 0).then_some(skipped),
+            }
+        }
+        other => other,
+    }
+}
+
+/// Gives the Start-menu and taskbar-pin shortcuts that launch the same
+/// program the same icon. Each is journaled with the apply's main entry
+/// (`main`) as its group, so undoing the apply undoes them too. Returns
+/// their entries and how many matching pins Reskin can't change (e.g. in
+/// the all-users Start menu).
 fn apply_to_pins<R: Runtime>(
     app: &AppHandle<R>,
     link: &Path,
     icon: &Path,
     rec: &ItemRecord,
-    req: &ApplyRequest,
-) -> Vec<HistoryEntry> {
+    thumb: Option<String>,
+    design_name: Option<String>,
+    main: &str,
+) -> (Vec<HistoryEntry>, u32) {
     let state = app.state::<AppState>();
     let link = link.to_path_buf();
-    let matches = state
+    let (matches, skipped) = state
         .sta
         .run(move || matching_pins(&link))
         .unwrap_or_default();
@@ -639,8 +860,9 @@ fn apply_to_pins<R: Runtime>(
             icon_path: icon.display().to_string(),
             original,
             elevated: false,
-            thumb: thumb(&req.images),
-            design_name: req.design_name.clone(),
+            thumb: thumb.clone(),
+            design_name: design_name.clone(),
+            group: Some(main.to_owned()),
         }) {
             Ok(id) => id,
             Err(_) => continue,
@@ -661,16 +883,17 @@ fn apply_to_pins<R: Runtime>(
             }
         }
     }
-    out
+    (out, skipped)
 }
 
-/// `.lnk` files in the Start menu and taskbar pins with the same target.
-fn matching_pins(link: &Path) -> Vec<PathBuf> {
+/// `.lnk` files in the Start menu and taskbar pins with the same target:
+/// those Reskin can change, and how many others there are.
+fn matching_pins(link: &Path) -> (Vec<PathBuf>, u32) {
     let Ok(info) = shortcut::read_link(link) else {
-        return Vec::new();
+        return (Vec::new(), 0);
     };
     let Some(target) = info.target else {
-        return Vec::new();
+        return (Vec::new(), 0);
     };
     let roots: Vec<PathBuf> = [
         known::start_menu(),
@@ -681,18 +904,22 @@ fn matching_pins(link: &Path) -> Vec<PathBuf> {
     .flatten()
     .collect();
     let mut out = Vec::new();
+    let mut skipped = 0;
     for root in roots {
         walk_lnks(&root, 4, &mut |p| {
             if p != link
                 && let Ok(l) = shortcut::read_link(p)
                 && l.target.as_deref().is_some_and(|t| same_path(t, &target))
-                && reskin_core::win::access::probe_writable(p) == Access::Writable
             {
-                out.push(p.to_path_buf());
+                if access::probe_writable(p) == Access::Writable {
+                    out.push(p.to_path_buf());
+                } else {
+                    skipped += 1;
+                }
             }
         });
     }
-    out
+    (out, skipped)
 }
 
 fn same_path(a: &Path, b: &Path) -> bool {
@@ -748,8 +975,12 @@ fn elevated_blocking<R: Runtime>(app: &AppHandle<R>, ticket: &str) -> ApplyOutco
         Ok(Ok(o)) => o,
         Ok(Err(e)) | Err(e) => return failed(&e),
     };
+    let icons_dir = match helper::public_icons_dir() {
+        Ok(dir) => dir,
+        Err(e) => return failed(&e),
+    };
     let name = reskin_core::paths::icon_file_name(&p.rec.info.name, &p.ico);
-    let icon_path = state.dirs.public_icons_dir().join(&name);
+    let icon_path = icons_dir.join(&name);
     let op = match job::JobOp::set_icon(&path.display().to_string(), &name, &p.ico) {
         Ok(op) => op,
         Err(e) => return failed(&e),
@@ -764,6 +995,7 @@ fn elevated_blocking<R: Runtime>(app: &AppHandle<R>, ticket: &str) -> ApplyOutco
         elevated: true,
         thumb: p.thumb.clone(),
         design_name: p.design_name.clone(),
+        group: None,
     }) {
         Ok(id) => id,
         Err(e) => return failed(&e),
@@ -783,15 +1015,32 @@ fn elevated_blocking<R: Runtime>(app: &AppHandle<R>, ticket: &str) -> ApplyOutco
         let _ = state.journal().fail(&entry_id, "cancelled");
         return ApplyOutcome::Cancelled;
     }
-    if result.is_ok()
+    // The change is made (or failed) before anything collapses: the
+    // flourish only shows it.
+    let shown = if result.is_ok()
         && flourish_enabled(&state, p.flourish)
         && state.morph.phase() == morph::Phase::Open
     {
-        let (r, landed) = run_flourish(app, &target, p.preview.clone(), || Ok(()));
-        let _ = r;
-        return finish(app, &p.rec, &entry_id, result, landed);
-    }
-    finish(app, &p.rec, &entry_id, result, false)
+        run_flourish(app, &target, p.preview.clone(), || Ok(())).1
+    } else {
+        Shown::default()
+    };
+    let outcome = finish(app, &p.rec, &entry_id, result, shown);
+    let outcome = if p.update_pins && !url {
+        with_pins(
+            app,
+            outcome,
+            &path,
+            &icon_path,
+            &p.rec,
+            p.thumb.clone(),
+            p.design_name.clone(),
+        )
+    } else {
+        outcome
+    };
+    announce_undo(app, &outcome);
+    outcome
 }
 
 /// Native save dialog + write of an export.
@@ -828,4 +1077,129 @@ pub async fn export_file(app: AppHandle, req: ExportRequest) -> CmdResult<Option
     })
     .await
     .map_err(|e| e.to_string())?
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn link() -> Target {
+        Target::Link {
+            path: PathBuf::from(r"C:\Users\Public\Desktop\App.lnk"),
+            url: false,
+        }
+    }
+
+    fn folder() -> Target {
+        Target::Folder {
+            path: PathBuf::from(r"C:\Users\Public\Desktop\Games"),
+        }
+    }
+
+    #[test]
+    fn only_a_public_desktop_link_asks_for_elevation_and_refusals_come_first() {
+        assert_eq!(gate(Access::Writable, &link()), Gate::Go);
+        assert_eq!(gate(Access::Writable, &folder()), Gate::Go);
+        assert_eq!(gate(Access::NeedsElevation, &link()), Gate::Elevate);
+        // Nothing but a link can go through the elevated helper.
+        assert_eq!(gate(Access::NeedsElevation, &folder()), Gate::Refuse);
+        assert_eq!(gate(Access::ReadOnly, &link()), Gate::Refuse);
+        assert_eq!(gate(Access::ReadOnly, &folder()), Gate::Refuse);
+        let new = Target::NewShortcut {
+            dest: PathBuf::from(r"C:\Users\Kim\Desktop\App.lnk"),
+            target: PathBuf::from(r"C:\Apps\app.exe"),
+            args: String::new(),
+            description: String::new(),
+        };
+        assert_eq!(gate(Access::ReadOnly, &new), Gate::Refuse);
+        let rec = ItemRecord {
+            info: crate::items::tests::info("App"),
+            path: None,
+            system_icon: None,
+        };
+        for target in [link(), folder(), new] {
+            match refused(&rec, &target) {
+                ApplyOutcome::Failed { message, hint } => {
+                    assert!(message.starts_with("Windows won't let Reskin"), "{message}");
+                    assert!(hint.is_some());
+                }
+                other => panic!("{other:?}"),
+            }
+        }
+        match refused(&rec, &link()) {
+            ApplyOutcome::Failed { hint, .. } => {
+                assert!(hint.unwrap().contains("personal copy"));
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_failure_reaches_the_box_once_and_only_after_the_collapse() {
+        // Still open, the editor shows it.
+        assert!(!Shown::default().owes_error_flight());
+        // Collapsed without a word yet: one `error` flight.
+        let collapsed = Shown {
+            collapsed: true,
+            ..Shown::default()
+        };
+        assert!(collapsed.owes_error_flight());
+        // The landing (or the celebration) already sent it.
+        for landed in [false, true] {
+            let told = Shown {
+                landed,
+                collapsed: true,
+                error: true,
+            };
+            assert!(!told.owes_error_flight());
+        }
+    }
+
+    #[test]
+    fn system_icons_fly_to_their_desktop_item_while_it_shows_the_change() {
+        let bin = "::{645FF040-5081-101B-9F08-00AA002F954E}";
+        assert_eq!(
+            system_desktop_item(SystemIconId::ThisPc, || None),
+            Some(PathBuf::from("::{20D04FE0-3AEA-1069-A2D8-08002B30309D}"))
+        );
+        assert_eq!(
+            system_desktop_item(SystemIconId::RecycleBinEmpty, || Some(false)),
+            Some(PathBuf::from(bin))
+        );
+        assert_eq!(
+            system_desktop_item(SystemIconId::RecycleBinFull, || Some(true)),
+            Some(PathBuf::from(bin))
+        );
+        // The other state's icon is not on the desktop now.
+        assert_eq!(
+            system_desktop_item(SystemIconId::RecycleBinEmpty, || Some(true)),
+            None
+        );
+        assert_eq!(
+            system_desktop_item(SystemIconId::RecycleBinFull, || Some(false)),
+            None
+        );
+        assert_eq!(
+            system_desktop_item(SystemIconId::RecycleBinFull, || None),
+            None
+        );
+        assert_eq!(
+            Target::System {
+                id: SystemIconId::Network
+            }
+            .desktop_item(),
+            Some(PathBuf::from("::{F02C1A0D-BE21-4350-88B0-7367FC96EF3C}"))
+        );
+    }
+
+    #[test]
+    fn the_box_glides_home_only_when_it_is_elsewhere() {
+        let home = Rect::new(1700.0, 40.0, 148.0, 148.0);
+        assert_eq!(way_home(home, home), None);
+        assert_eq!(way_home(home, Rect::new(1700.4, 39.6, 148.0, 148.0)), None);
+        assert_eq!(
+            way_home(home, Rect::new(900.0, 500.0, 148.0, 148.0)),
+            Some((1700, 40))
+        );
+    }
 }
