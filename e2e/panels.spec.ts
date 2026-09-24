@@ -6,7 +6,7 @@
 import type { Page } from '@playwright/test';
 import type { SidebarTab } from '../src/editor/state/session.svelte';
 import { compositeHash, docToPage, freezeClock, history, layerHash, layers, openEditor, openItem, openTab, shoot, sidebar } from './panels-driver';
-import { expect, openPage, SAMPLE_PATHS, simulateClose, test } from './support/fixtures';
+import { calls, expect, openPage, SAMPLE_PATHS, simulateClose, test } from './support/fixtures';
 
 const TABS: SidebarTab[] = ['layers', 'color', 'adjust', 'effects', 'styles', 'backdrop', 'stickers', 'history'];
 
@@ -304,6 +304,16 @@ test.describe('adjust', () => {
     await page.getByTestId('adjust-cancel').click();
     expect((await history(page)).canRedo).toBe(true);
     expect(await layerHash(page)).toBe(before);
+  });
+
+  test('Escape outside the panel cancels the preview instead of closing the editor', async ({ page }) => {
+    const before = await startInvert(page);
+    await page.getByTestId('canvas-stage').focus();
+    await page.keyboard.press('Escape');
+    await expect(page.getByTestId('adjust-editor')).toHaveCount(0);
+    expect(await layerHash(page)).toBe(before);
+    expect((await history(page)).labels).toEqual([]);
+    expect(await calls(page, 'editor_close')).toHaveLength(0);
   });
 
   test('changing the design elsewhere ends the preview and restores the layer', async ({ page }) => {

@@ -253,6 +253,13 @@
     if (e.key !== 'Escape' || e.defaultPrevented || e.repeat || e.isComposing) return;
     if (!shell.interactive || escapeForEngine || modalOpen() || keptByTarget(e)) return;
     e.preventDefault();
+    // An adjustment still previewing on the canvas: Escape cancels it first
+    // (its panel closes its settings when the preview ends).
+    const preview = session.engine.preview;
+    if (preview?.active) {
+      preview.cancel();
+      return;
+    }
     void session.requestClose().catch((err: unknown) => console.error('[editor] close failed', err));
   }
 
