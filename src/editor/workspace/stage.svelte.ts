@@ -85,5 +85,14 @@ class StageState {
   }
 }
 
+/**
+ * Commits pending tool work (a Move/Transform session) before the design
+ * leaves the editor — apply, export, copy, Save to Library — so what is
+ * saved is exactly what is on screen, as one undo step (like any command).
+ */
+export function commitPendingWork(engine: { hasPending: boolean; commitPending(): void }): void {
+  if (engine.hasPending) engine.commitPending();
+}
+
 /** The editor page's canvas stage (one per page). */
 export const stage = new StageState();

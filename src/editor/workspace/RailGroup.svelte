@@ -46,6 +46,9 @@
   let pressTimer: ReturnType<typeof setTimeout> | undefined;
   let suppressClick = false;
 
+  // A long press still pending when the rail goes away must not fire.
+  $effect(() => () => clearTimeout(pressTimer));
+
   const items: MenuEntry[] = $derived(
     group.tools.map((id) => ({
       id,
@@ -132,6 +135,7 @@
       onpointerdown={onPointerDown}
       onpointerup={cancelPress}
       onpointerleave={cancelPress}
+      onpointercancel={cancelPress}
       oncontextmenu={onContextMenu}
       onkeydown={onKeyDown}
       onfocus={onfocusslot}

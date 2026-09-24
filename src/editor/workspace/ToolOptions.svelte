@@ -222,7 +222,14 @@
   let featherRadius = $state(4);
 </script>
 
-<div class="options" role="group" aria-label="{label} options" data-testid="tool-options" data-tool={toolId}>
+<div
+  class="options"
+  role="group"
+  aria-label="{label} options"
+  data-testid="tool-options"
+  data-tool={toolId}
+  data-keeps-text-edit
+>
   <div class="tool-name" aria-hidden="true">
     <Icon size={16} strokeWidth={1.75} />
     <span>{label}</span>
@@ -337,6 +344,7 @@
             onclick={() => {
               engine.featherSelection(featherRadius);
               featherOpen = false;
+              featherAnchor?.querySelector('button')?.focus({ preventScroll: true });
             }}
           >
             Feather
@@ -405,7 +413,8 @@
     align-items: center;
     gap: var(--space-2);
     min-width: 0;
-    overflow: hidden;
+    /* Clipped, never scrolled sideways by focusing a control. */
+    overflow: clip;
     /* Room for focus rings inside the clipped strip. */
     padding: 4px 3px;
   }

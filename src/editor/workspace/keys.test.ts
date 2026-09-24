@@ -1,11 +1,20 @@
 import { describe, expect, it } from 'vitest';
-import { isInOverlay, isTypingTarget, stageKeyAction, type KeyContext, type KeyLike } from './keys';
+import {
+  FocusOrigin,
+  isInOverlay,
+  isSpaceControl,
+  isTypingTarget,
+  stageKeyAction,
+  type KeyContext,
+  type KeyLike,
+} from './keys';
 
 const ctx = (patch: Partial<KeyContext> = {}): KeyContext => ({
   typing: false,
   inOverlay: false,
   canvasFocus: true,
   pointerOverStage: false,
+  controlFocused: false,
   interacting: false,
   toolBusy: false,
   handHeld: false,
@@ -35,6 +44,21 @@ describe('stageKeyAction — holds', () => {
 
   it('leaves Space to a focused button when the pointer is elsewhere', () => {
     expect(stageKeyAction(key(' ', { code: 'Space' }), ctx({ canvasFocus: false }))).toBeNull();
+  });
+
+  it('never steals Space from a button reached with the keyboard, even with the pointer over the canvas', () => {
+    const space = key(' ', { code: 'Space' });
+    expect(stageKeyAction(space, ctx({ canvasFocus: false, pointerOverStage: true, controlFocused: true }))).toBeNull();
+    // A mouse-clicked rail button (no focus ring) still lets Space pan over the canvas.
+    expect(stageKeyAction(space, ctx({ canvasFocus: false, pointerOverStage: true, controlFocused: false }))).toEqual({
+      type: 'hand',
+      on: true,
+    });
+    // Once held, the hold continues whatever has focus.
+    expect(stageKeyAction({ ...space, repeat: true }, ctx({ handHeld: true, controlFocused: true }))).toEqual({
+      type: 'hand',
+      on: true,
+    });
   });
 
   it('swallows auto-repeat while held, ignores it otherwise', () => {
@@ -153,9 +177,56 @@ describe('focus classification', () => {
     expect(isTypingTarget(null)).toBe(false);
   });
 
+  it('knows which controls Space activates', () => {
+    const withRole = (tagName: string, role: string | null, type: string | null = null) => ({
+      tagName,
+      getAttribute: (n: string) => (n === 'role' ? role : n === 'type' ? type : null),
+    });
+    expect(isSpaceControl(withRole('BUTTON', null))).toBe(true);
+    expect(isSpaceControl(withRole('DIV', 'switch'))).toBe(true);
+    expect(isSpaceControl(withRole('BUTTON', 'menuitemcheckbox'))).toBe(true);
+    expect(isSpaceControl(withRole('INPUT', null, 'checkbox'))).toBe(true);
+    expect(isSpaceControl(withRole('INPUT', null, 'range'))).toBe(false);
+    expect(isSpaceControl(withRole('DIV', 'slider'))).toBe(false);
+    expect(isSpaceControl(withRole('CANVAS', null))).toBe(false);
+    expect(isSpaceControl(null)).toBe(false);
+  });
+
   it('detects overlays', () => {
     expect(isInOverlay(el('BUTTON', { overlay: true }))).toBe(true);
     expect(isInOverlay(el('BUTTON'))).toBe(false);
     expect(isInOverlay(undefined)).toBe(false);
+  });
+});
+
+describe('FocusOrigin', () => {
+  it('reports focus reached with Tab or arrows as keyboard focus', () => {
+    const f = new FocusOrigin();
+    f.keydown('Tab', 1000);
+    f.focusin(1004);
+    expect(f.keyboard).toBe(true);
+    f.keydown('ArrowDown', 2000);
+    f.focusin(2001);
+    expect(f.keyboard).toBe(true);
+  });
+
+  it('reports a clicked control as pointer focus, whatever keys came before', () => {
+    const f = new FocusOrigin();
+    f.keydown('Tab', 1000);
+    f.pointerdown();
+    f.focusin(1002);
+    f.pointerup();
+    expect(f.keyboard).toBe(false);
+    // Shortcut letters (and Space itself) do not turn a clicked button into keyboard focus.
+    f.keydown('b', 1500);
+    f.keydown(' ', 1600);
+    expect(f.keyboard).toBe(false);
+  });
+
+  it('treats a scripted focus long after any navigation key as pointer-driven', () => {
+    const f = new FocusOrigin();
+    f.keydown('Tab', 1000);
+    f.focusin(5000);
+    expect(f.keyboard).toBe(false);
   });
 });

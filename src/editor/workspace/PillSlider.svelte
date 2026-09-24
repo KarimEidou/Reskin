@@ -163,7 +163,8 @@
     inset: 0 auto 0 0;
     width: var(--pct);
     background: linear-gradient(to right, rgb(var(--accent-rgb) / 0.16), rgb(var(--accent-rgb) / 0.3));
-    box-shadow: inset -2px 0 0 rgb(var(--accent-rgb) / 0.9);
+    /* A soft leading edge: it passes behind the label / value text. */
+    box-shadow: inset -1px 0 0 rgb(var(--accent-rgb) / 0.55);
   }
   .pill:hover:not(.disabled) .fill {
     background: linear-gradient(to right, rgb(var(--accent-rgb) / 0.2), rgb(var(--accent-rgb) / 0.36));
@@ -196,6 +197,18 @@
   }
   .range:disabled {
     cursor: default;
+  }
+  /* A hairline thumb: the value under the pointer is exactly where the
+     fill ends (a default 16 px thumb insets the track by 8 px each side). */
+  .range::-webkit-slider-thumb {
+    width: 1px;
+    height: var(--control-sm);
+    appearance: none;
+  }
+  .range::-moz-range-thumb {
+    width: 1px;
+    height: var(--control-sm);
+    border: 0;
   }
 
   .entry {

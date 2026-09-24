@@ -41,6 +41,11 @@ export interface KeyContext {
   canvasFocus: boolean;
   /** The pointer is over the canvas stage. */
   pointerOverStage: boolean;
+  /**
+   * A button-like control was reached with the keyboard: Space activates
+   * it, so the hand tool must not take the key.
+   */
+  controlFocused: boolean;
   /** A pointer gesture is in progress on the canvas. */
   interacting: boolean;
   /** The engine holds a pending transform, or a gesture could be cancelled. */
@@ -92,9 +97,11 @@ export function stageKeyAction(e: KeyLike, c: KeyContext): StageKeyAction | null
   if (!plain || c.inOverlay) return null;
 
   // Holds: Space pans while the pointer is over the canvas (or nothing
-  // else wants the key); focused buttons keep Space for activation.
+  // else wants the key); a button reached with the keyboard keeps Space
+  // for its activation.
   if (isSpace(e)) {
     if (c.handHeld || e.repeat) return c.handHeld ? { type: 'hand', on: true } : null;
+    if (c.controlFocused && !c.canvasFocus) return null;
     return c.pointerOverStage || c.canvasFocus ? { type: 'hand', on: true } : null;
   }
   if (isBackslash(e)) {
@@ -141,6 +148,64 @@ export function isTypingTarget(el: ElementLike | null | undefined): boolean {
   if (tag !== 'INPUT') return false;
   const type = (el.getAttribute?.('type') ?? '').toLowerCase();
   return TEXT_INPUT_TYPES.has(type);
+}
+
+const SPACE_ROLES = new Set([
+  'button',
+  'checkbox',
+  'switch',
+  'radio',
+  'menuitem',
+  'menuitemcheckbox',
+  'menuitemradio',
+  'tab',
+  'option',
+]);
+const SPACE_INPUT_TYPES = new Set(['checkbox', 'radio', 'button', 'submit', 'reset', 'color', 'file']);
+
+/** Does Space activate this element (a button, checkbox, radio, tab…)? */
+export function isSpaceControl(el: ElementLike | null | undefined): boolean {
+  if (!el) return false;
+  const role = (el.getAttribute?.('role') ?? '').toLowerCase();
+  if (role) return SPACE_ROLES.has(role);
+  const tag = el.tagName.toUpperCase();
+  if (tag === 'BUTTON' || tag === 'SUMMARY') return true;
+  if (tag !== 'INPUT') return false;
+  return SPACE_INPUT_TYPES.has((el.getAttribute?.('type') ?? '').toLowerCase());
+}
+
+/** Keys that move focus between controls. */
+const FOCUS_NAV_KEYS = new Set(['Tab', 'ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight', 'Home', 'End', 'PageUp', 'PageDown']);
+/** A focus change this soon after a navigation key came from that key. */
+const NAV_FOCUS_WINDOW_MS = 400;
+
+/**
+ * Tracks whether the focused element was reached with the keyboard (Tab,
+ * arrows…) or by a pointer press / script. The browser's `:focus-visible`
+ * cannot tell: it turns on for a clicked button as soon as any key is
+ * pressed, Space included. Feed it the window's events (capture phase).
+ */
+export class FocusOrigin {
+  private navAt = Number.NEGATIVE_INFINITY;
+  private pressing = false;
+  /** The focused element was reached by keyboard navigation. */
+  keyboard = false;
+
+  keydown(key: string, time: number): void {
+    if (FOCUS_NAV_KEYS.has(key)) this.navAt = time;
+  }
+
+  pointerdown(): void {
+    this.pressing = true;
+  }
+
+  pointerup(): void {
+    this.pressing = false;
+  }
+
+  focusin(time: number): void {
+    this.keyboard = !this.pressing && time - this.navAt <= NAV_FOCUS_WINDOW_MS;
+  }
 }
 
 /** Is the element inside a dialog, popover, menu or listbox? */

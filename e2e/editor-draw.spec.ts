@@ -167,6 +167,30 @@ test.describe('drawing on the canvas', () => {
     await expect.poll(() => compositeHash(page)).toBe(before);
   });
 
+  test('letting go of the stroke button while another is held still ends the stroke', async ({ page }) => {
+    await openWorkspace(page);
+    await page.getByTestId('tool-brush').click();
+    const a = await toClient(page, { x: 100, y: 200 });
+    const b = await toClient(page, { x: 400, y: 220 });
+    await page.mouse.move(a.x, a.y);
+    await page.mouse.down();
+    await page.mouse.move(b.x, b.y, { steps: 6 });
+    // Chorded: right goes down during the stroke, then left comes up first.
+    await page.mouse.down({ button: 'right' });
+    await page.mouse.up({ button: 'left' });
+    await expect.poll(() => historyIndex(page)).toBe(1);
+    const interacting = () =>
+      page.evaluate(() => (globalThis as unknown as { __reskinSession: EditorSession }).__reskinSession.engine.isInteracting);
+    expect(await interacting()).toBe(false);
+    await page.mouse.up({ button: 'right' });
+    // Moving afterwards paints nothing more.
+    const painted = await compositeHash(page);
+    await page.mouse.move(a.x, a.y + 60, { steps: 4 });
+    expect(await interacting()).toBe(false);
+    expect(await compositeHash(page)).toBe(painted);
+    expect(await historyIndex(page)).toBe(1);
+  });
+
   test('text: click places a text layer, typing edits it, Enter finishes', async ({ page }) => {
     await openWorkspace(page);
     await page.getByTestId('tool-text').click();

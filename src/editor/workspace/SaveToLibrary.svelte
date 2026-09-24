@@ -5,6 +5,7 @@
   import Popover from '$lib/ui/Popover.svelte';
   import Tooltip from '$lib/ui/Tooltip.svelte';
   import { getSession } from '../state/context';
+  import { commitPendingWork } from './stage.svelte';
 
   const session = getSession();
 
@@ -22,13 +23,20 @@
     open = !open;
   }
 
+  /** Closes the form and gives focus back to the button that opened it. */
+  function close(): void {
+    open = false;
+    anchor?.querySelector('button')?.focus({ preventScroll: true });
+  }
+
   async function save(e: SubmitEvent): Promise<void> {
     e.preventDefault();
     const trimmed = name.trim();
     if (!trimmed || saving) return;
     saving = true;
+    commitPendingWork(session.engine);
     try {
-      if (await session.saveToLibrary(trimmed)) open = false;
+      if ((await session.saveToLibrary(trimmed)) && open) close();
     } finally {
       saving = false;
     }
@@ -69,7 +77,7 @@
     <label class="label" for="{id}-name">Save this design to your Library as</label>
     <input id="{id}-name" type="text" autocomplete="off" spellcheck="false" maxlength="80" bind:value={name} {@attach selectAll} />
     <div class="actions">
-      <Button size="sm" variant="ghost" onclick={() => (open = false)}>Cancel</Button>
+      <Button size="sm" variant="ghost" onclick={close}>Cancel</Button>
       <Button size="sm" variant="primary" type="submit" loading={saving} disabled={!name.trim()}>Save</Button>
     </div>
   </form>

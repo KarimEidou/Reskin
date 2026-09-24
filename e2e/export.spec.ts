@@ -73,6 +73,33 @@ test.describe('Save & Apply', () => {
     await expect.poll(() => page.evaluate(() => window.__e2e!.history.length)).toBe(1);
   });
 
+  test('commits a pending move before applying, so the icon is what the canvas shows', async ({ page }) => {
+    await openWorkspace(page, [SAMPLE_PATHS.steam], { applyCollapses: false });
+    await page.getByTestId('tool-move').click();
+    const canvas = (await page.getByTestId('canvas').boundingBox())!;
+    const vp = await page.evaluate(() => {
+      const v = (globalThis as unknown as { __reskinSession: EditorSession }).__reskinSession.engine.viewport!;
+      return { x: v.panX, y: v.panY, s: v.scale };
+    });
+    const at = (x: number, y: number) => ({ x: canvas.x + vp.x + x * vp.s, y: canvas.y + vp.y + y * vp.s });
+    const from = at(256, 256);
+    const to = at(300, 256);
+    await page.mouse.move(from.x, from.y);
+    await page.mouse.down();
+    await page.mouse.move(to.x, to.y, { steps: 5 });
+    await page.mouse.up();
+    const engineState = () =>
+      page.evaluate(() => {
+        const e = (globalThis as unknown as { __reskinSession: EditorSession }).__reskinSession.engine;
+        return { pending: e.hasPending, labels: e.historyEntries.map((h) => h.label) };
+      });
+    expect(await engineState()).toEqual({ pending: true, labels: [] });
+
+    await applyButton(page).click();
+    await waitForCall(page, 'apply_icon', undefined, 10_000);
+    expect(await engineState()).toEqual({ pending: false, labels: ['Move'] });
+  });
+
   test('shows a progress ring while applying', async ({ page }) => {
     await openWorkspace(page, [SAMPLE_PATHS.steam], { applyCollapses: false });
     // A long-running job (batch apply / elevation wait) as the session reports it.

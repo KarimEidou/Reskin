@@ -2,7 +2,8 @@
   Inline gradient stops editor for the gradient tool: a preview bar with a
   handle per stop. Click the bar to add a stop, drag a handle to move it,
   click a handle to recolour or remove it. Keyboard: ←/→ move the focused
-  stop (Shift ×10), Enter opens its colour, Delete removes it.
+  stop (Shift ×10), Enter opens its colour, Delete removes it, Insert or +
+  adds a stop halfway to the next one.
 -->
 <script lang="ts">
   import Trash from '@lucide/svelte/icons/trash';
@@ -49,8 +50,22 @@
   }
 
   function add(clientX: number): void {
+    addAt(offsetAt(clientX));
+  }
+
+  /** Keyboard: a new stop halfway between `index` and the next stop (or the previous one at the end). */
+  function addAfter(index: number): void {
+    const here = stops[index];
+    if (!here) return;
+    const after = stops.filter((s) => s.offset > here.offset).sort((a, b) => a.offset - b.offset)[0];
+    const before = stops.filter((s) => s.offset < here.offset).sort((a, b) => b.offset - a.offset)[0];
+    const other = after ?? before;
+    addAt(other ? (here.offset + other.offset) / 2 : Math.min(1, here.offset + 0.1));
+  }
+
+  function addAt(at: number): void {
     if (stops.length >= MAX_STOPS) return;
-    const offset = Math.round(offsetAt(clientX) * 1000) / 1000;
+    const offset = Math.round(Math.min(1, Math.max(0, at)) * 1000) / 1000;
     const color: Rgba = sampleStops(normalizeStops(stops), offset);
     const next = [...copy(stops), { offset, color }];
     onchange(next);
@@ -124,6 +139,10 @@
       case 'Backspace':
         remove(index);
         break;
+      case 'Insert':
+      case '+':
+        addAfter(index);
+        break;
       default:
         return;
     }
@@ -148,12 +167,13 @@
         class:open={editing === i}
         role="slider"
         aria-label="Stop {i + 1}, {toHex(stop.color, 'auto')}"
+        aria-keyshortcuts="Enter Delete Insert"
         aria-valuemin={0}
         aria-valuemax={100}
         aria-valuenow={Math.round(stop.offset * 100)}
         aria-valuetext="{Math.round(stop.offset * 100)}%"
         aria-haspopup="dialog"
-        tabindex={i === focused ? 0 : -1}
+        tabindex="0"
         style:left="{stop.offset * 100}%"
         style:--c={toHex(stop.color, 'auto')}
         onpointerdown={(e) => onHandleDown(e, i)}

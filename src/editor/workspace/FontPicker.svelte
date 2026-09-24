@@ -85,6 +85,7 @@
   }
 
   function onKeyDown(e: KeyboardEvent): void {
+    if (e.isComposing) return;
     switch (e.key) {
       case 'ArrowDown':
       case 'ArrowUp': {

@@ -19,8 +19,10 @@
   import type { IconComponent } from '$lib/ui/types';
   import { getSession } from '../state/context';
   import { applyBlockedReason, MODE_INFO, MODE_ORDER } from './apply-modes';
+  import { commitPendingWork } from './stage.svelte';
 
   const session = getSession();
+  const uid = $props.id();
 
   const ICONS: Record<ApplyMode, IconComponent> = {
     inPlace: Sparkles,
@@ -41,6 +43,7 @@
   async function apply(m: ApplyMode | null = mode): Promise<void> {
     open = false;
     if (!m || !session.canApply || !session.modes.includes(m)) return;
+    commitPendingWork(session.engine);
     await session.apply({ mode: m });
   }
 </script>
@@ -60,7 +63,8 @@
         <span class="label">Save &amp; Apply</span>
       </span>
       <span class="face working" aria-hidden={busy === null}>
-        <ProgressRing value={busy?.progress ?? null} size={18} stroke={2.5} label={busy?.label ?? 'Working'} />
+        <!-- Idle, the ring is determinate (0): an indeterminate ring would spin forever behind the label. -->
+        <ProgressRing value={busy ? busy.progress : 0} size={18} stroke={2.5} label={busy?.label ?? 'Working'} />
         <span class="label">{busy?.label ?? 'Applying'}{pct !== null ? ` · ${pct}%` : '…'}</span>
       </span>
     </button>
@@ -81,8 +85,8 @@
 
 <Popover bind:open anchor={root} label="Apply options" placement="top-end" offset={8} width="300px" initialFocus="first">
   <div class="menu">
-    <p class="heading" id="apply-mode-heading">Apply as</p>
-    <div class="modes" role="group" aria-labelledby="apply-mode-heading">
+    <p class="heading" id="{uid}-modes">Apply as</p>
+    <div class="modes" role="group" aria-labelledby="{uid}-modes">
       {#each MODE_ORDER as m (m)}
         {@const Icon = ICONS[m]}
         {@const available = session.modes.includes(m)}

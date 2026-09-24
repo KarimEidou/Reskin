@@ -3,6 +3,7 @@ import { Engine, TOOL_ORDER, type ToolId } from '$engine/index';
 import {
   choiceKey,
   choiceValue,
+  formatNumber,
   formatOption,
   fromDisplay,
   fromSliderPos,
@@ -10,6 +11,7 @@ import {
   LOG_STEPS,
   SHAPE_CHOICES,
   sliderRange,
+  stepDecimals,
   toDisplay,
   toSliderPos,
   TOOL_OPTION_SPECS,
@@ -133,5 +135,26 @@ describe('choices', () => {
     expect(choiceValue(text, 'layer')).toBe('layer');
     expect(choiceKey(3)).toBe('3');
     expect(choiceKey(false)).toBe('false');
+  });
+});
+
+describe('formatNumber', () => {
+  it('keeps the zeros of whole numbers', () => {
+    expect(formatNumber(80)).toBe('80');
+    expect(formatNumber(100)).toBe('100');
+    expect(formatNumber(0)).toBe('0');
+    expect(formatNumber(1500)).toBe('1500');
+  });
+
+  it('rounds to the step and drops trailing fractional zeros only', () => {
+    expect(stepDecimals(1)).toBe(0);
+    expect(stepDecimals(0.25)).toBe(2);
+    expect(formatNumber(0.5, 0.1)).toBe('0.5');
+    expect(formatNumber(10, 0.1)).toBe('10');
+    expect(formatNumber(12.25, 0.25)).toBe('12.25');
+    expect(formatNumber(12.2, 0.25)).toBe('12.2');
+    expect(formatNumber(79.6)).toBe('80');
+    expect(formatNumber(-0.2)).toBe('0');
+    expect(formatNumber(Number.NaN)).toBe('');
   });
 });

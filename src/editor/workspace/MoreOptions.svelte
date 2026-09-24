@@ -12,7 +12,17 @@
   import Slider from '$lib/ui/Slider.svelte';
   import Toggle from '$lib/ui/Toggle.svelte';
   import type { Option } from '$lib/ui/types';
-  import { choiceKey, choiceValue, fromDisplay, toDisplay, type ChoiceSpec, type OptionSpec } from './options-schema';
+  import NumberEntry from './NumberEntry.svelte';
+  import {
+    choiceKey,
+    choiceValue,
+    formatOption,
+    fromDisplay,
+    toDisplay,
+    type ChoiceSpec,
+    type OptionSpec,
+    type SliderSpec,
+  } from './options-schema';
   import { CHOICE_ICONS } from './tool-icons';
 
   interface Props {
@@ -37,6 +47,9 @@
     const v = options[key];
     return typeof v === 'number' ? v : 0;
   }
+
+  /** Slider / field value (display units) → the option, snapped and clamped. */
+  const setSlider = (spec: SliderSpec, display: number) => onchange(spec.key, fromDisplay(spec, display));
 </script>
 
 <span class="more" class:hidden={hideTrigger}>
@@ -58,17 +71,32 @@
     <h3 class="title">{toolLabel}</h3>
     {#each specs as spec (spec.key + spec.label)}
       {#if spec.kind === 'slider'}
-        <Slider
-          label={spec.label}
-          min={toDisplay(spec, spec.min)}
-          max={toDisplay(spec, spec.max)}
-          step={spec.step}
-          unit={spec.unit === '%' ? '%' : spec.unit ? ` ${spec.unit}` : ''}
-          input
-          value={toDisplay(spec, num(spec.key))}
-          oninput={(v) => onchange(spec.key, fromDisplay(spec, v))}
-          onchange={(v) => onchange(spec.key, fromDisplay(spec, v))}
-        />
+        <div class="field">
+          <span class="caption" aria-hidden="true">{spec.label}</span>
+          <div class="slider-row">
+            <div class="range">
+              <Slider
+                label={spec.label}
+                hideLabel
+                min={toDisplay(spec, spec.min)}
+                max={toDisplay(spec, spec.max)}
+                step={spec.step}
+                format={(v) => formatOption(spec, fromDisplay(spec, v))}
+                value={toDisplay(spec, num(spec.key))}
+                oninput={(v) => setSlider(spec, v)}
+              />
+            </div>
+            <NumberEntry
+              label={spec.label}
+              unit={spec.unit}
+              min={toDisplay(spec, spec.min)}
+              max={toDisplay(spec, spec.max)}
+              step={spec.step}
+              value={toDisplay(spec, num(spec.key))}
+              onchange={(v) => setSlider(spec, v)}
+            />
+          </div>
+        </div>
       {:else if spec.kind === 'toggle'}
         <Toggle size="sm" label={spec.label} checked={options[spec.key] === true} onchange={(v) => onchange(spec.key, v)} />
       {:else if spec.dropdown}
@@ -127,5 +155,14 @@
   .caption {
     color: var(--text-2);
     font-size: var(--text-sm);
+  }
+  .slider-row {
+    display: flex;
+    align-items: center;
+    gap: var(--space-3);
+  }
+  .range {
+    flex: 1;
+    min-width: 0;
   }
 </style>

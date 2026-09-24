@@ -27,7 +27,7 @@
   import { formatZoom } from './geometry';
   import QueueStrip from './QueueStrip.svelte';
   import SaveToLibrary from './SaveToLibrary.svelte';
-  import { stage } from './stage.svelte';
+  import { commitPendingWork, stage } from './stage.svelte';
 
   const session = getSession();
   const engine = session.engine;
@@ -68,6 +68,7 @@
   }
 
   function onExport(id: string): void {
+    commitPendingWork(engine);
     if (id === 'copy') void session.copyToClipboard();
     else if (id === 'ico' || id === 'png' || id === 'project') void session.exportAs(id);
   }
@@ -109,7 +110,7 @@
       tooltip={session.original ? 'Before / after (hold \\ to peek)' : 'Before / after (no original icon)'}
       size="sm"
       pressed={session.compare === 'split'}
-      disabled={!session.hasDesign || !session.original}
+      disabled={!session.hasDesign || (!session.original && session.compare !== 'split')}
       data-testid="compare-toggle"
       onclick={() => (session.compare = session.compare === 'split' ? 'off' : 'split')}
     />
@@ -224,8 +225,9 @@
     width: 104px;
   }
 
-  @container (max-width: 820px) {
-    .end :global(.collapsible-label) {
+  /* The smallest window (900 px) keeps Save and Export as icons. */
+  @container (max-width: 900px) {
+    .end :global(.label:has(> .collapsible-label)) {
       display: none;
     }
   }

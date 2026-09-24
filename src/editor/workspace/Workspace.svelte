@@ -49,7 +49,8 @@
     height: 100%;
     min-width: 0;
     min-height: 0;
-    overflow: hidden;
+    /* Never scrollable (focus or a caret near an edge must not shift it). */
+    overflow: clip;
   }
 
   .rail {
@@ -71,7 +72,7 @@
     display: flex;
     flex-direction: column;
     min-height: 0;
-    overflow: hidden;
+    overflow: clip;
   }
   .sidebar > :global(*) {
     flex: 1;

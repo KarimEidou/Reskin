@@ -402,6 +402,22 @@ function clampTo(spec: SliderSpec, value: number): number {
   return Math.min(spec.max, Math.max(spec.min, Number.isFinite(value) ? value : spec.min));
 }
 
+/** Decimal places of a step (1 → 0, 0.25 → 2). */
+export function stepDecimals(step: number): number {
+  return (String(step).split('.')[1] ?? '').length;
+}
+
+/**
+ * A number as typed-in fields show it: rounded to the step's decimals,
+ * trailing fractional zeros dropped ("80", "0.5", "12.25"), never "-0".
+ */
+export function formatNumber(value: number, step = 1): string {
+  if (!Number.isFinite(value)) return '';
+  const text = value.toFixed(stepDecimals(step));
+  const trimmed = text.includes('.') ? text.replace(/0+$/, '').replace(/\.$/, '') : text;
+  return trimmed === '-0' ? '0' : trimmed;
+}
+
 /** Parses a choice value back into the option's type. */
 export function choiceValue(spec: ChoiceSpec, raw: string): string | number | boolean {
   if (spec.numeric) return Number(raw);

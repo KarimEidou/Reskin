@@ -38,7 +38,7 @@
     textEditorBox,
     wheelZoom,
   } from './geometry';
-  import { isInOverlay, isTypingTarget, stageKeyAction, type ElementLike } from './keys';
+  import { FocusOrigin, isInOverlay, isSpaceControl, isTypingTarget, stageKeyAction, type ElementLike } from './keys';
 
   const session = getSession();
   const engine = session.engine;
@@ -73,6 +73,8 @@
   let compareBefore: 'off' | 'split' = 'off';
   let pointerOver = false;
   let viewAnim = 0;
+  /** How the focused element got focus (Space belongs to keyboard-focused buttons). */
+  const focusOrigin = new FocusOrigin();
 
   /** Bumped on viewport changes, for the (rare) reactive overlays. */
   let viewTick = $state(0);
@@ -100,18 +102,31 @@
     return fittedOriginal;
   }
 
+  // Reused every frame: rendering allocates nothing of its own.
+  const compareOpts: { image: Surface; split: number | null } = { image: null as unknown as Surface, split: null };
+  const renderOpts: {
+    dpr: number;
+    showGrid: boolean;
+    showKeylines: boolean;
+    compare: typeof compareOpts | null;
+    antsOffset: number;
+  } = { dpr: 1, showGrid: true, showKeylines: false, compare: null, antsOffset: 0 };
+
   function render(): void {
     frame = 0;
     if (!ctx || !view || !canvas || !sized) return;
     const mode = session.compare;
     const image = mode === 'off' ? null : compareImage();
-    view.render(ctx, viewport, {
-      dpr,
-      showGrid: stage.grid,
-      showKeylines: stage.keylines,
-      compare: image ? { image, split: mode === 'hold' ? null : stage.split } : null,
-      antsOffset,
-    });
+    if (image) {
+      compareOpts.image = image;
+      compareOpts.split = mode === 'hold' ? null : stage.split;
+    }
+    renderOpts.dpr = dpr;
+    renderOpts.showGrid = stage.grid;
+    renderOpts.showKeylines = stage.keylines;
+    renderOpts.compare = image ? compareOpts : null;
+    renderOpts.antsOffset = antsOffset;
+    view.render(ctx, viewport, renderOpts);
     const css = engine.cursor.css;
     if (css !== cursor) {
       canvas.style.cursor = css;
@@ -231,6 +246,20 @@
 
   // ---- pointer input ----------------------------------------------------------------
 
+  /**
+   * Focuses an element for a pointer press whose default we cancelled. The
+   * browser then treats it as script focus and, before any other click on
+   * the page (the editor opens from a drop on the box), shows the keyboard
+   * focus ring; `data-pointer-focus` hides it until the element blurs.
+   */
+  function focusForPointer(el: HTMLElement): void {
+    if (el.dataset.pointerFocus === undefined) {
+      el.dataset.pointerFocus = '';
+      el.addEventListener('blur', () => delete el.dataset.pointerFocus, { once: true });
+    }
+    if (document.activeElement !== el) el.focus({ preventScroll: true });
+  }
+
   /** Client px → document + stage coordinates (inline maths: one object per sample). */
   function mapPoint(clientX: number, clientY: number) {
     const sx = clientX - originX;
@@ -258,7 +287,7 @@
     // We focus the canvas ourselves; cancelling the default keeps the
     // browser from moving focus back to it after a tool opened an editor.
     e.preventDefault();
-    canvas.focus({ preventScroll: true });
+    focusForPointer(canvas);
     cancelAnimationFrame(viewAnim);
     gestureButton = e.button;
     gesturePointer = e.pointerId;
@@ -266,17 +295,37 @@
     engine.pointerDown(toPointerInput(e, mapPoint, e.button));
   }
 
+  /** `PointerEvent.buttons` bit of a `PointerEvent.button` (left, middle, right, back, forward). */
+  const BUTTON_BITS = [1, 4, 2, 8, 16];
+
+  function gestureButtonHeld(e: PointerEvent): boolean {
+    return (e.buttons & (BUTTON_BITS[gestureButton] ?? 0)) !== 0;
+  }
+
   function onPointerMove(e: PointerEvent): void {
     if (gestureButton === -1) {
-      if (session.hasDesign) engine.pointerHover(toPointerInput(e, mapPoint, 0));
+      if (!session.hasDesign) return;
+      // The stage can move without resizing (the open morph, panels
+      // appearing): hover maps against its current position. Layout is
+      // clean at this point of the frame, so the read is cheap.
+      updateOrigin();
+      engine.pointerHover(toPointerInput(e, mapPoint, 0));
       return;
     }
     if (e.pointerId !== gesturePointer) return;
+    if (e.pointerType === 'mouse' && !gestureButtonHeld(e)) {
+      // The gesture's button was let go while another one stays down
+      // (a chorded release reports a move, not a pointerup).
+      onPointerUp(e);
+      return;
+    }
     engine.pointerMove(toPointerInputs(e, mapPoint, gestureButton));
   }
 
   function onPointerUp(e: PointerEvent): void {
-    if (gestureButton === -1 || e.pointerId !== gesturePointer || e.button !== gestureButton) return;
+    if (gestureButton === -1 || e.pointerId !== gesturePointer) return;
+    // Another mouse button let go while the gesture's own is still held.
+    if (e.pointerType === 'mouse' && gestureButtonHeld(e)) return;
     engine.pointerUp(toPointerInput(e, mapPoint, gestureButton));
     endGesture();
   }
@@ -312,6 +361,7 @@
     if (!session.hasDesign || e.defaultPrevented) return;
     e.preventDefault();
     cancelAnimationFrame(viewAnim);
+    updateOrigin();
     const unit = e.deltaMode === 1 ? 16 : e.deltaMode === 2 ? cssH : 1;
     const horizontal = !e.ctrlKey && (e.shiftKey || Math.abs(e.deltaX) > Math.abs(e.deltaY));
     if (horizontal) {
@@ -352,6 +402,7 @@
     if (!releasing && (e.defaultPrevented || !session.hasDesign)) return;
     const target = e.target as ElementLike | null;
     const active = document.activeElement;
+    const canvasFocus = active === canvas || active === document.body || active === null;
     const action = stageKeyAction(
       {
         type: releasing ? 'keyup' : 'keydown',
@@ -366,8 +417,9 @@
       {
         typing: isTypingTarget(target),
         inOverlay: isInOverlay(target),
-        canvasFocus: active === canvas || active === document.body || active === null,
+        canvasFocus,
         pointerOverStage: pointerOver,
+        controlFocused: !canvasFocus && focusOrigin.keyboard && isSpaceControl(active),
         interacting: engine.isInteracting,
         toolBusy: engine.hasPending,
         handHeld,
@@ -415,6 +467,7 @@
   function onBlur(): void {
     setHand(false);
     setCompareHold(false);
+    focusOrigin.pointerup();
     if (gestureButton !== -1) {
       engine.pointerCancel();
       endGesture();
@@ -461,6 +514,8 @@
   }
 
   function onTextKey(e: KeyboardEvent): void {
+    // Enter / Escape during IME composition belong to the input method.
+    if (e.isComposing || e.keyCode === 229) return;
     if ((e.key === 'Enter' && !e.shiftKey) || e.key === 'Escape') {
       // Shift+Enter makes a new line; Enter / Escape finish (the text is live already).
       e.preventDefault();
@@ -469,6 +524,24 @@
       canvas?.focus({ preventScroll: true });
     }
   }
+
+  /** Where a press does not end the text being edited: the editor itself,
+   *  the type options (font, size, colour…) and their popovers / lists. */
+  const TEXT_EDIT_KEEPERS = '.text-editor, [data-keeps-text-edit], [role="dialog"], [role="listbox"], [role="menu"]';
+
+  // Click-away: a press anywhere else in the editor finishes the text. The
+  // canvas handles its own presses (finish, and do nothing else).
+  $effect(() => {
+    if (!textLayerId) return;
+    const onDown = (e: PointerEvent) => {
+      const target = e.target as Element | null;
+      if (!engine.textEditLayerId || !target || target === canvas) return;
+      if (target.closest?.(TEXT_EDIT_KEEPERS)) return;
+      engine.endTextEdit();
+    };
+    document.addEventListener('pointerdown', onDown, true);
+    return () => document.removeEventListener('pointerdown', onDown, true);
+  });
 
   // ---- before / after split -------------------------------------------------------------
 
@@ -485,7 +558,7 @@
     updateOrigin();
     splitDrag = e.pointerId;
     (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId);
-    (e.currentTarget as HTMLElement).focus({ preventScroll: true });
+    focusForPointer(e.currentTarget as HTMLElement);
   }
 
   function onSplitMove(e: PointerEvent): void {
@@ -533,8 +606,11 @@
   }
 
   async function importFile(file: File, fallback: string): Promise<void> {
+    const doc = engine.doc;
     try {
       const surface = await decodeImage(file);
+      // The design changed while decoding (another queue item, closed): drop it.
+      if (!session.hasDesign || engine.doc !== doc) return;
       if (session.importSurface(surface, importName(file, fallback))) stage.focusCanvas();
     } catch (error) {
       console.warn('image import failed', error);
@@ -659,11 +735,16 @@
     stageHost.addEventListener('dragover', onDragOver);
     stageHost.addEventListener('dragleave', onDragLeave);
     stageHost.addEventListener('drop', onDrop);
+    window.addEventListener('keydown', trackKey, true);
+    window.addEventListener('pointerdown', trackPress, true);
+    window.addEventListener('pointerup', trackRelease, true);
+    window.addEventListener('pointercancel', trackRelease, true);
+    window.addEventListener('focusin', trackFocus, true);
     window.addEventListener('keydown', onKey);
     window.addEventListener('keyup', onKey);
     window.addEventListener('blur', onBlur);
     window.addEventListener('paste', onPaste);
-    window.addEventListener('scroll', updateOrigin, true);
+    window.addEventListener('scroll', updateOrigin);
 
     // Files dragged over the window from Explorer arrive as Tauri events;
     // the App decides what a drop does, the stage only lights up.
@@ -703,11 +784,16 @@
       stageHost.removeEventListener('dragover', onDragOver);
       stageHost.removeEventListener('dragleave', onDragLeave);
       stageHost.removeEventListener('drop', onDrop);
+      window.removeEventListener('keydown', trackKey, true);
+      window.removeEventListener('pointerdown', trackPress, true);
+      window.removeEventListener('pointerup', trackRelease, true);
+      window.removeEventListener('pointercancel', trackRelease, true);
+      window.removeEventListener('focusin', trackFocus, true);
       window.removeEventListener('keydown', onKey);
       window.removeEventListener('keyup', onKey);
       window.removeEventListener('blur', onBlur);
       window.removeEventListener('paste', onPaste);
-      window.removeEventListener('scroll', updateOrigin, true);
+      window.removeEventListener('scroll', updateOrigin);
       if (handHeld || middlePan) engine.setToolOverride(null);
       if (compareHeld && session.compare === 'hold') session.compare = compareBefore;
       if (gestureButton !== -1) engine.pointerCancel();
@@ -723,6 +809,11 @@
   function preventDefault(e: Event): void {
     e.preventDefault();
   }
+
+  const trackKey = (e: KeyboardEvent) => focusOrigin.keydown(e.key, e.timeStamp);
+  const trackPress = () => focusOrigin.pointerdown();
+  const trackRelease = () => focusOrigin.pointerup();
+  const trackFocus = (e: FocusEvent) => focusOrigin.focusin(e.timeStamp);
 
   const splitPct = $derived(Math.round(stage.split * 100));
 </script>
@@ -828,7 +919,9 @@
     height: 100%;
     min-width: 0;
     min-height: 0;
-    overflow: hidden;
+    /* clip, not hidden: a hidden box can still be scrolled (the text editor's
+       caret near an edge would shift the whole canvas out of place). */
+    overflow: clip;
     border: 1px solid var(--border-subtle);
     border-radius: var(--radius-lg);
     background:
@@ -849,7 +942,7 @@
     outline: none;
     user-select: none;
   }
-  .canvas:focus-visible {
+  .canvas:focus-visible:not([data-pointer-focus]) {
     box-shadow: var(--focus-ring-inset);
   }
   .empty .canvas {
@@ -929,7 +1022,7 @@
   .split:active .grip {
     transform: scale(1.08);
   }
-  .split:focus-visible .grip {
+  .split:focus-visible:not([data-pointer-focus]) .grip {
     outline: var(--focus-width) solid var(--focus-color);
     outline-offset: 2px;
   }

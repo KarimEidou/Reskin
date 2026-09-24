@@ -151,6 +151,9 @@ test.describe('tool options', () => {
     // More options: every option with exact number entry.
     await options.getByRole('button', { name: 'More brush options' }).click();
     const more = page.getByRole('dialog', { name: 'Brush options' });
+    // Whole numbers keep their zeros (100 %, not "1").
+    await expect(more.getByRole('spinbutton', { name: 'Opacity' })).toHaveValue('100');
+    await expect(more.getByRole('spinbutton', { name: 'Hardness' })).toHaveValue('25');
     const flow = more.getByRole('spinbutton', { name: 'Flow' });
     await flow.fill('50');
     await flow.press('Enter');
@@ -240,6 +243,17 @@ test.describe('tool options', () => {
     });
     await popover.getByRole('button', { name: 'Remove stop' }).click();
     expect(await withSession(page, (s) => s.engine.getToolOptions('gradient').stops.length)).toBe(3);
+
+    // Keyboard: every stop is a tab stop, and Insert adds one halfway to the next.
+    const handles = stops.getByRole('slider');
+    for (let i = 0; i < 3; i++) await expect(handles.nth(i)).toHaveAttribute('tabindex', '0');
+    const before = await withSession(page, (s) => s.engine.getToolOptions('gradient').stops.map((st) => st.offset));
+    await handles.nth(0).press('Insert');
+    const after = await withSession(page, (s) => s.engine.getToolOptions('gradient').stops.map((st) => st.offset));
+    expect(after).toHaveLength(4);
+    const next = Math.min(...before.filter((o) => o > before[0]!));
+    expect(after[3]).toBeCloseTo((before[0]! + next) / 2, 3);
+    await expect(handles.nth(3)).toBeFocused();
   });
 
   test('symmetry modes and radial rays', async ({ page }) => {
@@ -512,6 +526,144 @@ test.describe('batch queue', () => {
     await applyAll.click();
     await expect.poll(() => page.evaluate(() => window.__e2e!.callsOf('apply_icon').length)).toBe(1);
     await expect(page.getByTestId('queue-item').nth(1)).toHaveAccessibleName('Notes, applied');
+  });
+});
+
+test.describe('robustness', () => {
+  test('nothing loops while the editor is idle', async ({ page }) => {
+    await openWorkspace(page, [SAMPLE_PATHS.steam, SAMPLE_PATHS.notes]);
+    await page.mouse.move(2, 2);
+    await page.waitForTimeout(400);
+    // docs/UI.md: no looping animations unless something is actually happening.
+    const looping = await page.evaluate(() =>
+      document
+        .getAnimations()
+        .filter((a) => a.playState === 'running' && a.effect?.getComputedTiming().iterations === Infinity)
+        .map((a) => {
+          const target = (a.effect as KeyframeEffect | null)?.target;
+          return target instanceof Element ? `${target.tagName}.${target.getAttribute('class') ?? ''}` : '?';
+        }),
+    );
+    expect(looping).toEqual([]);
+  });
+
+  test('drawing focuses the canvas without a focus ring; Tab shows one', async ({ page }) => {
+    await openWorkspace(page);
+    const canvas = page.getByTestId('canvas');
+    const ring = () => canvas.evaluate((el) => getComputedStyle(el).boxShadow);
+    // The very first press on a fresh page (the editor opens from a drop on the box).
+    await stroke(page, { x: 200, y: 200 }, { x: 300, y: 220 });
+    await expect(canvas).toBeFocused();
+    expect(await ring()).toBe('none');
+
+    await page.getByTestId('tool-options').getByRole('button', { name: /^More .* options$/ }).focus();
+    await page.keyboard.press('Tab');
+    await expect(canvas).toBeFocused();
+    expect(await ring()).not.toBe('none');
+  });
+
+  test('Space activates a keyboard-focused rail button instead of panning', async ({ page }) => {
+    await openWorkspace(page);
+    await page.getByTestId('tool-brush').click();
+    const over = await toClient(page, { x: 256, y: 256 });
+    await page.mouse.move(over.x, over.y);
+    // Keyboard focus moves to the pencil; the pointer rests over the canvas.
+    await page.getByTestId('tool-brush').focus();
+    await page.keyboard.press('ArrowDown');
+    await expect(page.getByTestId('tool-pencil')).toBeFocused();
+    await page.keyboard.down('Space');
+    expect(await withSession(page, (s) => s.engine.toolId)).not.toBe('hand');
+    await page.keyboard.up('Space');
+    await expect.poll(() => withSession(page, (s) => s.engine.selectedToolId)).toBe('pencil');
+    expect(await withSession(page, (s) => s.engine.toolId)).toBe('pencil');
+  });
+
+  test('a press elsewhere in the editor finishes the text being edited', async ({ page }) => {
+    await openWorkspace(page);
+    await page.getByTestId('tool-text').click();
+    const at = await toClient(page, { x: 256, y: 300 });
+    await page.mouse.click(at.x, at.y);
+    await expect(page.getByTestId('text-editor')).toBeFocused();
+    await page.keyboard.type('Go');
+    // The type options keep the editor open…
+    await page.getByTestId('tool-options').getByRole('button', { name: 'Italic' }).click();
+    await expect(page.getByTestId('text-editor')).toHaveCount(1);
+    // …anything else finishes it.
+    await page.getByTestId('zoom-level').click();
+    await expect(page.getByTestId('text-editor')).toHaveCount(0);
+    expect(await withSession(page, (s) => s.engine.textEditLayerId)).toBeNull();
+    expect(
+      await withSession(page, (s) => {
+        const l = s.engine.activeLayer;
+        return l?.kind === 'text' ? [l.text, l.italic] : null;
+      }),
+    ).toEqual(['Go', true]);
+  });
+
+  test('typing near the edge of the stage never scrolls the canvas out of place', async ({ page }) => {
+    await openWorkspace(page);
+    const canvas = page.getByTestId('canvas');
+    const before = (await canvas.boundingBox())!;
+    await page.getByTestId('tool-text').click();
+    const at = await toClient(page, { x: 256, y: 490 });
+    await page.mouse.click(at.x, at.y);
+    await expect(page.getByTestId('text-editor')).toBeFocused();
+    // Lines run past the bottom of the stage; the caret follows them.
+    await page.keyboard.type('One');
+    for (const line of ['Two', 'Three', 'Four']) {
+      await page.keyboard.press('Shift+Enter');
+      await page.keyboard.type(line);
+    }
+    const scrolled = await page.evaluate(() =>
+      [...document.querySelectorAll<HTMLElement>('[data-testid="workspace"], [data-testid="workspace"] *')]
+        .filter((el) => el.scrollTop !== 0 && !el.closest('[data-panel="sidebar"]'))
+        .map((el) => el.className),
+    );
+    expect(scrolled).toEqual([]);
+    expect(await canvas.boundingBox()).toEqual(before);
+  });
+
+  test('the before/after toggle can be switched off when the design has no original', async ({ page }) => {
+    await openWorkspace(page);
+    const toggle = page.getByTestId('compare-toggle');
+    await toggle.click();
+    await expect(toggle).toHaveAttribute('aria-pressed', 'true');
+    await withSession(page, (s) => s.newBlank());
+    await expect(toggle).toBeEnabled();
+    await toggle.click();
+    expect(await withSession(page, (s) => s.compare)).toBe('off');
+    await expect(toggle).toBeDisabled();
+  });
+});
+
+test.describe('small window', () => {
+  test.use({ viewport: { width: 900, height: 620 } });
+
+  test('the bottom bar keeps every control clear of the others', async ({ page }) => {
+    await openWorkspace(page, [SAMPLE_PATHS.steam, SAMPLE_PATHS.notes, SAMPLE_PATHS.site]);
+    const bar = page.getByTestId('bottom-bar');
+    const boxes = await Promise.all(
+      [
+        page.getByTestId('queue-item').first(),
+        page.getByTestId('apply-style-all'),
+        bar.getByRole('group', { name: 'View' }),
+        page.getByTestId('save-library'),
+        page.getByTestId('export-menu'),
+        page.getByTestId('apply-button'),
+      ].map(async (l) => (await l.boundingBox())!),
+    );
+    for (let i = 1; i < boxes.length; i++) {
+      expect(boxes[i]!.x, `control ${i} starts after control ${i - 1} ends`).toBeGreaterThanOrEqual(
+        boxes[i - 1]!.x + boxes[i - 1]!.width - 0.5,
+      );
+    }
+    const barBox = (await bar.boundingBox())!;
+    const last = boxes.at(-1)!;
+    expect(last.x + last.width).toBeLessThanOrEqual(barBox.x + barBox.width);
+    // Collapsed to icons, the buttons keep their names.
+    await expect(page.getByTestId('apply-style-all')).toHaveAccessibleName('Apply style to all');
+    await expect(page.getByTestId('save-library')).toHaveAccessibleName('Save to Library');
+    await expect(page.getByTestId('export-menu')).toHaveAccessibleName('Export');
   });
 });
 

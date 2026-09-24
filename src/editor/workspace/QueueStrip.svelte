@@ -11,8 +11,9 @@
   import X from '@lucide/svelte/icons/x';
   import Button from '$lib/ui/Button.svelte';
   import Spinner from '$lib/ui/Spinner.svelte';
+  import { toast } from '$lib/ui/toasts.svelte';
   import Tooltip from '$lib/ui/Tooltip.svelte';
-  import type { QueueStatus } from '../state/session.svelte';
+  import { errorText, type QueueStatus } from '../state/session.svelte';
   import { getSession } from '../state/context';
 
   const session = getSession();
@@ -43,6 +44,8 @@
     switching = true;
     try {
       await session.select(i);
+    } catch (e) {
+      toast({ message: `Could not open ${session.queue[i]?.info.name ?? 'that icon'}: ${errorText(e)}`, kind: 'error' });
     } finally {
       switching = false;
     }
@@ -53,8 +56,19 @@
     switching = true;
     try {
       await session.remove(i);
+    } catch (e) {
+      toast({ message: `Could not switch icons: ${errorText(e)}`, kind: 'error' });
     } finally {
       switching = false;
+    }
+  }
+
+  async function applyAll(): Promise<void> {
+    if (!canApplyAll) return;
+    try {
+      await session.applyStyleToAll();
+    } catch (e) {
+      toast({ message: `Could not apply to all: ${errorText(e)}`, kind: 'error' });
     }
   }
 </script>
@@ -117,10 +131,11 @@
           size="sm"
           variant="ghost"
           icon={Layers2}
+          aria-label="Apply style to all"
           aria-disabled={!canApplyAll}
           class={canApplyAll ? '' : 'soft-disabled'}
           data-testid="apply-style-all"
-          onclick={() => canApplyAll && session.applyStyleToAll()}
+          onclick={applyAll}
         >
           <span class="apply-all-label">Apply style to all</span>
         </Button>
@@ -139,10 +154,13 @@
   .items {
     display: flex;
     align-items: center;
-    gap: 6px;
-    min-width: 0;
-    margin: 0;
-    padding: 4px 2px;
+    gap: 8px;
+    /* At least one thumbnail stays visible however narrow the bar gets. */
+    min-width: 50px;
+    /* Room inside the scroll box for the corner remove buttons, badges and
+       focus rings (the negative margin keeps the bar's layout unchanged). */
+    margin: -4px 0 -4px -6px;
+    padding: 8px 8px 8px 6px;
     overflow-x: auto;
     list-style: none;
     scrollbar-width: none;
@@ -300,5 +318,12 @@
 
   .queue :global(.soft-disabled) {
     opacity: 0.45;
+  }
+
+  /* Narrow windows: the batch button keeps its icon, the thumbnails keep the room. */
+  @container (max-width: 1000px) {
+    .queue :global(.label:has(> .apply-all-label)) {
+      display: none;
+    }
   }
 </style>
