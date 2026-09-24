@@ -1,0 +1,329 @@
+/*
+ * Reskin design tokens.
+ *
+ * Themes:  <html data-theme="dark|light">   (set by theme.ts; dark is default)
+ * Compat:  <html data-compat="true">        opaque materials for the
+ *                                           compatibility (no transparency) mode
+ * Accent:  --accent-* and --accent-*-rgb are written by theme.ts from the
+ *          Windows accent (or the brand violet); the values below are the
+ *          brand fallbacks so pages render correctly before boot.
+ * Motion:  --motion-k (0 when reduced) and --motion-fade-k are written by
+ *          motion/speed.svelte.ts; use the --dur-* / --fade-* tokens.
+ *
+ * Colours with an `-rgb` twin are "r g b" triplets for alpha variants:
+ *   background: rgb(var(--accent-rgb) / 0.16);
+ */
+
+:root {
+  color-scheme: dark;
+
+  /* ---- typography ------------------------------------------------------ */
+  --font-ui: 'Segoe UI Variable Text', 'Segoe UI', system-ui, sans-serif;
+  --font-display: 'Segoe UI Variable Display', 'Segoe UI Variable Text', 'Segoe UI', system-ui, sans-serif;
+  --font-small: 'Segoe UI Variable Small', 'Segoe UI Variable Text', 'Segoe UI', system-ui, sans-serif;
+  --font-mono: 'Cascadia Mono', 'Cascadia Code', Consolas, ui-monospace, monospace;
+
+  --text-2xs: 10px;
+  --text-xs: 11px;
+  --text-sm: 12px;
+  --text-md: 13px;
+  --text-base: 14px;
+  --text-lg: 16px;
+  --text-xl: 20px;
+  --text-2xl: 28px;
+  --text-3xl: 40px;
+
+  --weight-regular: 400;
+  --weight-medium: 500;
+  --weight-semibold: 600;
+  --weight-bold: 700;
+
+  --leading-tight: 1.2;
+  --leading-normal: 1.4;
+  --leading-relaxed: 1.6;
+  --tracking-tight: -0.01em;
+  --tracking-caps: 0.06em;
+
+  /* ---- spacing (4 px grid, with half steps) ---------------------------- */
+  --space-0: 0;
+  --space-px: 1px;
+  --space-0-5: 2px;
+  --space-1: 4px;
+  --space-1-5: 6px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-5: 20px;
+  --space-6: 24px;
+  --space-8: 32px;
+  --space-10: 40px;
+  --space-12: 48px;
+  --space-16: 64px;
+
+  /* ---- radii ----------------------------------------------------------- */
+  --radius-xs: 4px;
+  --radius-sm: 6px;
+  --radius-md: 8px;
+  --radius-lg: 12px;
+  --radius-xl: 16px;
+  --radius-2xl: 24px;
+  --radius-full: 999px;
+
+  /* ---- control sizes --------------------------------------------------- */
+  --control-sm: 26px;
+  --control-md: 32px;
+  --control-lg: 40px;
+
+  /* ---- layering -------------------------------------------------------- */
+  --z-raised: 10;
+  --z-popover: 1000;
+  --z-menu: 1010;
+  --z-tooltip: 1100;
+  --z-dialog: 1200;
+  --z-toast: 1300;
+
+  /* ---- motion (durations follow the speed / reduced-motion settings) --- */
+  --motion-k: 1;
+  --motion-fade-k: 1;
+  --motion-fade-max: 150ms;
+  --dur-1: calc(90ms * var(--motion-k));
+  --dur-2: calc(150ms * var(--motion-k));
+  --dur-3: calc(220ms * var(--motion-k));
+  --dur-4: calc(320ms * var(--motion-k));
+  --dur-5: calc(480ms * var(--motion-k));
+  --fade-1: min(calc(90ms * var(--motion-fade-k)), var(--motion-fade-max));
+  --fade-2: calc(150ms * var(--motion-fade-k));
+  --fade-3: calc(220ms * var(--motion-fade-k));
+  --ease-standard: cubic-bezier(0.2, 0, 0, 1);
+  --ease-decelerate: cubic-bezier(0, 0, 0, 1);
+  --ease-accelerate: cubic-bezier(0.3, 0, 1, 0.8);
+  --ease-emphasized: cubic-bezier(0.5, 0, 0, 1);
+  --ease-overshoot: cubic-bezier(0.34, 1.56, 0.64, 1);
+  /* SPRINGS.snappy / SPRINGS.bouncy sampled with springEasing() (use with
+     --dur-spring ≈ 333 ms and --dur-bounce ≈ 698 ms respectively). */
+  --ease-spring: linear(0, 0.0942, 0.2791, 0.4695, 0.631, 0.7548, 0.8436, 0.904, 0.9435, 0.9682, 0.9832, 0.9918, 0.9965, 0.999, 1.0001, 1);
+  --ease-bounce: linear(0, 0.1475, 0.4563, 0.7702, 1.0028, 1.1288, 1.163, 1.138, 1.0874, 1.0364, 0.9989, 0.9787, 0.9734, 0.9777, 0.986, 0.9942, 1.0003, 1.0035, 1.0043, 1.0036, 1.0023, 1.0009, 0.9999, 1);
+  --dur-spring: calc(333ms * var(--motion-k));
+  --dur-bounce: calc(698ms * var(--motion-k));
+
+  /* ---- accent (brand fallback; theme.ts overrides) --------------------- */
+  --accent-base: #7c5cff;
+  --accent-base-rgb: 124 92 255;
+  --accent: #9a82ff;
+  --accent-rgb: 154 130 255;
+  --accent-hover: #b6a4ff;
+  --accent-hover-rgb: 182 164 255;
+  --accent-pressed: #7c5cff;
+  --accent-pressed-rgb: 124 92 255;
+  --accent-text: #cfc3ff;
+  --accent-text-rgb: 207 195 255;
+  --on-accent: #000000;
+  --on-accent-rgb: 0 0 0;
+  --accent-vivid: #8f73ff;
+  --accent-vivid-rgb: 143 115 255;
+  --accent-light: #b6a4ff;
+  --accent-light-rgb: 182 164 255;
+  --accent-dark: #5a38d6;
+  --accent-dark-rgb: 90 56 214;
+  --accent-soft: rgb(var(--accent-rgb) / 0.16);
+  --accent-soft-strong: rgb(var(--accent-rgb) / 0.26);
+  --accent-border: rgb(var(--accent-rgb) / 0.55);
+  --accent-glow: rgb(var(--accent-vivid-rgb) / 0.55);
+
+  /* ---- dark theme (default) -------------------------------------------- */
+  --bg: #0e1014;
+  --bg-rgb: 14 16 20;
+  --surface-1: #15171c;
+  --surface-1-rgb: 21 23 28;
+  --surface-2: #1b1e24;
+  --surface-3: #23262e;
+  --surface-overlay: #1d2027;
+  --surface-sunken: #0b0c10;
+  --surface-hover: rgb(255 255 255 / 0.06);
+  --surface-active: rgb(255 255 255 / 0.1);
+  --surface-selected: rgb(var(--accent-rgb) / 0.18);
+  --scrim: rgb(4 5 8 / 0.56);
+
+  --text: #f2f3f6;
+  --text-rgb: 242 243 246;
+  --text-2: #b9bdc8;
+  --text-3: #868b98;
+  --text-disabled: #5b606c;
+  --text-inverse: #15171c;
+
+  --border: rgb(255 255 255 / 0.09);
+  --border-strong: rgb(255 255 255 / 0.17);
+  --border-subtle: rgb(255 255 255 / 0.05);
+  --divider: rgb(255 255 255 / 0.07);
+  --control-fill: rgb(255 255 255 / 0.06);
+  --control-fill-hover: rgb(255 255 255 / 0.09);
+  --control-fill-active: rgb(255 255 255 / 0.04);
+  --control-border: rgb(255 255 255 / 0.1);
+  --control-border-bottom: rgb(255 255 255 / 0.16);
+  --track: rgb(255 255 255 / 0.14);
+
+  --danger: #ff6b76;
+  --danger-rgb: 255 107 118;
+  --on-danger: #1b0306;
+  --warning: #ffbd5c;
+  --warning-rgb: 255 189 92;
+  --success: #45dc9c;
+  --success-rgb: 69 220 156;
+  --info: var(--accent-text);
+
+  --shadow-1: 0 1px 2px rgb(0 0 0 / 0.36);
+  --shadow-2: 0 2px 6px rgb(0 0 0 / 0.34), 0 1px 2px rgb(0 0 0 / 0.3);
+  --shadow-3: 0 8px 24px rgb(0 0 0 / 0.42), 0 2px 6px rgb(0 0 0 / 0.3);
+  --shadow-4: 0 24px 64px rgb(0 0 0 / 0.55), 0 8px 20px rgb(0 0 0 / 0.35);
+  --shadow-popover: 0 12px 32px rgb(0 0 0 / 0.46), 0 2px 8px rgb(0 0 0 / 0.3);
+  --shadow-dialog: 0 32px 80px rgb(0 0 0 / 0.6), 0 8px 24px rgb(0 0 0 / 0.36);
+  --inset-highlight: inset 0 1px 0 rgb(255 255 255 / 0.06);
+
+  /* Glass materials. Transparent windows cannot blur the desktop, so the
+     "glass" is layered translucency + highlights, not backdrop-filter. */
+  --glass-fill: rgb(28 31 39 / 0.72);
+  --glass-fill-strong: rgb(24 26 33 / 0.86);
+  --glass-tint: linear-gradient(
+    160deg,
+    rgb(255 255 255 / 0.1) 0%,
+    rgb(255 255 255 / 0.03) 42%,
+    rgb(255 255 255 / 0.06) 100%
+  );
+  --glass-border: rgb(255 255 255 / 0.12);
+  --glass-highlight: inset 0 1px 0 rgb(255 255 255 / 0.14);
+  --glass-shadow: 0 16px 40px rgb(0 0 0 / 0.42), 0 2px 8px rgb(0 0 0 / 0.28);
+  --glass-blur: blur(24px) saturate(1.4);
+
+  /* Focus */
+  --focus-color: var(--accent-text);
+  --focus-width: 2px;
+  --focus-offset: 2px;
+  --focus-ring: 0 0 0 var(--focus-offset) var(--bg), 0 0 0 calc(var(--focus-offset) + var(--focus-width)) var(--focus-color);
+  --focus-ring-inset: inset 0 0 0 var(--focus-width) var(--focus-color);
+
+  /* Checkerboard behind transparent colours/images. */
+  --checker-a: #2a2d35;
+  --checker-b: #1f2128;
+  --checker: repeating-conic-gradient(var(--checker-a) 0 25%, var(--checker-b) 0 50%) 0 0 / 12px 12px;
+}
+
+/* ---- light theme ------------------------------------------------------- */
+:root[data-theme='light'] {
+  color-scheme: light;
+
+  --accent: #5d3fe0;
+  --accent-rgb: 93 63 224;
+  --accent-hover: #7c5cff;
+  --accent-hover-rgb: 124 92 255;
+  --accent-pressed: #4a2cc2;
+  --accent-pressed-rgb: 74 44 194;
+  --accent-text: #4a2cc2;
+  --accent-text-rgb: 74 44 194;
+  --on-accent: #ffffff;
+  --on-accent-rgb: 255 255 255;
+
+  --bg: #f4f5f8;
+  --bg-rgb: 244 245 248;
+  --surface-1: #fbfbfc;
+  --surface-1-rgb: 251 251 252;
+  --surface-2: #ffffff;
+  --surface-3: #f0f1f4;
+  --surface-overlay: #ffffff;
+  --surface-sunken: #eceef2;
+  --surface-hover: rgb(0 0 0 / 0.045);
+  --surface-active: rgb(0 0 0 / 0.075);
+  --surface-selected: rgb(var(--accent-rgb) / 0.12);
+  --scrim: rgb(18 20 26 / 0.36);
+
+  --text: #15171c;
+  --text-rgb: 21 23 28;
+  --text-2: #4a4f5b;
+  --text-3: #6d7280;
+  --text-disabled: #a4a8b2;
+  --text-inverse: #f2f3f6;
+
+  --border: rgb(0 0 0 / 0.09);
+  --border-strong: rgb(0 0 0 / 0.16);
+  --border-subtle: rgb(0 0 0 / 0.05);
+  --divider: rgb(0 0 0 / 0.07);
+  --control-fill: rgb(255 255 255 / 0.8);
+  --control-fill-hover: rgb(249 249 250 / 0.9);
+  --control-fill-active: rgb(245 245 247 / 0.7);
+  --control-border: rgb(0 0 0 / 0.08);
+  --control-border-bottom: rgb(0 0 0 / 0.18);
+  --track: rgb(0 0 0 / 0.14);
+
+  --danger: #d52b3a;
+  --danger-rgb: 213 43 58;
+  --on-danger: #ffffff;
+  --warning: #a86200;
+  --warning-rgb: 168 98 0;
+  --success: #12825a;
+  --success-rgb: 18 130 90;
+
+  --shadow-1: 0 1px 2px rgb(16 18 24 / 0.1);
+  --shadow-2: 0 2px 6px rgb(16 18 24 / 0.1), 0 1px 2px rgb(16 18 24 / 0.08);
+  --shadow-3: 0 8px 24px rgb(16 18 24 / 0.14), 0 2px 6px rgb(16 18 24 / 0.08);
+  --shadow-4: 0 24px 64px rgb(16 18 24 / 0.2), 0 8px 20px rgb(16 18 24 / 0.1);
+  --shadow-popover: 0 12px 32px rgb(16 18 24 / 0.16), 0 2px 8px rgb(16 18 24 / 0.08);
+  --shadow-dialog: 0 32px 80px rgb(16 18 24 / 0.26), 0 8px 24px rgb(16 18 24 / 0.12);
+  --inset-highlight: inset 0 1px 0 rgb(255 255 255 / 0.7);
+
+  --glass-fill: rgb(250 251 253 / 0.74);
+  --glass-fill-strong: rgb(252 252 254 / 0.9);
+  --glass-tint: linear-gradient(
+    160deg,
+    rgb(255 255 255 / 0.55) 0%,
+    rgb(255 255 255 / 0.2) 45%,
+    rgb(255 255 255 / 0.32) 100%
+  );
+  --glass-border: rgb(255 255 255 / 0.7);
+  --glass-highlight: inset 0 1px 0 rgb(255 255 255 / 0.9);
+  --glass-shadow: 0 16px 40px rgb(16 18 24 / 0.18), 0 2px 8px rgb(16 18 24 / 0.1);
+
+  --checker-a: #ffffff;
+  --checker-b: #e6e8ec;
+}
+
+/* ---- compatibility (opaque) mode ---------------------------------------- */
+:root[data-compat='true'] {
+  --glass-fill: #1c1f27;
+  --glass-fill-strong: #181a21;
+  --glass-tint: linear-gradient(160deg, #262a33 0%, #1c1f27 45%, #1f222a 100%);
+  --glass-border: #343844;
+  --glass-blur: none;
+  --scrim: rgb(4 5 8 / 0.7);
+}
+
+:root[data-compat='true'][data-theme='light'] {
+  --glass-fill: #f7f8fa;
+  --glass-fill-strong: #ffffff;
+  --glass-tint: linear-gradient(160deg, #ffffff 0%, #f5f6f8 45%, #f8f9fb 100%);
+  --glass-border: #d9dce2;
+  --scrim: rgb(18 20 26 / 0.5);
+}
+
+/* ---- minimal, zero-specificity base ------------------------------------- */
+:where(*, *::before, *::after) {
+  box-sizing: border-box;
+}
+
+:where(html) {
+  font-family: var(--font-ui);
+  font-size: var(--text-base);
+  line-height: var(--leading-normal);
+  color: var(--text);
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+  -webkit-tap-highlight-color: transparent;
+}
+
+:where(:focus-visible) {
+  outline: var(--focus-width) solid var(--focus-color);
+  outline-offset: var(--focus-offset);
+}
+
+:where(button, input, select, textarea) {
+  font: inherit;
+  color: inherit;
+}
