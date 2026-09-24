@@ -74,15 +74,20 @@ Rust: editor topmost; Collapse{session, boxRect, then, icon, morph}
 Rust: box:collapse{session, then, icon} to the still hidden box
    box: takes over that picture (the same collapseItems → BoxVisual props:
         empty after `hide`, the new icon after `fly`/`celebrate`)
-Rust: show box under the (topmost) editor + box:shown
-   box: keeps the picture; double rAF (hidden windows run no rAF, so only
-        now) → box_painted(session)   [Rust waits 300 ms, logs a timeout]
+Rust: show box right under the (topmost) editor — it may show its last
+      picture until it paints again — + box:shown
+   box: keeps the picture; its icon decoded (from box:collapse on), double
+        rAF (hidden windows run no rAF, so only now) → box_painted(session)
+        [the box confirms anyway after 250 ms; Rust waits 300 ms, logs a timeout]
 Rust: Clear{session}
    editor: clear to fully transparent, double rAF → editor_ack(session,'cleared')
-Rust: hide editor (+ low-memory: destroy); glide box home if needed.
+Rust: hide editor, box back to the top of the topmost band (+ low-memory:
+      destroy the editor); glide box home if needed.
 ```
 Invariant: a window hides only when its content is transparent and shows only
-on top of an identical picture. Acks for an old session are ignored.
+over an identical picture (the editor over the box at open; the box under
+the editor's proxy at close, which goes only once the box has painted it).
+Acks for an old session are ignored.
 After a plain close the box rests on the picture it took over; after an
 apply it stays frozen on the new icon until its flight (`depart` /
 `celebrate`) carries it on (or 8 s pass without one).
@@ -116,7 +121,9 @@ design (or starts one), only when nothing else used the event: whatever
 handles Escape (a dialog, popover or menu, a text field, a drag, a pending
 transform, a text edit, a lasso polygon, a panel editor) or a paste (the
 canvas adds pasted images as layers) calls `preventDefault` or stops it.
-The App decides in a window listener added while the event is on its way
+Escape also never closes while the engine had a gesture, a pending
+transform or a text edit when the key went down. The App decides in a
+window listener added while the event is on its way
 (`chrome/last-listener.ts`), so it runs after every other listener — the
 workspace's window listeners are added long after the App's. Files dropped
 from Explorer (Tauri drag-drop events) stay the App's (import popover).
@@ -249,7 +256,8 @@ Windows (`win/`, `#[cfg(windows)]`, type-checked on Linux with
 * Build: `vite build` builds each page on its own (the app builder runs the
   `client` environment for editor.html, then `box` for box.html into the
   same outDir), so the box never loads chunks shared with the editor (they
-  would carry the union of both pages' Svelte runtime and library code).
+  would carry the union of both pages' Svelte runtime and library code);
+  the dev server serves both pages from one environment.
   `pnpm bundle:budget` guards the box's initial JS.
 * Every page entry (`src/*/main.ts`) starts with
   `if (__E2E__) (await import('../testing/tauri-mock')).install('<box|editor>')`

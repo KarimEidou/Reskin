@@ -35,6 +35,7 @@
   let draft = $state('');
   let saving = $state(false);
   let renameInput: HTMLInputElement | undefined = $state();
+  let grid: HTMLUListElement | undefined = $state();
 
   const shown = $derived.by(() => {
     const list = entries ?? [];
@@ -127,11 +128,18 @@
       danger: true,
     });
     if (!ok) return;
+    const at = shown.findIndex((e) => e.id === entry.id);
     try {
       await commands.libraryDelete(entry.id);
-      releaseFocus();
       toast({ message: `Deleted "${entry.name}".`, kind: 'success' });
       await refresh();
+      await tick();
+      // Focus went with the card (the dialog gave it back to its menu
+      // button): keyboard users continue from the card now in its place.
+      if (document.activeElement === document.body) {
+        const buttons = grid?.querySelectorAll<HTMLElement>('.more [aria-haspopup="menu"]') ?? [];
+        buttons[Math.min(at, buttons.length - 1)]?.focus();
+      }
     } catch (e) {
       toast({ message: `Could not delete: ${errorText(e)}`, kind: 'error' });
     }
@@ -146,12 +154,6 @@
     }
   }
 
-  /** Drops focus from a card before the list re-renders (see ViewHost). */
-  function releaseFocus(): void {
-    const active = document.activeElement;
-    if (active instanceof HTMLElement && active.closest('[data-testid="library-card"]')) active.blur();
-  }
-
   function menuFor(): MenuEntry[] {
     return [
       { id: 'open', label: 'Open', icon: FolderOpen },
@@ -163,7 +165,6 @@
   }
 
   function onMenu(entry: LibraryEntry, id: string): void {
-    if (id !== 'rename') releaseFocus();
     if (id === 'open') void open(entry);
     else if (id === 'apply') void applyToCurrent(entry);
     else if (id === 'rename') void startRename(entry);
@@ -212,7 +213,7 @@
   {:else if shown.length === 0}
     <p class="none" role="status">No designs match “{query}”.</p>
   {:else}
-    <ul class="grid" data-stagger>
+    <ul class="grid" data-stagger bind:this={grid}>
       {#each shown as entry (entry.id)}
         <li class="card" data-testid="library-card">
           <button type="button" class="open" onclick={() => open(entry)} aria-label="Open {entry.name}">

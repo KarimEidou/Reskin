@@ -13,7 +13,7 @@ use windows::Win32::Graphics::Dwm::{
 use windows::Win32::Graphics::Gdi::{CreateRoundRectRgn, SetWindowRgn};
 use windows::Win32::UI::WindowsAndMessaging::{
     GetWindowRect, HWND_NOTOPMOST, HWND_TOPMOST, IsWindowVisible, SW_HIDE, SW_SHOWNOACTIVATE,
-    SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SetWindowPos, ShowWindow,
+    SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_SHOWWINDOW, SetWindowPos, ShowWindow,
 };
 
 pub fn hwnd(h: isize) -> HWND {
@@ -29,6 +29,30 @@ pub fn show_no_activate(h: isize) {
         unsafe {
             let _ = ShowWindow(hwnd(h), SW_SHOWNOACTIVATE);
         }
+    }
+}
+
+/// Shows the window without activating it, directly under `above` in the
+/// z-order (a topmost window stays in the topmost band), so `above` keeps
+/// covering it until it is hidden or moved.
+pub fn show_below(h: isize, above: isize) {
+    if h == 0 {
+        return;
+    }
+    if above == 0 {
+        show_no_activate(h);
+        return;
+    }
+    unsafe {
+        let _ = SetWindowPos(
+            hwnd(h),
+            Some(hwnd(above)),
+            0,
+            0,
+            0,
+            0,
+            SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_SHOWWINDOW,
+        );
     }
 }
 

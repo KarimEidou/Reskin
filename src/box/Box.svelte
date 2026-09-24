@@ -5,7 +5,7 @@
   `data-ready` (booted and listening) for tests.
 -->
 <script lang="ts">
-  import { onMount } from 'svelte';
+  import { onMount, tick } from 'svelte';
   import { getCurrentWebview } from '@tauri-apps/api/webview';
   import { boot } from '$lib/boot';
   import { commands } from '$lib/ipc/commands';
@@ -41,9 +41,9 @@
   /** Unfreeze a handoff that Rust never followed up on. */
   const HANDOFF_TIMEOUT_MS = 8000;
   /**
-   * The picture taken over with `box:collapse` is confirmed after two
-   * frames once the box is shown (a hidden window paints nothing); should
-   * frames not come, it is confirmed anyway after this long.
+   * The picture taken over with `box:collapse` is confirmed once its icon is
+   * decoded and two frames passed after the box is shown (a hidden window
+   * paints nothing); should that take longer, it is confirmed anyway.
    */
   const PAINT_TIMEOUT_MS = 250;
 
@@ -57,8 +57,13 @@
   let hintClock = $state(0);
   let undoId = $state<string | null>(null);
   let flyLayer: HTMLDivElement | undefined = $state();
-  /** Handoff session whose collapse picture the box shows once it is back on screen. */
-  let collapseSession: number | null = null;
+  let hitEl: HTMLDivElement | undefined = $state();
+  /**
+   * The picture taken over with `box:collapse` while hidden, to confirm once
+   * the box is back on screen: its handoff session and its icon's decoding
+   * (an image not decoded yet paints as nothing).
+   */
+  let collapsePicture: { session: number; decoded: Promise<void> } | null = null;
 
   const s = $derived(settings());
   const metrics = $derived(
@@ -219,10 +224,27 @@
     return () => clearTimeout(t);
   });
 
+  /** Decodes the icon of the state just sent (once it is in the DOM). */
+  async function iconDecoded(): Promise<void> {
+    await tick();
+    try {
+      await hitEl?.querySelector('img')?.decode();
+    } catch {
+      // A broken image paints as nothing either way; don't hold the handoff.
+    }
+  }
+
   /** Tells Rust the collapse picture is on screen: the editor's proxy may go. */
-  async function confirmPainted(session: number): Promise<void> {
-    const { timedOut } = await frames(2, { timeoutMs: PAINT_TIMEOUT_MS });
-    if (timedOut) console.warn(`[box] no frames within ${PAINT_TIMEOUT_MS} ms; confirming the picture anyway`);
+  async function confirmPainted({ session, decoded }: { session: number; decoded: Promise<void> }): Promise<void> {
+    const deadline = performance.now() + PAINT_TIMEOUT_MS;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const ready = await Promise.race([
+      decoded.then(() => true),
+      new Promise<false>((r) => (timer = setTimeout(() => r(false), PAINT_TIMEOUT_MS))),
+    ]);
+    clearTimeout(timer);
+    const { timedOut } = await frames(2, { timeoutMs: Math.max(0, deadline - performance.now()) });
+    if (!ready || timedOut) console.warn(`[box] the picture was not on screen within ${PAINT_TIMEOUT_MS} ms; confirming it anyway`);
     await commands.boxPainted(session).catch((e: unknown) => console.error('[box] box_painted failed', e));
   }
 
@@ -263,14 +285,14 @@
         on('box:progress', (p) => send({ type: 'progress', done: p.done, total: p.total })),
         on('box:collapse', (c) => {
           send({ type: 'collapse', then: c.then, icon: c.icon });
-          collapseSession = c.session;
+          collapsePicture = { session: c.session, decoded: iconDecoded() };
         }),
         on('box:shown', () => {
           send({ type: 'shown' });
           if (showHint) hintClock += 1;
-          const session = collapseSession;
-          collapseSession = null;
-          if (session !== null) void confirmPainted(session);
+          const picture = collapsePicture;
+          collapsePicture = null;
+          if (picture) void confirmPainted(picture);
         }),
         on('box:undo', (id) => (undoId = id)),
         getCurrentWebview().onDragDropEvent(({ payload }) => {
@@ -329,6 +351,7 @@
 >
   <div
     class="hit"
+    bind:this={hitEl}
     role="button"
     tabindex="0"
     aria-label={label}

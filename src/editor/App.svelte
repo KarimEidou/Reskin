@@ -224,6 +224,21 @@
    * decides instead.
    */
   let escapeKey: KeyboardEvent | null = null;
+  /**
+   * The engine had a gesture, a pending transform or a text edit when that
+   * Escape went down: the key is for it, even if what settles it on the
+   * way does not say so (or nothing on the way handles it, e.g. focus in a
+   * non-modal overlay).
+   */
+  let escapeForEngine = false;
+
+  /** Window capture, before any other keydown listener. */
+  function trackEscape(e: KeyboardEvent): void {
+    escapeKey = e.key === 'Escape' ? e : null;
+    if (!escapeKey) return;
+    const engine = session.engine;
+    escapeForEngine = engine.hasPending || engine.isInteracting || engine.textEditLayerId !== null;
+  }
 
   const modalOpen = () => document.querySelector('dialog:modal') !== null;
 
@@ -236,7 +251,7 @@
   /** Escape nothing else used closes the editor (the collapse handoff). */
   function closeOnEscape(e: KeyboardEvent): void {
     if (e.key !== 'Escape' || e.defaultPrevented || e.repeat || e.isComposing) return;
-    if (!shell.interactive || modalOpen() || keptByTarget(e)) return;
+    if (!shell.interactive || escapeForEngine || modalOpen() || keptByTarget(e)) return;
     e.preventDefault();
     void session.requestClose().catch((err: unknown) => console.error('[editor] close failed', err));
   }
@@ -261,7 +276,11 @@
     void importPasted(file);
   }
 
+  /** The design an image joins (null: it starts one). */
+  const openDesign = () => (session.hasDesign ? session.engine.doc : null);
+
   async function importPasted(file: File): Promise<void> {
+    const design = openDesign();
     let surface: Surface;
     try {
       surface = await decodeImage(file);
@@ -269,9 +288,9 @@
       toast({ message: `Couldn't read the pasted image: ${errorText(e)}`, kind: 'error' });
       return;
     }
-    // The editor closed while decoding.
-    if (!shell.interactive) return;
-    const fresh = !session.hasDesign;
+    // The editor closed, or another design opened, while decoding.
+    if (!shell.interactive || openDesign() !== design) return;
+    const fresh = design === null;
     if (fresh) session.newBlank();
     const starter = fresh ? session.engine.doc.layers[0] : undefined;
     session.importSurface(surface);
@@ -365,9 +384,6 @@
     let stop: (() => void) | null = null;
     let disposed = false;
     // Added before the dispatcher's listeners, so it sees every keydown first.
-    const trackEscape = (e: KeyboardEvent) => {
-      escapeKey = e.key === 'Escape' ? e : null;
-    };
     window.addEventListener('keydown', trackEscape, true);
     const uninstallEscape = afterAllListeners(window, 'keydown', closeOnEscape, (e) => e.key === 'Escape');
     const uninstallPaste = afterAllListeners(window, 'paste', pasteImage);

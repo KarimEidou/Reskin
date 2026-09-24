@@ -11,6 +11,8 @@ import {
   editorState,
   emit,
   expect,
+  makeItems,
+  pushEditorCmd,
   SAMPLE_PATHS,
   simulateClose,
   simulateOpen,
@@ -304,6 +306,42 @@ test.describe('library', () => {
     await expect(page.getByRole('menu')).toHaveCount(0);
     await expect(trigger).toBeFocused();
     expect(await trigger.evaluate((el) => (el as Probed).probe)).toBe(true);
+    expect(await calls(page, 'editor_close')).toHaveLength(0);
+  });
+
+  test('answering Delete… keeps keyboard focus in the grid', async ({ openEditor, page }) => {
+    await openEditor();
+    await page.evaluate(async () => {
+      type Invoke = (cmd: string, args: unknown) => Promise<unknown>;
+      const { invoke } = (window as unknown as { __TAURI_INTERNALS__: { invoke: Invoke } }).__TAURI_INTERNALS__;
+      for (const name of ['Mono', 'Neon']) {
+        await invoke('library_save', { entry: { id: null, name, thumb: '', data: '{}' } });
+        await new Promise((r) => setTimeout(r, 5));
+      }
+    });
+    await simulateOpen(page, [], 'library');
+    const view = page.getByTestId('library-view');
+    await expect(view.getByTestId('library-card')).toHaveCount(2);
+    const [first, second] = await view.getByTestId('library-card').locator('.name').allTextContents();
+    const more = (name: string) => view.getByRole('button', { name: `More actions for ${name}` });
+
+    // Cancel: back on the menu button the question came from.
+    await more(first!).focus();
+    await page.keyboard.press('Enter');
+    await page.getByRole('menuitem', { name: 'Delete…' }).click();
+    await expect(page.getByRole('dialog', { name: `Delete "${first}"?` })).toBeVisible();
+    await page.keyboard.press('Escape');
+    await expect(page.getByRole('dialog')).toHaveCount(0);
+    await expect(more(first!)).toBeFocused();
+
+    // Delete: the focused card goes (its tooltip with it); focus moves on
+    // to the card now in its place.
+    await page.keyboard.press('Enter');
+    await page.getByRole('menuitem', { name: 'Delete…' }).click();
+    await page.getByTestId('confirm-ok').click();
+    await waitForCall(page, 'library_delete');
+    await expect(view.getByTestId('library-card')).toHaveCount(1);
+    await expect(more(second!)).toBeFocused();
     expect(await calls(page, 'editor_close')).toHaveLength(0);
   });
 
@@ -624,6 +662,37 @@ test.describe('pasted images', () => {
     await hasDesign(page);
     await expect(page.locator('[data-view-host]')).toHaveAttribute('data-view', 'edit');
     expect(await layerNames(page)).toEqual(['Pasted image']);
+  });
+
+  test('an image still decoding when another design opens is dropped', async ({ openEditor, page }) => {
+    await openEditor();
+    await simulateOpen(page, [], 'start');
+    // Hold the pasted image's decoding until the test lets it go.
+    type Held = { __decodeHeld?: boolean; __releaseDecode?: () => void; __decoded?: boolean };
+    await page.evaluate(() => {
+      const w = window as Held;
+      const decode = window.createImageBitmap.bind(window);
+      window.createImageBitmap = (async (...args: Parameters<typeof createImageBitmap>) => {
+        const [source] = args;
+        if (!(source instanceof File && source.name === 'image.png' && !w.__decodeHeld)) return decode(...args);
+        w.__decodeHeld = true;
+        await new Promise<void>((r) => (w.__releaseDecode = r));
+        const bitmap = await decode(...args);
+        // What the App does with it runs right after (same task).
+        setTimeout(() => (w.__decoded = true));
+        return bitmap;
+      }) as typeof createImageBitmap;
+    });
+    await paste(page);
+    await page.waitForFunction(() => (window as Held).__decodeHeld === true);
+    const [item] = await makeItems(page, [SAMPLE_PATHS.steam]);
+    await pushEditorCmd(page, { type: 'addItems', items: [item!] });
+    await hasDesign(page);
+    const opened = await layerNames(page);
+    await page.evaluate(() => (window as Held).__releaseDecode!());
+    await page.waitForFunction(() => (window as Held).__decoded === true);
+    expect(await layerNames(page)).toEqual(opened);
+    expect(opened).not.toContain('Pasted image');
   });
 
   test('on the canvas the workspace takes the paste: one layer, not two', async ({ openEditor, page }) => {

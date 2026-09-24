@@ -348,6 +348,28 @@ test.describe('events from Rust', () => {
     await expect(box.icon).toHaveAttribute('src', applied!.icon!);
   });
 
+  test('the collapse picture is confirmed only once its icon is decoded', async ({ openBox, page }) => {
+    const box = await openBox();
+    const [applied] = await makeItems(page, [SAMPLE_PATHS.notes]);
+    // Decoding takes a while (a big icon on a busy machine); an image that
+    // is not decoded yet paints as nothing.
+    type Decoded = { __decodedAt?: number };
+    await page.evaluate(() => {
+      const decode = HTMLImageElement.prototype.decode;
+      HTMLImageElement.prototype.decode = async function (this: HTMLImageElement) {
+        await new Promise((r) => setTimeout(r, 120));
+        await decode.call(this);
+        (window as Decoded).__decodedAt = performance.now();
+      };
+    });
+    const { session } = await simulateBoxReturn(page, 'fly', applied!.icon);
+    const painted = await waitForCall(page, 'box_painted', { session });
+    await expect(box.icon).toHaveAttribute('src', applied!.icon!);
+    const decodedAt = await page.evaluate(() => (window as Decoded).__decodedAt ?? null);
+    expect(decodedAt).not.toBeNull();
+    expect(painted.t).toBeGreaterThan(decodedAt!);
+  });
+
   test('a quick plain close brings the box back empty, not with the dropped icon', async ({ openBox, page }) => {
     const box = await openBox();
     await box.drop([SAMPLE_PATHS.steam]);

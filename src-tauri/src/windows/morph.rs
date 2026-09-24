@@ -1,10 +1,11 @@
 //! The box ⇄ editor handoff state machine.
 //!
 //! Invariant: a window hides only when its content is transparent, and a
-//! window shows only on top of an identical picture. Neither window resizes
-//! while visible. The editor draws a proxy of the box (same `BoxVisual`
-//! component) exactly where the real box is, so swapping windows is
-//! invisible; the proxy then morphs into the panel. See
+//! window shows only over an identical picture (the box comes back under
+//! the editor's proxy and paints before the proxy goes). Neither window
+//! resizes while visible. The editor draws a proxy of the box (same
+//! `BoxVisual` component) exactly where the real box is, so swapping
+//! windows is invisible; the proxy then morphs into the panel. See
 //! docs/ARCHITECTURE.md for the message sequence.
 
 use std::collections::HashSet;
@@ -393,9 +394,11 @@ fn close_inner<R: Runtime>(
     morph.wait(session, AckStage::Collapsed, COLLAPSE_TIMEOUT);
     if show_box {
         // The hidden box takes on the picture the editor's proxy ends on,
-        // is shown under the (still topmost) editor and confirms once that
-        // picture is on screen — a hidden window paints nothing, so it can
-        // only confirm after being shown. Only then may the proxy go.
+        // is shown right under the (still topmost) editor — until it paints
+        // again it may show what it painted before it was hidden — and
+        // confirms once that picture is on screen: a hidden window paints
+        // nothing, so it can only confirm after being shown. Only then may
+        // the proxy go.
         let _ = app.emit_to(
             box_window::LABEL,
             "box:collapse",
@@ -405,8 +408,7 @@ fn close_inner<R: Runtime>(
                 icon,
             },
         );
-        raw::show_no_activate(bh);
-        raw::set_topmost(bh, true);
+        raw::show_below(bh, eh);
         let _ = app.emit_to(box_window::LABEL, "box:shown", ());
         morph.wait_box_painted(session, BOX_PAINT_TIMEOUT);
     }
@@ -414,6 +416,10 @@ fn close_inner<R: Runtime>(
     state.mailbox.push(EditorCmd::Clear { session });
     morph.wait(session, AckStage::Cleared, CLEAR_TIMEOUT);
     let _ = editor.hide();
+    if show_box {
+        // Back on top of the topmost band, where it lives.
+        raw::set_topmost(bh, true);
+    }
     let _ = editor.set_always_on_top(false);
     let _ = editor.set_skip_taskbar(true);
     webview2::set_memory_low(&editor, true);

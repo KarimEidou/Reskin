@@ -280,6 +280,15 @@ fn cycle<R: Runtime>(app: &AppHandle<R>) -> Result<(), String> {
     if item.icon.is_none() {
         return Err("fixture has no icon preview".into());
     }
+    let target = lnk.display().to_string();
+    // The journal outlives runs (the fixture path is the same every time):
+    // only the entries this cycle adds count.
+    let earlier: HashSet<String> = state
+        .journal()
+        .entries_for(&target)
+        .iter()
+        .map(|e| e.id.clone())
+        .collect();
     morph::open(app, vec![item.clone()], EditorView::Edit)?;
     *state.smoke.cycle.lock().unwrap_or_else(|e| e.into_inner()) = None;
     state.mailbox.push(EditorCmd::SmokeCycle {
@@ -319,13 +328,16 @@ fn cycle<R: Runtime>(app: &AppHandle<R>) -> Result<(), String> {
             link.icon_location
         ));
     }
-    let target = lnk.display().to_string();
     let journal = state.journal();
-    let entries = journal.entries_for(&target);
-    if !entries.iter().any(|e| e.state == EntryState::Restored) {
+    let added: Vec<_> = journal
+        .entries_for(&target)
+        .into_iter()
+        .filter(|e| !earlier.contains(&e.id))
+        .collect();
+    if added.is_empty() || added.iter().any(|e| e.state != EntryState::Restored) {
         return Err(format!(
-            "journal has no restored entry for the fixture: {:?}",
-            entries.iter().map(|e| e.state).collect::<Vec<_>>()
+            "the cycle's journal entries for the fixture are not all restored: {:?}",
+            added.iter().map(|e| e.state).collect::<Vec<_>>()
         ));
     }
     if journal.active_for(&target).is_some() {
