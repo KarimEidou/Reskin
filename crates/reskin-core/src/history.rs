@@ -272,7 +272,7 @@ impl FileLock {
                     std::thread::sleep(LOCK_POLL);
                 }
                 Err(TryLockError::WouldBlock) => {
-                    return Err(Error::Other(format!(
+                    return Err(Error::Busy(format!(
                         "Reskin's history is in use by another Reskin process (restoring \
                          icons, or the uninstaller); waited {} s for {}. Try again when it \
                          has finished.",
@@ -1148,8 +1148,10 @@ mod tests {
         let started = Instant::now();
         let err = FileLock::acquire(&path, Duration::from_millis(150))
             .err()
-            .unwrap()
-            .to_string();
+            .unwrap();
+        // Told apart from every other failure: trying again can work.
+        assert!(matches!(err, Error::Busy(_)), "{err:?}");
+        let err = err.to_string();
         assert!(started.elapsed() >= Duration::from_millis(150));
         assert!(err.contains("in use by another Reskin process"), "{err}");
         assert!(err.contains("journal.json.lock"), "{err}");

@@ -39,7 +39,7 @@ use reskin_core::paths::AppDirs;
 use reskin_core::win::elevate;
 use tauri::Manager;
 
-use crate::cli::AppArgs;
+use crate::cli::{AppArgs, RELAUNCHED};
 use crate::state::AppState;
 
 /// Bundle identifier; also the app-data folder name.
@@ -47,10 +47,6 @@ pub const APP_ID: &str = reskin_core::paths::APP_ID;
 
 /// Microsoft's Evergreen WebView2 Runtime bootstrapper.
 const WEBVIEW2_DOWNLOAD: &str = "https://go.microsoft.com/fwlink/p/?LinkId=2124703";
-
-/// Added to the arguments of an instance started again, unelevated, by one
-/// that was run as administrator (so it never tries a second time).
-const RELAUNCHED: &str = "--relaunched";
 
 /// Exit code when Reskin cannot start (no WebView2, unreadable history, …).
 const EXIT_CANNOT_START: i32 = 1;
@@ -173,6 +169,34 @@ fn restarted_unelevated(argv: &[String]) -> bool {
     }
 }
 
+/// What the error box says when the history (`journal.json` at `path`)
+/// cannot be loaded at start-up. A damaged file is normally set aside and
+/// replaced by itself, so what is left is: another Reskin process holding
+/// the journal lock (wait), a journal a newer Reskin wrote (update), or a
+/// file Reskin cannot read, or cannot set aside when it is damaged.
+fn journal_problem(e: &reskin_core::Error, path: &std::path::Path) -> String {
+    match e {
+        reskin_core::Error::Busy(_) => "Another Reskin process (for example the restore \
+            that runs while Reskin is uninstalled) is using Reskin's history right now, so \
+            Reskin can't start yet.\n\nTry again in a moment."
+            .to_owned(),
+        reskin_core::Error::Unsupported(_) => format!(
+            "Reskin's history file was written by a newer version of Reskin:\n{}\n\nInstall \
+             that version (or a later one) to go on using it. This version won't start rather \
+             than risk losing the history.",
+            path.display()
+        ),
+        other => format!(
+            "Reskin could not read or repair its history file:\n{other}\n\nIt may be damaged, \
+             or another program (a backup, sync or antivirus tool) may be holding it. Try again \
+             in a moment. If this keeps happening, move\n{}\nsomewhere else and start Reskin \
+             again: it starts with an empty history, and icons it changed keep their look but \
+             can no longer be restored from Reskin.",
+            path.display()
+        ),
+    }
+}
+
 /// The first-run welcome (due until it was finished) opens at this start:
 /// not under `--smoke-test`, and not when Windows starts Reskin at sign-in —
 /// it waits for a start by the user rather than pop up over the desktop.
@@ -208,15 +232,12 @@ pub fn run(argv: &[String]) -> i32 {
     let journal = match Journal::load(dirs.journal_file()) {
         Ok(j) => j,
         Err(e) => {
-            // Only a journal written by a newer Reskin fails to load (a
-            // damaged one is backed up and replaced). Don't risk losing
-            // its history: refuse to start.
+            // Don't risk losing the history (the originals of every icon
+            // Reskin changed): refuse to start.
             fatal(
                 smoke,
                 &format!("journal unreadable: {e}"),
-                &format!(
-                    "Reskin could not read its history file:\n{e}\n\nIt may have been written by a newer version of Reskin."
-                ),
+                &journal_problem(&e, &dirs.journal_file()),
             );
             return EXIT_CANNOT_START;
         }
@@ -249,7 +270,7 @@ pub fn run(argv: &[String]) -> i32 {
             let forwarded = AppArgs::parse(&argv);
             log::line(&format!("second instance: {forwarded:?}"));
             if forwarded.edit.is_empty() {
-                actions::set_box_hidden(app, false);
+                actions::bring_forward(app);
             } else {
                 actions::open_paths(app, forwarded.edit);
             }
@@ -407,5 +428,41 @@ mod tests {
         // finishing it, and "Start with Windows" turned on since).
         assert!(!welcome_due(true, &args(&["--autostart"])));
         assert!(!welcome_due(true, &args(&["--smoke-test"])));
+    }
+
+    #[test]
+    fn the_start_up_error_tells_why_the_history_is_unusable() {
+        use reskin_core::Error;
+        let path = std::path::Path::new(
+            r"C:\Users\Kim\AppData\Roaming\com.karimeidou.reskin\journal.json",
+        );
+        let messages = [
+            // The uninstaller's restore (or a terminal's) holds the lock.
+            journal_problem(&Error::Busy("in use".into()), path),
+            journal_problem(&Error::Unsupported("version 2".into()), path),
+            journal_problem(&Error::AccessDenied("reading it: denied".into()), path),
+        ];
+        let says = |i: usize, what: &str| messages[i].contains(what);
+        assert!(says(0, "Another Reskin process"), "{}", messages[0]);
+        assert!(says(0, "Try again in a moment"), "{}", messages[0]);
+        assert!(says(1, "newer version"), "{}", messages[1]);
+        assert!(says(1, &path.display().to_string()), "{}", messages[1]);
+        assert!(
+            says(2, "could not read or repair its history file"),
+            "{}",
+            messages[2]
+        );
+        assert!(says(2, "reading it: denied"), "{}", messages[2]);
+        assert!(says(2, &path.display().to_string()), "{}", messages[2]);
+        // Each says only its own reason.
+        for (i, message) in messages.iter().enumerate() {
+            assert_eq!(
+                message.contains("Another Reskin process"),
+                i == 0,
+                "{message}"
+            );
+            assert_eq!(message.contains("newer version"), i == 1, "{message}");
+            assert_eq!(message.contains("could not read"), i == 2, "{message}");
+        }
     }
 }

@@ -67,8 +67,12 @@ from the drop point into the box with squash and stretch), `busy` (progress ring
 
 **Box extras:** skins Glass, Neon, Minimal, Aurora; sizes S/M/L; adjustable idle opacity; auto-hides while a fullscreen app runs
 (`SHQueryUserNotificationState`). Click opens the editor's Start view. Right-click calls `box_menu` → native popup menu:
-Open editor, Library, System icons ▸, Restore all…, Settings, Hide box, Quit. Tray icon has the same menu. Global hotkey
-(default `Ctrl+Alt+Shift+R`, rebindable) toggles the box. **First run** (until the welcome is finished: `Settings.onboarded`;
+Open editor, Library, System icons ▸, Restore all icons…, Settings, Hide box, Quit Reskin. Tray icon has the same menu; its
+item follows the box: *Hide box* while it shows, else *Show box*, which shows it (closing an open editor into it) — over a
+fullscreen app too (also the one just left for the tray), until no fullscreen app has been seen for 30 s or the box is hidden
+again. Global hotkey (default `Ctrl+Alt+Shift+R`,
+rebindable) and a tray click toggle the box (while a fullscreen app hides it: open the editor). Starting Reskin again brings
+the open editor to the front, else shows the box. **First run** (until the welcome is finished: `Settings.onboarded`;
 not at an `--autostart` start): editor opens on a short animated welcome, then morphs down into the box with the hint "drag a
 shortcut onto me".
 
@@ -114,9 +118,9 @@ Style presets rendered live from your icon: Glass, Neon, Mono Light/Dark, Pastel
 Fluent, Duotone, Sketch. Colour: HSV picker + hex/RGB/alpha + recents; palettes Fluent, Material, Pastel, Neon, Earth, Grayscale;
 dominant colours (median cut); gradient editor. Undo/redo + history panel (tile snapshots, 256 MB LRU), zoom/pan, pixel grid,
 Windows keyline guides, before/after (hold `\` or split view). Previews 16–256 px through the real export path; icon on your
-actual wallpaper with its label; taskbar light/dark previews. Import from dialog, drop, paste, or another shortcut's icon
-(popover: layer or queue?). Export `.ico`, `.png`, clipboard, `.reskin`. Library of saved designs + per-target history,
-Restore original / Restore all. Autosave + crash recovery.
+actual wallpaper with its label; taskbar light/dark previews. Import from dialog (images, icons, shortcuts, programs and
+`.reskin` projects), drop, paste, or another shortcut's icon (popover: layer or queue?). Export `.ico`, `.png`, clipboard,
+`.reskin`. Library of saved designs + per-target history, Restore original / Restore all. Autosave + crash recovery.
 
 **App:** command palette (Ctrl+K), shortcuts overlay (`?`), toasts; themes dark/light/system + Windows accent; animation speed and
 reduced motion (Windows `SPI_GETCLIENTAREAANIMATION`, read live, + media query; the pages re-read accent and animation effects
@@ -141,18 +145,33 @@ holds is flagged in Settings.
 - **Journal:** `pending` → `applied`, originals first; atomic writes (tmp + rename); reconcile on startup. **Restore** writes
   originals back (empty IconLocation, delete HKCU values, delete Reskin-created shortcuts) then GCs unreferenced `.ico`s.
 - **Elevation:** on `E_ACCESSDENIED` (Public Desktop), after asking. Self-contained job `…\jobs\<uuid>.json` (absolute targets +
-  embedded ICO bytes). `ShellExecuteExW("runas")` → `reskin.exe --elevated-apply <job>`; parent waits, reads
-  `<job>.result.json`; UAC cancel (1223) handled. Helper validates: targets under `FOLDERID_PublicDesktop`, destination matches
-  `%ProgramData%\Reskin\icons\[a-z0-9-]{1,64}\.ico`, ICO parses and ≤1 MB. Alternative: "personal copy" on the user's desktop.
+  embedded ICO bytes, at most 64 ops: one prompt each). `ShellExecuteExW("runas")` → `reskin.exe --elevated-apply <job>`;
+  parent waits, then reads the helper's result `%ProgramData%\Reskin\results\<job id>.json` — only a plain file owned by
+  Administrators or SYSTEM that agrees with the exit code, else the exit code alone decides; UAC cancel (1223) handled.
+  Helper validates: job read once without following a link (size-capped), targets directly on `FOLDERID_PublicDesktop`,
+  destination matches `%ProgramData%\Reskin\icons\[a-z0-9-]{1,64}\.ico` (no device names), ICO parses and ≤1 MB. Link-safe
+  access (folders from the known-folder API, never the environment): it writes only in the admin-owned `%ProgramData%\Reskin`
+  tree (folders created owned by Administrators with a protected DACL, held open while it works); every file is opened
+  without following a reparse point, created `CREATE_NEW`, checked by final path and deleted by handle; a Public-Desktop
+  shortcut must be a plain file directly there before the shell edits it, and a `.url` rewritten by hand goes through a file
+  created beside it the same way and renamed over it by handle. No log. Alternative: "personal copy" on the user's desktop.
 - **Desktop icon lookup:** `ShellWindows.FindWindowSW(CSIDL_DESKTOP, SWC_DESKTOP)` → `QueryService(SID_STopLevelBrowser)` →
   `QueryActiveShellView` → `IFolderView2`; match by `SHGDN_FORPARSING`; `GetItemPosition` (relative to `SysListView32`) +
   `MapWindowPoints`; icon size; `FWF_NOICONS`; z-order walk for occlusion (skip own, hidden, minimized, cloaked windows).
 - **CLI:** in `main()` before the builder: `--elevated-apply <job>` (exit 0/2/3), `--restore-all [--quiet]`, `--self-test` (JSON).
   In-app: `--edit <path>` (context-menu verb, forwarded by single-instance), `--autostart`, `--smoke-test [--capture-handoff]`.
   Started "as administrator", the app starts itself again unelevated through Explorer (`IShellDispatch2::ShellExecute`,
-  marked `--relaunched`) and exits; if that fails it warns and carries on.
-- **Uninstall:** `src-tauri/windows/hooks.nsh` (`NSIS_HOOK_PREUNINSTALL`) deletes the context-menu keys; if
-  `$DeleteAppDataCheckboxState = 1` and not an update, runs `reskin.exe --restore-all --quiet`.
+  marked `--relaunched`) and exits; if that fails it warns and carries on. `--restore-all` with an administrator's full token
+  (an elevated terminal or uninstaller) restores nothing itself: it starts itself again as the desktop user
+  (`CreateProcessWithTokenW` with Explorer's token, `--relaunched`), waits and returns that run's exit code; when it cannot,
+  it refuses with exit 3 (the uninstaller then keeps the data).
+- **Uninstall:** NSIS: `src-tauri/windows/hooks.nsh` (`NSIS_HOOK_PREUNINSTALL`; nothing on an update) deletes the Explorer
+  verb keys and the "Start with Windows" `Run` value with Task Manager's flag for it (`StartupApproved\Run`); a silent or
+  passive uninstall ticks *Delete app data* with `/DELETEAPPDATA`. With it ticked, `reskin.exe --restore-all --quiet` runs
+  first (Public-Desktop items ask for approval once per 64; an item deleted since counts as restored; Public-Desktop icons
+  nothing needs any more go too); if the restore fails (exit ≠ 0) the uninstaller says so and keeps the data, so the icons
+  keep working and can still be restored. MSI: `src-tauri/windows/uninstall.wxs` removes the Explorer verb keys (HKCU) with
+  the app and keeps Reskin's data and applied icons.
 
 ## Build, CI & release
 - Local: `pnpm check && pnpm test && pnpm build && pnpm e2e`; `cargo fmt --all --check && cargo clippy -p reskin-core
@@ -177,6 +196,7 @@ original plan; summarized in ARCHITECTURE.md "Verification".)
 Morph glitches → ack protocol + invariant + shared BoxVisual + 400 ms crossfade fallback. Hidden-window IPC/drop bugs → prime,
 mailbox, box created visible, recreate editor if mailbox silent 2 s. Transparency failures → no cursor toggling/minimize/idle
 animation + compatibility mode. Stale icon cache → content-hashed paths, SHChangeNotify, `ie4uinit -show`. Elevation/UIPI → app
-always non-elevated (started as administrator, it restarts unelevated through Explorer); privileged writes only via the
-validated helper. Desktop lookup fails → celebrate in place. Unsigned exe SmartScreen → documented. Missing WebView2 →
-bootstrapper + CI step; the portable exe checks for the runtime before building any window and offers Microsoft's download.
+always non-elevated (started as administrator, it restarts unelevated through Explorer; `--restore-all` restarts as the
+desktop user); privileged writes only via the validated helper. Desktop lookup fails → celebrate in place. Unsigned exe
+SmartScreen → documented. Missing WebView2 → bootstrapper + CI step; the portable exe checks for the runtime before building
+any window and offers Microsoft's download.

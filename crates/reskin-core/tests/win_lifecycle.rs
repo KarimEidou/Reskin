@@ -1,11 +1,12 @@
 //! App lifecycle against the real HKCU and Explorer: the "Start with
 //! Windows" entry (and Task Manager's flag next to it), and starting a
-//! process unelevated through the shell.
+//! process unelevated through the shell or as the desktop user.
 //!
 //! Every test is `#[ignore]`d: they run on Windows CI with
-//! `cargo test -- --include-ignored`. They use their own registry value
-//! names and temp folders and remove them again, also when an assertion
-//! fails (drop guards).
+//! `cargo test -- --include-ignored` (starting a process as the desktop
+//! user needs administrator rights, which CI has). They use their own
+//! registry value names and temp folders and remove them again, also when
+//! an assertion fails (drop guards).
 #![cfg(windows)]
 
 use std::ffi::OsString;
@@ -20,7 +21,7 @@ use windows::Win32::System::Registry::{
     HKEY_CURRENT_USER, REG_BINARY, REG_SZ, RRF_RT_ANY, RegDeleteKeyValueW, RegGetValueW,
     RegSetKeyValueW,
 };
-use windows::Win32::UI::WindowsAndMessaging::FindWindowW;
+use windows::Win32::UI::WindowsAndMessaging::{FindWindowW, GetShellWindow};
 use windows::core::{HSTRING, PCWSTR, w};
 
 const RUN_KEY: &str = r"Software\Microsoft\Windows\CurrentVersion\Run";
@@ -220,4 +221,40 @@ fn a_process_starts_through_explorer() {
     let created = dir.is_dir();
     let _ = std::fs::remove_dir(&dir);
     assert!(created, "Explorer did not run {}", cmd.display());
+}
+
+#[test]
+#[ignore = "Windows shell integration as administrator (run with --include-ignored)"]
+fn a_process_runs_as_the_desktop_user_and_its_exit_code_comes_back() {
+    // A headless session has no desktop shell to take the user from, and
+    // an administrator's rights are what allow it (CI has them).
+    // SAFETY: plain window lookup.
+    if unsafe { GetShellWindow() }.is_invalid() {
+        assert!(matches!(
+            elevate::run_as_desktop_user(Path::new("cmd.exe"), &[]),
+            Err(reskin_core::Error::NotFound(_))
+        ));
+        return;
+    }
+    let cmd = PathBuf::from(std::env::var_os("ComSpec").expect("ComSpec"));
+    let dir: PathBuf = std::env::temp_dir().join(unique("desktop-user"));
+    let started = Instant::now();
+    let code = elevate::run_as_desktop_user(
+        &cmd,
+        &[
+            "/c".into(),
+            "mkdir".into(),
+            dir.to_string_lossy().into_owned(),
+            "&&".into(),
+            "exit".into(),
+            "7".into(),
+        ],
+    )
+    .unwrap();
+    // It was waited for: its work is done and its exit code is back.
+    let created = dir.is_dir();
+    let _ = std::fs::remove_dir(&dir);
+    assert_eq!(code, 7);
+    assert!(created, "{} did not run", cmd.display());
+    assert!(started.elapsed() < Duration::from_secs(60));
 }

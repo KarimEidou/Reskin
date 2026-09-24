@@ -190,7 +190,7 @@ pub fn ensure_editor<R: Runtime>(
 /// Destroys the editor window and forgets its page (the next open builds a
 /// new one). Waits until tauri has released the label, so that the next
 /// open does not find the dying window.
-fn destroy_editor<R: Runtime>(app: &AppHandle<R>, editor: &WebviewWindow<R>) {
+pub(crate) fn destroy_editor<R: Runtime>(app: &AppHandle<R>, editor: &WebviewWindow<R>) {
     let _ = editor.destroy();
     let deadline = Instant::now() + DESTROY_WAIT;
     while app.get_webview_window(editor_window::LABEL).is_some() && Instant::now() < deadline {

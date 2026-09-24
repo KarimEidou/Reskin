@@ -2,14 +2,23 @@
 //!
 //! Early modes (handled in `main()` before Tauri starts):
 //! - `--elevated-apply <job.json>`: the elevated helper (exit 0/2/3)
-//! - `--restore-all [--quiet]`: restore every icon Reskin changed
+//! - `--restore-all [--quiet]`: restore every icon Reskin changed (run as
+//!   administrator, it starts itself again as the desktop user)
 //! - `--self-test`: print a JSON health report
 //!
 //! In-app flags: `--edit <path>…` (Explorer verb; forwarded to the running
 //! instance by single-instance), `--autostart`, `--smoke-test
 //! [--capture-handoff]`.
+//!
+//! [`RELAUNCHED`] marks a start that an instance run as administrator made
+//! to leave elevation behind (the app, `--restore-all`), so it never tries
+//! a second time.
 
 use std::path::PathBuf;
+
+/// Added to the arguments of a Reskin started again, without
+/// administrator rights, by one that was run as administrator.
+pub const RELAUNCHED: &str = "--relaunched";
 
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct AppArgs {
@@ -63,7 +72,10 @@ pub fn run_early(args: &[String]) -> Option<i32> {
         return Some(crate::helper::elevated_apply(&job));
     }
     if flag("--restore-all") {
-        return Some(crate::helper::restore_all(flag("--quiet")));
+        return Some(crate::helper::restore_all(
+            flag("--quiet"),
+            flag(RELAUNCHED),
+        ));
     }
     None
 }

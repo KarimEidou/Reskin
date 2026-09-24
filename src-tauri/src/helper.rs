@@ -2,6 +2,10 @@
 //! "restore all" (used by the uninstaller), plus launching the elevated
 //! helper from the app.
 //!
+//! "Restore all" never works with an administrator's rights: started with
+//! them, it starts itself again as the desktop user and passes that run's
+//! verdict on (see [`restore_all`]).
+//!
 //! The elevated helper creates and writes files only in the admin-owned
 //! `%ProgramData%\Reskin` tree and edits only shortcuts that are plain files
 //! directly on the Public Desktop, never following a link on the way
@@ -104,8 +108,7 @@ impl JobExec for WinJobExec {
     }
 
     fn set_url_icon(&mut self, target: &str, icon: Option<(&str, i32)>) -> Result<()> {
-        self.desktop.check_file(Path::new(target))?;
-        urlfile::set_url_icon(Path::new(target), icon)
+        urlfile::set_url_icon_in(&self.desktop, Path::new(target), icon)
     }
 
     fn delete_icon(&mut self, dest: &str) -> Result<bool> {
@@ -214,6 +217,49 @@ pub fn run_elevated_job(dirs: &AppDirs, ops: Vec<JobOp>) -> Result<JobResult> {
     Ok(job::result_for(&job.id, code, count, file.as_deref()))
 }
 
+/// Where `reskin.exe --restore-all` does its work.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RestoreAs {
+    /// In this process, which acts with the user's own rights.
+    Here,
+    /// In Reskin started again as the desktop user: this process holds an
+    /// administrator's full token (started from an elevated terminal or
+    /// uninstaller) and must not use it on the user's files.
+    DesktopUser,
+    /// Nowhere: started again as the desktop user, it still holds an
+    /// administrator's full token (the desktop shell runs elevated).
+    Refused,
+}
+
+fn restore_as(uac_elevated: bool, relaunched: bool) -> RestoreAs {
+    match (uac_elevated, relaunched) {
+        (false, _) => RestoreAs::Here,
+        (true, false) => RestoreAs::DesktopUser,
+        (true, true) => RestoreAs::Refused,
+    }
+}
+
+/// Why `--restore-all` does not run with administrator rights.
+const NOT_AS_ADMIN: &str = "Reskin puts icons back with your own rights, not an administrator's: \
+     with them it would write where anything you run can redirect it.";
+
+/// What `--restore-all` run as administrator reports and returns once its
+/// run as the desktop user ended with `code`.
+fn desktop_user_verdict(code: i32) -> (i32, &'static str) {
+    if code == EXIT_OK {
+        (
+            EXIT_OK,
+            "Reskin: every icon it changed is back (restored with your own rights).",
+        )
+    } else {
+        (
+            EXIT_FAILED,
+            "Reskin: not every icon could be put back. To see which, run \
+             `reskin.exe --restore-all` again from a terminal that isn't run as administrator.",
+        )
+    }
+}
+
 /// `reskin.exe --restore-all [--quiet]` — restores every change, asking
 /// once for administrator approval when Public-Desktop items need it (also
 /// under `--quiet`, the uninstaller's run). Safe while the app runs: each
@@ -221,8 +267,17 @@ pub fn run_elevated_job(dirs: &AppDirs, ops: Vec<JobOp>) -> Result<JobResult> {
 /// [`EXIT_OK`] when everything Reskin changed is back, [`EXIT_FAILED`]
 /// otherwise — the uninstaller then keeps Reskin's data (and the icons that
 /// are still in use).
-pub fn restore_all(quiet: bool) -> i32 {
-    com_init();
+///
+/// Started with an administrator's full token (an elevated terminal or
+/// uninstaller), it restores nothing itself — it would write the journal,
+/// the icons folder and the user's shortcuts with administrator rights,
+/// where the user can plant links, and read the history of whoever
+/// approved the prompt — but starts itself again as the desktop user
+/// (`relaunched`), waits and passes that run's exit code on. Public-Desktop
+/// items still go through the elevated helper's checked jobs. When that
+/// fails, it refuses with [`EXIT_FAILED`], so the uninstaller keeps the
+/// data.
+pub fn restore_all(quiet: bool, relaunched: bool) -> i32 {
     if !quiet {
         crate::console::attach_parent();
     }
@@ -231,6 +286,46 @@ pub fn restore_all(quiet: bool) -> i32 {
             println!("{text}");
         }
     };
+    match restore_as(elevate::is_uac_elevated(), relaunched) {
+        RestoreAs::Here => restore_all_here(&say),
+        // Nothing here writes, not even the log (`%TEMP%` is the user's).
+        RestoreAs::DesktopUser => {
+            let args = [
+                "--restore-all".to_owned(),
+                "--quiet".to_owned(),
+                crate::cli::RELAUNCHED.to_owned(),
+            ];
+            let run = std::env::current_exe()
+                .map_err(Error::from)
+                .and_then(|exe| elevate::run_as_desktop_user(&exe, &args));
+            match run {
+                Ok(code) => {
+                    let (code, verdict) = desktop_user_verdict(code);
+                    say(verdict);
+                    code
+                }
+                Err(e) => {
+                    say(&format!(
+                        "Reskin: {NOT_AS_ADMIN} It could not start itself without them ({e}); \
+                         run it again from a terminal that isn't run as administrator."
+                    ));
+                    EXIT_FAILED
+                }
+            }
+        }
+        RestoreAs::Refused => {
+            say(&format!(
+                "Reskin: {NOT_AS_ADMIN} Run it again from a terminal that isn't run as \
+                 administrator."
+            ));
+            EXIT_FAILED
+        }
+    }
+}
+
+/// `--restore-all` in this process (see [`restore_all`]).
+fn restore_all_here(say: &dyn Fn(&str)) -> i32 {
+    com_init();
     let dirs = AppDirs::from_env();
     let loaded = Journal::load(dirs.journal_file()).and_then(|mut journal| {
         // Settle changes interrupted by a crash first, or they would stay;
@@ -280,5 +375,36 @@ pub fn restore_all(quiet: bool) -> i32 {
         EXIT_OK
     } else {
         EXIT_FAILED
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn restore_all_never_works_with_an_administrators_rights() {
+        assert_eq!(restore_as(false, false), RestoreAs::Here);
+        // Started again by an elevated run: it has the user's rights now.
+        assert_eq!(restore_as(false, true), RestoreAs::Here);
+        // From an elevated terminal or uninstaller: the desktop user's run
+        // restores.
+        assert_eq!(restore_as(true, false), RestoreAs::DesktopUser);
+        // Still elevated after that (the desktop shell runs elevated): no
+        // second start, and no restore as administrator either.
+        assert_eq!(restore_as(true, true), RestoreAs::Refused);
+    }
+
+    #[test]
+    fn the_desktop_users_run_decides_the_exit_code() {
+        let (code, text) = desktop_user_verdict(EXIT_OK);
+        assert_eq!(code, EXIT_OK);
+        assert!(text.contains("every icon"), "{text}");
+        // Anything else keeps the uninstaller from deleting Reskin's data.
+        for failed in [EXIT_FAILED, EXIT_INVALID, 1, -1] {
+            let (code, text) = desktop_user_verdict(failed);
+            assert_eq!(code, EXIT_FAILED, "{failed}");
+            assert!(text.contains("isn't run as administrator"), "{text}");
+        }
     }
 }

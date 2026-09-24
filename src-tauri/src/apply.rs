@@ -10,8 +10,8 @@ use std::time::{Duration, Instant};
 use reskin_core::history::NewEntry;
 use reskin_core::model::{
     Access, ApplyMode, ApplyOutcome, ApplyRequest, BoxFlight, CollapseThen, ExportKind,
-    ExportRequest, FlightPhase, HistoryEntry, ItemKind, MotionPref, OriginalIcon, Rect, SizedPng,
-    SystemIconId, TargetKind,
+    ExportRequest, FlightPhase, HistoryEntry, ItemKind, MotionPref, OriginalIcon, Rect, Settings,
+    SizedPng, SystemIconId, TargetKind,
 };
 use reskin_core::pixels::b64_decode;
 use reskin_core::win::{access, desktop, folder, known, notify, shortcut, sysicons, urlfile};
@@ -420,14 +420,32 @@ fn refused(rec: &ItemRecord, target: &Target) -> ApplyOutcome {
     }
 }
 
+/// Whether this apply plays the flourish (see [`wants_flourish`]).
 fn flourish_enabled(state: &AppState, requested: bool) -> bool {
-    let s = state.settings();
+    wants_flourish(
+        requested,
+        &state.settings(),
+        state.system_reduced_motion(),
+        morph::box_allowed(state),
+    )
+}
+
+/// The flourish (the editor collapses into the box, which flies to the
+/// icon) plays when the page asked for it, Settings keep it on, motion is
+/// not reduced and the box may be on screen: neither the user nor a
+/// fullscreen app hides it (`box_allowed`).
+fn wants_flourish(
+    requested: bool,
+    s: &Settings,
+    system_reduced_motion: bool,
+    box_allowed: bool,
+) -> bool {
     let reduced = match s.motion {
         MotionPref::Reduced => true,
         MotionPref::Full => false,
-        MotionPref::System => state.system_reduced_motion(),
+        MotionPref::System => system_reduced_motion,
     };
-    requested && s.flourish && !reduced && !state.box_hidden_by_user()
+    requested && s.flourish && !reduced && box_allowed
 }
 
 fn emit_flight<R: Runtime>(
@@ -1194,6 +1212,36 @@ mod tests {
             .desktop_item(),
             Some(PathBuf::from("::{F02C1A0D-BE21-4350-88B0-7367FC96EF3C}"))
         );
+    }
+
+    #[test]
+    fn the_box_flies_only_when_it_may_be_on_screen() {
+        let on = Settings {
+            motion: MotionPref::Full,
+            flourish: true,
+            ..Settings::default()
+        };
+        assert!(wants_flourish(true, &on, false, true));
+        // Hidden by the user or by a fullscreen app: no flight across the
+        // desktop; the icon changes in place.
+        assert!(!wants_flourish(true, &on, false, false));
+        assert!(!wants_flourish(false, &on, false, true));
+        let off = Settings {
+            flourish: false,
+            ..on.clone()
+        };
+        assert!(!wants_flourish(true, &off, false, true));
+        let reduced = Settings {
+            motion: MotionPref::Reduced,
+            ..on.clone()
+        };
+        assert!(!wants_flourish(true, &reduced, false, true));
+        let system = Settings {
+            motion: MotionPref::System,
+            ..on
+        };
+        assert!(wants_flourish(true, &system, false, true));
+        assert!(!wants_flourish(true, &system, true, true));
     }
 
     #[test]
