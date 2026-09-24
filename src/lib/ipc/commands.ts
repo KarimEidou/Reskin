@@ -45,6 +45,8 @@ export const commands = {
   /** Opens the editor out of the box with the given items / view. */
   openEditor: (items: ItemId[], view: EditorView) =>
     invoke<void>('open_editor', { items, view }),
+  /** The picture taken over with `box:collapse` is on screen (close handoff). */
+  boxPainted: (session: number) => invoke<void>('box_painted', { session }),
 
   // --- morph mailbox (editor) --------------------------------------------
   /** Long-polls for commands with seq > after (25 s heartbeat). */
@@ -109,6 +111,7 @@ export const COMMAND_NAMES = [
   'box_drag',
   'box_menu',
   'open_editor',
+  'box_painted',
   'editor_next',
   'editor_ack',
   'editor_close',

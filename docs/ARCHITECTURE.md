@@ -7,8 +7,8 @@ update this file in the same change.
 ## Repository map
 
 ```
-box.html editor.html            Vite pages (multi-page build)
-src/box/                        floating box page — NO engine imports, tiny (≤45 KB gz JS)
+box.html editor.html            Vite pages, each built on its own (vite.config.ts `environments`)
+src/box/                        floating box page — NO engine imports, tiny (≤33 KB gz JS)
 src/editor/                     editor page: App.svelte, morph/MorphController.ts, panels/*, dialogs/*
 src/engine/                     pure-TS image engine (no Svelte, no DOM in core logic) — unit tested in node
 src/lib/ipc/                    commands.ts (typed invoke wrappers), events.ts, mailbox.ts, types.ts, bindings/ (ts-rs, generated)
@@ -34,11 +34,18 @@ src-tauri/                      the Tauri app (windows, animator, mailbox, comma
 * Errors: commands return `Result<T, String>`; JS sees a rejected promise with
   the message string.
 * Rust → box: events in `src/lib/ipc/events.ts` (`box:flight`, `box:progress`,
-  `box:shown`, `settings:changed`).
+  `box:collapse`, `box:shown`, `settings:changed`, `box:undo`).
 * Rust → editor: **mailbox only** (`editor_next(after)` long-poll, returns
   `Envelope[]` with increasing `seq`; returns `[{seq, cmd:{type:'heartbeat'}}]`
   after 25 s of silence). The editor processes envelopes strictly in order and
-  awaits each handler before the next.
+  awaits each handler before the next; `after` advances only once a handler
+  finished (a later poll acknowledges it, so a reloaded page gets it again).
+* Liveness: Rust recreates an editor whose mailbox has been silent for 2 s
+  (`morph.rs` `ALIVE_GRACE`). So no handler may hold the mailbox with long
+  work — `SmokeCycle` runs detached — and while any handler runs longer than
+  500 ms, `startMailbox` sends keep-alive polls every 500 ms. They poll from
+  the last *handled* envelope, so they acknowledge nothing (Rust answers at
+  once with the envelope still being handled) and their answers are dropped.
 
 ### Morph / handoff protocol (session numbers increase per open)
 
@@ -52,21 +59,33 @@ Rust: show editor (topmost), Reveal{session}
    editor: double rAF → editor_ack(session,'revealed')
 Rust: hide box; Expand{session, morph}
    morph=true : FLIP proxy → panel (~480 ms spring, scaled by animation speed),
-                panels stagger in → editor_ack(session,'expanded')
+                regions stagger in ([data-stagger], the workspace's
+                [data-panel]), the box's icon lands exactly on the document
+                (stage.docRect(); waits ≤ 250 ms for the item to reach the
+                canvas) → editor_ack(session,'expanded')
    morph=false: crossfade the panel in (Prepared came later than 400 ms, the
                 box was hidden, reduced motion, or the user chose crossfade)
 Rust: focus editor, not topmost.
 
 editor_close(reason)                          [editor → Rust]
 Rust: editor topmost; Collapse{session, boxRect, then, icon, morph}
-   editor: panel → proxy at boxRect (or fade out when morph=false)
-           → editor_ack(session,'collapsed')
-Rust: show box (+ box:shown); Clear{session}
+   editor: panel → proxy at boxRect (or fade out when morph=false), showing
+           handoffProps(collapseItems(then, icon)) → editor_ack(session,'collapsed')
+Rust: box:collapse{session, then, icon} to the still hidden box
+   box: takes over that picture (the same collapseItems → BoxVisual props:
+        empty after `hide`, the new icon after `fly`/`celebrate`)
+Rust: show box under the (topmost) editor + box:shown
+   box: keeps the picture; double rAF (hidden windows run no rAF, so only
+        now) → box_painted(session)   [Rust waits 300 ms, logs a timeout]
+Rust: Clear{session}
    editor: clear to fully transparent, double rAF → editor_ack(session,'cleared')
 Rust: hide editor (+ low-memory: destroy); glide box home if needed.
 ```
 Invariant: a window hides only when its content is transparent and shows only
 on top of an identical picture. Acks for an old session are ignored.
+After a plain close the box rests on the picture it took over; after an
+apply it stays frozen on the new icon until its flight (`depart` /
+`celebrate`) carries it on (or 8 s pass without one).
 
 `then` on Collapse: `hide` (plain close), `fly` (the box will fly to the
 desktop icon carrying `icon`), `celebrate` (in-place celebration). The apply
@@ -76,16 +95,31 @@ flow drives these itself (`editor_close('applied')` is a no-op).
 design through the export pipeline, calls `apply_icon` (mode inPlace,
 flourish false) on `item`, then `restore({type:'item', item})`, and reports
 `smoke_ready({window:'editor', detail:'cycle:ok'})` or
-`'cycle:fail:<reason>'`.
+`'cycle:fail:<reason>'`. It runs detached from the mailbox (it can take 20 s
+and more); the report is its only answer.
 
 ### Box events
 
 `box:flight` (`BoxFlight{phase, icon, durationMs, message}`) — depart/land/
 return/home legs of the fly-to-icon, `celebrate`, and `error` (shake, with
-message). `box:progress` (batch ring), `box:shown`, `settings:changed`, and
-`box:undo` (payload: history entry id) — after a successful apply the box
-shows an **Undo** chip for 6 s; clicking it calls
+message). `box:progress` (batch ring), `box:collapse` (`BoxCollapse{session,
+then, icon}`, see the close handoff; answered with `box_painted(session)`),
+`box:shown` (keeps a picture taken over with `box:collapse`, else resets the
+box), `settings:changed`, and `box:undo` (payload: history entry id) — after
+a successful apply the box shows an **Undo** chip for 6 s; clicking it calls
 `restore({type:'entry', id})`.
+
+### Editor keyboard and paste
+
+Escape closes the editor, and a pasted image outside the canvas joins the
+design (or starts one), only when nothing else used the event: whatever
+handles Escape (a dialog, popover or menu, a text field, a drag, a pending
+transform, a text edit, a lasso polygon, a panel editor) or a paste (the
+canvas adds pasted images as layers) calls `preventDefault` or stops it.
+The App decides in a window listener added while the event is on its way
+(`chrome/last-listener.ts`), so it runs after every other listener — the
+workspace's window listeners are added long after the App's. Files dropped
+from Explorer (Tauri drag-drop events) stay the App's (import popover).
 
 ## Rust: reskin-core module contracts
 
@@ -212,6 +246,11 @@ Windows (`win/`, `#[cfg(windows)]`, type-checked on Linux with
   speed setting and reduced motion). Only animate `transform`, `opacity`,
   `clip-path`, `filter` (sparingly). No idle/continuous animations in the box.
 * CSP: no inline scripts, no `eval`, no remote URLs. Images via `data:`/`blob:`.
+* Build: `vite build` builds each page on its own (the app builder runs the
+  `client` environment for editor.html, then `box` for box.html into the
+  same outDir), so the box never loads chunks shared with the editor (they
+  would carry the union of both pages' Svelte runtime and library code).
+  `pnpm bundle:budget` guards the box's initial JS.
 * Every page entry (`src/*/main.ts`) starts with
   `if (__E2E__) (await import('../testing/tauri-mock')).install('<box|editor>')`
   so the e2e build runs against the fake backend; production builds drop it.

@@ -5,6 +5,7 @@ import { mkdirSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type { Page } from '@playwright/test';
+import { PNG } from 'pngjs';
 import type { BoxSkin } from '../src/lib/ipc/types';
 import { iconRect, metricsFor, visualRect } from '../src/lib/ui/box-geometry';
 import {
@@ -14,12 +15,16 @@ import {
   expect,
   inspectReturns,
   makeItems,
+  openPage,
+  pushEditorCmd,
   SAMPLE_PATHS,
   setInspectDelay,
   setSettings,
+  simulateBoxReturn,
   simulateClose,
   simulateOpen,
   test,
+  waitForAck,
   waitForCall,
 } from './support/fixtures';
 
@@ -311,6 +316,89 @@ test.describe('events from Rust', () => {
     await box.pointerAway();
     await box.hit.hover();
     await box.expectState('hover');
+  });
+
+  test('the close handoff: the hidden box takes over the proxy picture, then confirms it', async ({ openBox, page }) => {
+    const box = await openBox();
+    // Handed over to the editor: frozen on the dropped icon.
+    const [dropped] = await makeItems(page, [SAMPLE_PATHS.steam]);
+    await box.drop([SAMPLE_PATHS.steam]);
+    await waitForCall(page, 'open_editor');
+    await expect(box.icon).toHaveAttribute('src', dropped!.icon!);
+
+    // Rust, with the box still hidden: the proxy collapsed carrying the new icon.
+    const [applied] = await makeItems(page, [SAMPLE_PATHS.notes]);
+    await emit(page, 'box:collapse', { session: 7, then: 'fly', icon: applied!.icon });
+    await expect(box.icon).toHaveAttribute('src', applied!.icon!);
+    await box.expectState('idle');
+    await expect(box.badge).toHaveCount(0);
+    // Not shown yet: nothing painted, nothing confirmed.
+    await page.waitForTimeout(100);
+    expect(await calls(page, 'box_painted')).toHaveLength(0);
+
+    // Shown under the editor: it keeps the picture and confirms it.
+    await emit(page, 'box:shown', null);
+    await waitForCall(page, 'box_painted', { session: 7 });
+    await expect(box.icon).toHaveAttribute('src', applied!.icon!);
+    // Still frozen until the flight carries the icon on.
+    await box.hit.hover();
+    await box.expectState('idle');
+    await box.flight('depart', applied!.icon);
+    await box.expectState('flying');
+    await expect(box.icon).toHaveAttribute('src', applied!.icon!);
+  });
+
+  test('a quick plain close brings the box back empty, not with the dropped icon', async ({ openBox, page }) => {
+    const box = await openBox();
+    await box.drop([SAMPLE_PATHS.steam]);
+    await waitForCall(page, 'open_editor');
+    await expect(box.icon).toHaveCount(1);
+    const back = await simulateBoxReturn(page, 'hide');
+    expect(back.painted).toBe(true);
+    await expect(box.icon).toHaveCount(0);
+    await box.expectState('idle');
+    // At rest again: hovering lifts it.
+    await box.hit.hover();
+    await box.expectState('hover');
+  });
+
+  test("the box shows exactly the picture the editor's proxy collapsed onto", async ({ openBox, page, context }) => {
+    const box = await openBox();
+    const [applied] = await makeItems(page, [SAMPLE_PATHS.notes]);
+    const m = metricsFor('medium');
+    const region = { x: 0, y: 0, width: m.window, height: m.window };
+
+    // The editor (its own page) collapses onto its proxy at the box's place.
+    const editor = await context.newPage();
+    await openPage(editor, 'editor');
+    await simulateOpen(editor, [SAMPLE_PATHS.steam], 'edit');
+    const { session } = await editorState(editor);
+    await pushEditorCmd(editor, {
+      type: 'collapse',
+      session,
+      boxRect: { x: 0, y: 0, w: m.window, h: m.window },
+      then: 'celebrate',
+      icon: applied!.icon,
+      morph: true,
+    });
+    expect(await waitForAck(editor, session, 'collapsed')).toBe(true);
+    const proxy = PNG.sync.read(await editor.screenshot({ clip: region, omitBackground: true }));
+
+    const back = await simulateBoxReturn(page, 'celebrate', applied!.icon);
+    expect(back.painted).toBe(true);
+    await box.expectStatic();
+    const shown = PNG.sync.read(await page.screenshot({ clip: region, omitBackground: true }));
+
+    let differing = 0;
+    let painted = 0;
+    for (let i = 0; i < proxy.data.length; i += 4) {
+      const d = Math.max(...[0, 1, 2, 3].map((c) => Math.abs(proxy.data[i + c]! - shown.data[i + c]!)));
+      if (d > 8) differing++;
+      if (shown.data[i + 3]! > 0) painted++;
+    }
+    expect(painted).toBeGreaterThan(m.visual * m.visual * 0.5);
+    expect(differing).toBe(0);
+    await editor.close();
   });
 
   test('box:undo offers Undo, which restores the entry', async ({ openBox, page }) => {

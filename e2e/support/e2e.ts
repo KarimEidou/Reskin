@@ -18,6 +18,7 @@ import type {
   E2ECall,
   E2EConfig,
   E2EEditorState,
+  SimulateBoxReturnResult,
   SimulateCloseOptions,
   SimulateCloseResult,
   SimulateOpenOptions,
@@ -144,6 +145,15 @@ export function simulateClose(
   opts: SimulateCloseOptions = {},
 ): Promise<SimulateCloseResult> {
   return page.evaluate(([t, o]) => window.__e2e!.simulateClose(t, o), [then, opts] as const);
+}
+
+/** Box page: Rust's end of a close handoff (see E2EApi.simulateBoxReturn). */
+export function simulateBoxReturn(
+  page: Page,
+  then: CollapseThen = 'hide',
+  icon: string | null = null,
+): Promise<SimulateBoxReturnResult> {
+  return page.evaluate(([t, i]) => window.__e2e!.simulateBoxReturn(t, i), [then, icon] as const);
 }
 
 export function waitForAck(page: Page, session: number, stage: AckStage, timeoutMs = 5000): Promise<boolean> {

@@ -80,6 +80,35 @@ test('a slow item load is waited for', async ({ openEditor, page }) => {
   expect(await cycleResult(page)).toBe('cycle:ok');
 });
 
+test('a slow cycle never holds the mailbox', async ({ openEditor, page }) => {
+  await openEditor({ smoke: true });
+  const [item] = await makeItems(page, [SAMPLE_PATHS.steam]);
+  await simulateOpen(page, [item!], 'edit');
+  // An apply that takes 3 s (Rust takes a mailbox silent for 2 s for a dead page).
+  type Slow = { __slowApply?: boolean };
+  await page.evaluate(() => {
+    type Invoke = (c: string, a?: unknown, o?: unknown) => Promise<unknown>;
+    const internals = (window as unknown as { __TAURI_INTERNALS__: { invoke: Invoke } }).__TAURI_INTERNALS__;
+    const inner = internals.invoke;
+    internals.invoke = async (cmd, args, options) => {
+      if (cmd === 'apply_icon') {
+        (window as Slow).__slowApply = true;
+        await new Promise((r) => setTimeout(r, 3000));
+      }
+      return inner(cmd, args, options);
+    };
+  });
+  const cycleSeq = await pushEditorCmd(page, { type: 'smokeCycle', item: item!.id });
+  await page.waitForFunction(() => (window as Slow).__slowApply === true);
+  // While the cycle runs, the page keeps polling past it and handles what comes next.
+  const navigateSeq = await pushEditorCmd(page, { type: 'navigate', view: 'history' });
+  await expect(page.getByTestId('history-view')).toBeVisible();
+  expect((await reports(page)).some((r) => r.detail.startsWith('cycle:'))).toBe(false);
+  await waitForCall(page, 'editor_next', { after: navigateSeq });
+  expect(navigateSeq).toBeGreaterThan(cycleSeq);
+  expect(await cycleResult(page)).toBe('cycle:ok');
+});
+
 test('a failed apply is reported as cycle:fail with the reason', async ({ openEditor, page }) => {
   await openEditor({ smoke: true });
   const [item] = await makeItems(page, [SAMPLE_PATHS.notes]);

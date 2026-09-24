@@ -177,7 +177,7 @@ test.describe('compatibility mode', () => {
     await shot(page, 'editor-shell-start-compat.png');
     // Cleared: nothing but the window background remains visible to the user.
     await simulateClose(page);
-    await expect(page.locator('.frame')).toHaveAttribute('data-mode', 'hidden');
+    await expect(page.getByTestId('morph-frame')).toHaveAttribute('data-mode', 'hidden');
   });
 });
 
@@ -278,6 +278,33 @@ test.describe('library', () => {
     await page.getByTestId('confirm-ok').click();
     await waitForCall(page, 'library_delete', { id: stored!.id });
     await expect(view.getByText('Your Library is empty')).toBeVisible();
+  });
+
+  test('the icon-only menu keeps its focused trigger while it opens and closes', async ({ openEditor, page }) => {
+    await openEditor();
+    await simulateOpen(page, [SAMPLE_PATHS.steam], 'edit');
+    await hasDesign(page);
+    await page.evaluate(() => (window as unknown as Win).__reskinSession.saveToLibrary('Mono'));
+    await titleBar(page).getByRole('button', { name: 'Library' }).click();
+    type Probed = HTMLElement & { probe?: boolean };
+    const trigger = page.getByTestId('library-card').getByRole('button', { name: 'More actions for Mono' });
+    await trigger.evaluate((el) => void ((el as Probed).probe = true));
+    // Reached with the keyboard, its tooltip shows at once.
+    await trigger.focus();
+    await page.keyboard.press('Shift+Tab');
+    await page.keyboard.press('Tab');
+    await expect(trigger).toBeFocused();
+    await expect(page.getByRole('tooltip')).toHaveText('More actions for Mono');
+    // Opening the menu turns the tooltip off without re-creating the trigger
+    // (the old unwrap re-created it and wrote state while Svelte removed it).
+    await page.keyboard.press('Enter');
+    await expect(page.getByRole('menu')).toBeVisible();
+    await expect(page.getByRole('tooltip')).toHaveCount(0);
+    await page.keyboard.press('Escape');
+    await expect(page.getByRole('menu')).toHaveCount(0);
+    await expect(trigger).toBeFocused();
+    expect(await trigger.evaluate((el) => (el as Probed).probe)).toBe(true);
+    expect(await calls(page, 'editor_close')).toHaveLength(0);
   });
 
   test('apply a saved design to the queued item', async ({ openEditor, page }) => {
@@ -566,6 +593,71 @@ test.describe('files dropped on the editor', () => {
     await simulateOpen(page, [], 'start');
     await emit(page, 'tauri://drag-drop', { paths: [SAMPLE_PATHS.unreadable], position: { x: 500, y: 300 } });
     await expect(page.getByRole('alert').filter({ hasText: 'None of these items can be reskinned' })).toBeVisible();
+  });
+});
+
+test.describe('pasted images', () => {
+  /** Pastes a 64 px coral PNG (as a file, like a screenshot tool puts it on the clipboard). */
+  async function paste(page: Page): Promise<void> {
+    await page.evaluate(async () => {
+      const canvas = new OffscreenCanvas(64, 64);
+      const ctx = canvas.getContext('2d')!;
+      ctx.fillStyle = '#ff3366';
+      ctx.fillRect(0, 0, 64, 64);
+      const blob = await canvas.convertToBlob({ type: 'image/png' });
+      const data = new DataTransfer();
+      data.items.add(new File([blob], 'image.png', { type: 'image/png' }));
+      document.body.dispatchEvent(new ClipboardEvent('paste', { clipboardData: data, bubbles: true, cancelable: true }));
+    });
+  }
+
+  const layerNames = (page: Page) =>
+    page.evaluate(() =>
+      ((window as unknown as Win).__reskinSession.engine.doc.layers as Array<{ name: string }>).map((l) => l.name),
+    );
+
+  test('an image pasted on the Start page starts a design', async ({ openEditor, page }) => {
+    await openEditor();
+    await simulateOpen(page, [], 'start');
+    await expect(page.getByTestId('start-view')).toBeVisible();
+    await paste(page);
+    await hasDesign(page);
+    await expect(page.locator('[data-view-host]')).toHaveAttribute('data-view', 'edit');
+    expect(await layerNames(page)).toEqual(['Pasted image']);
+  });
+
+  test('on the canvas the workspace takes the paste: one layer, not two', async ({ openEditor, page }) => {
+    await openEditor();
+    await simulateOpen(page, [SAMPLE_PATHS.steam], 'edit');
+    await hasDesign(page);
+    await expect(page.getByTestId('canvas-stage')).toBeVisible();
+    const before = await layerNames(page);
+    await paste(page);
+    await expect.poll(() => layerNames(page)).toEqual([...before, 'Pasted image']);
+    // The App skips a paste the canvas already handled (preventDefault).
+    await page.waitForTimeout(300);
+    expect(await layerNames(page)).toEqual([...before, 'Pasted image']);
+  });
+
+  test('a paste into a text field stays text', async ({ openEditor, page }) => {
+    await openEditor();
+    // A saved design, so the Library shows its filter field.
+    await page.evaluate(() =>
+      (window as unknown as { __TAURI_INTERNALS__: { invoke(cmd: string, args: unknown): Promise<unknown> } }).__TAURI_INTERNALS__.invoke(
+        'library_save',
+        { entry: { id: null, name: 'Mono', thumb: '', data: '{}' } },
+      ),
+    );
+    await simulateOpen(page, [], 'library');
+    await page.getByRole('searchbox', { name: 'Filter designs' }).focus();
+    await page.evaluate(async () => {
+      const data = new DataTransfer();
+      data.items.add(new File([new Uint8Array([137, 80, 78, 71])], 'image.png', { type: 'image/png' }));
+      document.activeElement!.dispatchEvent(new ClipboardEvent('paste', { clipboardData: data, bubbles: true, cancelable: true }));
+    });
+    await page.waitForTimeout(300);
+    expect(await page.evaluate(() => (window as unknown as Win).__reskinSession.hasDesign)).toBe(false);
+    await expect(page.getByTestId('library-view')).toBeVisible();
   });
 });
 

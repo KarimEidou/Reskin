@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { defaultSettings } from '$lib/settings/defaults';
 import {
+  collapseItems,
   FIRST_RUN_HINT,
   handoffProps,
   iconRect,
@@ -121,5 +122,18 @@ describe('box geometry', () => {
     expect(handoffProps(settings, [], false)).toMatchObject({ icon: null, count: 0, hint: null });
     expect(handoffProps(settings, [], false, undefined, FIRST_RUN_HINT).hint).toBe(FIRST_RUN_HINT);
     expect(handoffProps(settings, items, false, undefined, FIRST_RUN_HINT).hint).toBeNull();
+  });
+
+  it('describes what the box holds at the end of a close handoff', () => {
+    // A plain close brings back the empty box, whatever icon Rust passes.
+    expect(collapseItems('hide', 'data:new')).toEqual([]);
+    // After an apply the box carries the new icon (one item, no badge).
+    expect(collapseItems('fly', 'data:new')).toEqual([{ icon: 'data:new' }]);
+    expect(collapseItems('celebrate', null)).toEqual([{ icon: null }]);
+    expect(handoffProps(defaultSettings(), collapseItems('celebrate', 'data:new'), false)).toMatchObject({
+      state: 'idle',
+      icon: 'data:new',
+      count: 1,
+    });
   });
 });

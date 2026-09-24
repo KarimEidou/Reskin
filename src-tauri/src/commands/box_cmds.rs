@@ -41,3 +41,10 @@ pub async fn open_editor(app: AppHandle, items: Vec<ItemId>, view: EditorView) -
         .await
         .map_err(|e| e.to_string())?
 }
+
+/// The box shows the picture it took over from the editor's collapsed
+/// proxy (`box:collapse`) on screen; the close handoff may clear the editor.
+#[tauri::command]
+pub fn box_painted(session: u32, state: State<'_, AppState>) {
+    state.morph.box_painted(session);
+}

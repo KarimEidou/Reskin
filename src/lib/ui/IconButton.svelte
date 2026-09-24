@@ -37,10 +37,13 @@
     ...rest
   }: Props = $props();
 
-  const tip = $derived(tooltip === false ? null : (tooltip ?? label));
+  const tip = $derived(tooltip === false ? label : (tooltip ?? label));
 </script>
 
-{#snippet button()}
+<!-- The Tooltip stays mounted when `tooltip` turns false (e.g. a menu
+     trigger while its menu is open): unwrapping would re-create the button
+     and drop its focus. -->
+<Tooltip text={tip} {shortcut} {placement} describe={tip !== label} disabled={tooltip === false}>
   <button
     {...rest}
     {type}
@@ -50,13 +53,7 @@
   >
     <Icon size={ICON_SIZE[size]} strokeWidth={ICON_STROKE} aria-hidden="true" />
   </button>
-{/snippet}
-
-{#if tip === null}
-  {@render button()}
-{:else}
-  <Tooltip text={tip} {shortcut} {placement} describe={tip !== label}>{@render button()}</Tooltip>
-{/if}
+</Tooltip>
 
 <style>
   .icon-btn {

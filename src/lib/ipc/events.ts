@@ -2,13 +2,18 @@
 // ./mailbox.ts instead: events to a window created hidden can be dropped.)
 
 import { listen, type UnlistenFn } from '@tauri-apps/api/event';
-import type { BoxFlight, BoxProgress, Settings } from './types';
+import type { BoxCollapse, BoxFlight, BoxProgress, Settings } from './types';
 
 export const EVENTS = {
   /** Fly-to-icon legs and celebrate/error states for the box. */
   flight: 'box:flight',
   /** Batch progress ring. */
   progress: 'box:progress',
+  /**
+   * The editor collapsed onto its proxy: take on its final picture while
+   * still hidden, then confirm with `box_painted` once shown.
+   */
+  collapse: 'box:collapse',
   /** The box was shown again (after the editor collapsed / hotkey). */
   shown: 'box:shown',
   /** Settings changed anywhere; payload is the full settings. */
@@ -20,6 +25,7 @@ export const EVENTS = {
 export interface EventPayloads {
   'box:flight': BoxFlight;
   'box:progress': BoxProgress;
+  'box:collapse': BoxCollapse;
   'box:shown': null;
   'settings:changed': Settings;
   'box:undo': string;

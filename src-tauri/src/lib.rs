@@ -179,6 +179,7 @@ pub fn run(args: AppArgs) {
             commands::box_cmds::box_drag,
             commands::box_cmds::box_menu,
             commands::box_cmds::open_editor,
+            commands::box_cmds::box_painted,
             commands::editor_cmds::editor_next,
             commands::editor_cmds::editor_ack,
             commands::editor_cmds::editor_close,

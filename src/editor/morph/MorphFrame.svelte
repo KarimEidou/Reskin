@@ -5,11 +5,14 @@
 
   App drives it through the exported functions (MorphController's surface):
     showProxy(rect, props)  draw the proxy, wait for its icon to decode
-    expand(morph)           proxy → panel (FLIP morph or crossfade)
+    expand(morph, landing)  proxy → panel (FLIP morph or crossfade); the
+                            icon flies onto `landing` (the document on the
+                            canvas, window CSS px) when there is one
     collapse(rect, props, morph)  panel → proxy (or fade out)
     clear()                 paint nothing
   Between animations the frame rests in one of the modes: hidden, proxy,
-  open. `data-mode` / `data-transition` expose them to tests.
+  open. `data-mode` / `data-transition` on `[data-testid="morph-frame"]`
+  expose them to tests.
 -->
 <script module lang="ts">
   export type FrameMode = 'hidden' | 'proxy' | 'animating' | 'open';
@@ -119,8 +122,8 @@
     await decoded();
   }
 
-  /** Proxy → panel. */
-  export async function expand(morph: boolean): Promise<void> {
+  /** Proxy → panel; the box's icon settles onto `landing` (see iconTarget). */
+  export async function expand(morph: boolean, landing: Rect | null = null): Promise<void> {
     const my = ++run;
     stopAll();
     const g = geometry();
@@ -128,8 +131,7 @@
     transition = useMorph ? 'morph' : 'crossfade';
     // Icon that settles onto the canvas (only when the box carried one).
     if (useMorph && proxy?.props.icon && contentEl) {
-      const target = iconTarget(contentEl, viewEl(), 48);
-      flyer = { src: proxy.props.icon, rect: target };
+      flyer = { src: proxy.props.icon, rect: iconTarget(landing, viewEl() ?? contentEl, 48) };
     }
     setMode('animating');
     await tick();
@@ -211,6 +213,7 @@
 <div
   class="frame"
   class:compat
+  data-testid="morph-frame"
   data-mode={mode}
   data-transition={transition}
   style:--inset="{inset}px"

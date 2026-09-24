@@ -6,7 +6,9 @@ import { gzipSync } from 'node:zlib';
 import { join } from 'node:path';
 
 const dist = process.argv[2] ?? 'dist';
-const BUDGETS = { 'box.html': 45 * 1024, 'editor.html': 250 * 1024 };
+// The box builds on its own (vite.config.ts) at ~29.6 KB; its budget keeps
+// about 10 % headroom so an accidental editor-sized import fails the build.
+const BUDGETS = { 'box.html': 33 * 1024, 'editor.html': 250 * 1024 };
 
 let failed = false;
 for (const [page, budget] of Object.entries(BUDGETS)) {

@@ -12,6 +12,7 @@
     "allow-box-drag",
     "allow-box-menu",
     "allow-open-editor",
+    "allow-box-painted",
     "allow-inspect-paths",
     "allow-restore",
     "allow-settings-get",

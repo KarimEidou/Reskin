@@ -21,6 +21,7 @@
  * - inspect_system_icon / item_frames / pick_files / read_project: sample
  *   system items, rescaled frames (16…256), `setPickFiles`, `setProject`.
  * - open_editor: validates that every id was inspected (else rejects).
+ * - box_painted: recorded (simulateBoxReturn waits for it).
  * - apply_icon: returns `setApplyOutcome(o)` verbatim when set; otherwise
  *   journals a HistoryEntry and returns `{type:'applied', landed:true}`. In
  *   the editor, a flourish apply while the editor is open first runs the
@@ -57,6 +58,8 @@
  *   without waiting for 'revealed'.
  * - simulateClose(then = 'hide', opts): Collapse → wait 'collapsed' →
  *   Clear → wait 'cleared'. `editor` shows the FSM phase.
+ * - simulateBoxReturn(then = 'hide', icon) (box page): `box:collapse` to the
+ *   hidden box, then `box:shown`, then wait 300 ms for `box_painted`.
  * - knobs: setApplyOutcome, setInspectOverride, setInspectDelay,
  *   setBoxDragResult, failNext(cmd, message), setExportPath, setPickFiles,
  *   setProject, setApplyCollapses, setHeartbeatMs
@@ -103,6 +106,7 @@ import type {
   E2ECall,
   E2EEditorState,
   E2EEmitted,
+  SimulateBoxReturnResult,
   SimulateCloseOptions,
   SimulateCloseResult,
   SimulateOpenOptions,
@@ -119,6 +123,8 @@ type Handler = (args: Args) => unknown;
 const DEFAULT_ACCENT = '#0078d4';
 const PREPARE_TIMEOUT_MS = 400;
 const ACK_TIMEOUT_MS = 3000;
+/** morph.rs BOX_PAINT_TIMEOUT. */
+const BOX_PAINT_TIMEOUT_MS = 300;
 const FRAME_SIZES = [16, 24, 32, 48, 64, 256];
 const USER_DIR = 'C:\\Users\\e2e';
 const ICON_DIR = `${USER_DIR}\\AppData\\Local\\com.karimeidou.reskin\\icons`;
@@ -392,6 +398,22 @@ export function install(kind: 'box' | 'editor'): E2EApi {
     return { session, timedOut };
   }
 
+  let boxSession = 0;
+
+  async function simulateBoxReturn(then: CollapseThen = 'hide', icon: string | null = null): Promise<SimulateBoxReturnResult> {
+    const session = ++boxSession;
+    await emitEvent('box:collapse', { session, then, icon });
+    boxVisible = true;
+    await emitEvent('box:shown', null);
+    const painted = await api
+      .waitForCall('box_painted', (c) => c.args.session === session, BOX_PAINT_TIMEOUT_MS)
+      .then(
+        () => true,
+        () => false,
+      );
+    return { session, painted };
+  }
+
   // ---- items ------------------------------------------------------------------
   function register(item: ItemInfo): void {
     itemsById.set(item.id, item);
@@ -524,6 +546,7 @@ export function install(kind: 'box' | 'editor'): E2EApi {
       if (view === 'edit' && ids.length === 0) fail('nothing to edit');
       return null;
     },
+    box_painted: () => null,
 
     editor_next: (args) => editorNext(Number(args.after ?? 0)),
     editor_ack: (args) => {
@@ -776,6 +799,7 @@ export function install(kind: 'box' | 'editor'): E2EApi {
     },
     simulateOpen,
     simulateClose,
+    simulateBoxReturn,
     setHeartbeatMs: (ms) => {
       heartbeatMs = ms;
     },

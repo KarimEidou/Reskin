@@ -183,6 +183,70 @@ describe('startMailbox', () => {
     await mb.done;
   });
 
+  it('keeps polling (without acknowledging) while a slow handler runs', async () => {
+    // Like Rust: a poll returns at once while an unacknowledged envelope is queued.
+    const queued: Envelope[] = [{ seq: 1, cmd: { type: 'smokeCycle', item: 'item-1' } }];
+    const polls: number[] = [];
+    const waiting: Array<() => void> = [];
+    const next = (after: number): Promise<Envelope[]> => {
+      polls.push(after);
+      const ready = queued.filter((e) => e.seq > after);
+      if (ready.length > 0) return Promise.resolve(ready);
+      return new Promise((resolve) => waiting.push(() => resolve([])));
+    };
+    const log: string[] = [];
+    let finish!: () => void;
+    const mb = startMailbox(
+      async (_cmd, seq) => {
+        log.push(`start ${seq}`);
+        await new Promise<void>((r) => (finish = r));
+        log.push(`end ${seq}`);
+      },
+      { next, keepAliveMs: 5 },
+    );
+
+    await until(() => polls.length >= 4, 'keep-alive polls');
+    // Every keep-alive polls from before the envelope being handled, and
+    // its answer (that same envelope) does not start it a second time.
+    expect(polls.every((after) => after === 0)).toBe(true);
+    expect(log).toEqual(['start 1']);
+    expect(mb.after).toBe(0);
+
+    finish();
+    await until(() => polls.at(-1) === 1, 'the acknowledging poll');
+    const settled = polls.length;
+    await new Promise((r) => setTimeout(r, 30));
+    // Once the handler is done the keep-alives stop: one long poll waits.
+    expect(polls).toHaveLength(settled);
+    expect(log).toEqual(['start 1', 'end 1']);
+    mb.stop();
+    waiting.forEach((release) => release());
+    await mb.done;
+  });
+
+  it('never keeps a fast handler alive', async () => {
+    const script = scriptedNext([[{ seq: 1, cmd: heartbeat }]]);
+    const mb = startMailbox(() => {}, { next: script.next, keepAliveMs: 5 });
+    await until(() => script.polls.length === 2, 'second poll');
+    await new Promise((r) => setTimeout(r, 30));
+    expect(script.polls).toEqual([0, 1]);
+    mb.stop();
+    script.release();
+    await mb.done;
+  });
+
+  it('stop() ends the keep-alives of a handler that never settles', async () => {
+    const next = vi.fn((after: number): Promise<Envelope[]> =>
+      after === 0 ? Promise.resolve([{ seq: 1, cmd: heartbeat }]) : new Promise<Envelope[]>(() => {}),
+    );
+    const mb = startMailbox(() => new Promise<void>(() => {}), { next, keepAliveMs: 5 });
+    await until(() => next.mock.calls.length >= 3, 'keep-alive polls');
+    mb.stop();
+    const calls = next.mock.calls.length;
+    await new Promise((r) => setTimeout(r, 30));
+    expect(next).toHaveBeenCalledTimes(calls);
+  });
+
   it('stop() ends the loop and ignores the result of an in-flight poll', async () => {
     let resolvePoll!: (v: Envelope[]) => void;
     const next = vi.fn(

@@ -17,7 +17,9 @@ use std::path::PathBuf;
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
-use reskin_core::model::{CollapseThen, EditorCmd, EditorView, Rect, SmokeReport, WindowKind};
+use reskin_core::model::{
+    CollapseThen, EditorCmd, EditorView, EntryState, Rect, SmokeReport, WindowKind,
+};
 use reskin_core::pixels::Rgba;
 use tauri::{AppHandle, Manager, Runtime};
 
@@ -34,6 +36,10 @@ const READY_TIMEOUT: Duration = Duration::from_secs(30);
 const SAME: f64 = 14.0;
 /// Min mean colour difference between the box and the bare desktop.
 const DISTINCT: f64 = 4.0;
+/// Every probe of one open → close round trip (`probe` calls in
+/// windows/morph.rs, then after the close); a missing one fails the run
+/// rather than passing on fewer frames.
+const HANDOFF_FRAMES: [&str; 4] = ["2-revealed", "3-expanded", "5-collapsed", "9-after-close"];
 
 pub struct Smoke {
     pub enabled: bool,
@@ -214,6 +220,12 @@ fn handoff<R: Runtime>(app: &AppHandle<R>) -> Result<String, String> {
     *state.smoke.region.lock().unwrap_or_else(|e| e.into_inner()) = None;
 
     let frames = std::mem::take(&mut *state.smoke.frames.lock().unwrap_or_else(|e| e.into_inner()));
+    let captured: Vec<&str> = frames.iter().map(|(name, _)| name.as_str()).collect();
+    if captured != HANDOFF_FRAMES {
+        return Err(format!(
+            "captured frames {captured:?}, expected {HANDOFF_FRAMES:?}"
+        ));
+    }
     let mut report = Vec::new();
     for (name, img) in &frames {
         save(name, img);
@@ -309,13 +321,12 @@ fn cycle<R: Runtime>(app: &AppHandle<R>) -> Result<(), String> {
     }
     let target = lnk.display().to_string();
     let journal = state.journal();
-    let entries: Vec<_> = journal
-        .entries()
-        .iter()
-        .filter(|e| e.target.eq_ignore_ascii_case(&target))
-        .collect();
-    if entries.is_empty() {
-        return Err("journal has no entry for the fixture".into());
+    let entries = journal.entries_for(&target);
+    if !entries.iter().any(|e| e.state == EntryState::Restored) {
+        return Err(format!(
+            "journal has no restored entry for the fixture: {:?}",
+            entries.iter().map(|e| e.state).collect::<Vec<_>>()
+        ));
     }
     if journal.active_for(&target).is_some() {
         return Err("journal still has an active entry for the fixture".into());

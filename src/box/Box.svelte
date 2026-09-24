@@ -11,7 +11,7 @@
   import { commands } from '$lib/ipc/commands';
   import { on } from '$lib/ipc/events';
   import type { BootInfo, ItemInfo } from '$lib/ipc/types';
-  import { doubleRaf } from '$lib/motion/raf';
+  import { doubleRaf, frames } from '$lib/motion/raf';
   import { dur, motion } from '$lib/motion/speed.svelte';
   import { settings } from '$lib/settings/store.svelte';
   import { play } from '$lib/sound/synth';
@@ -40,6 +40,12 @@
   const UNDO_MS = 6000;
   /** Unfreeze a handoff that Rust never followed up on. */
   const HANDOFF_TIMEOUT_MS = 8000;
+  /**
+   * The picture taken over with `box:collapse` is confirmed after two
+   * frames once the box is shown (a hidden window paints nothing); should
+   * frames not come, it is confirmed anyway after this long.
+   */
+  const PAINT_TIMEOUT_MS = 250;
 
   let info = $state.raw<BootInfo | null>(null);
   let box = $state.raw(initialBoxState);
@@ -51,6 +57,8 @@
   let hintClock = $state(0);
   let undoId = $state<string | null>(null);
   let flyLayer: HTMLDivElement | undefined = $state();
+  /** Handoff session whose collapse picture the box shows once it is back on screen. */
+  let collapseSession: number | null = null;
 
   const s = $derived(settings());
   const metrics = $derived(
@@ -207,9 +215,16 @@
 
   $effect(() => {
     if (!box.handoff) return;
-    const t = setTimeout(() => send({ type: 'shown' }), HANDOFF_TIMEOUT_MS);
+    const t = setTimeout(() => send({ type: 'unfreeze' }), HANDOFF_TIMEOUT_MS);
     return () => clearTimeout(t);
   });
+
+  /** Tells Rust the collapse picture is on screen: the editor's proxy may go. */
+  async function confirmPainted(session: number): Promise<void> {
+    const { timedOut } = await frames(2, { timeoutMs: PAINT_TIMEOUT_MS });
+    if (timedOut) console.warn(`[box] no frames within ${PAINT_TIMEOUT_MS} ms; confirming the picture anyway`);
+    await commands.boxPainted(session).catch((e: unknown) => console.error('[box] box_painted failed', e));
+  }
 
   $effect(() => {
     if (hint === null || hintClock === 0) return;
@@ -246,9 +261,16 @@
           else if (f.phase === 'error') play('error');
         }),
         on('box:progress', (p) => send({ type: 'progress', done: p.done, total: p.total })),
+        on('box:collapse', (c) => {
+          send({ type: 'collapse', then: c.then, icon: c.icon });
+          collapseSession = c.session;
+        }),
         on('box:shown', () => {
           send({ type: 'shown' });
           if (showHint) hintClock += 1;
+          const session = collapseSession;
+          collapseSession = null;
+          if (session !== null) void confirmPainted(session);
         }),
         on('box:undo', (id) => (undoId = id)),
         getCurrentWebview().onDragDropEvent(({ payload }) => {

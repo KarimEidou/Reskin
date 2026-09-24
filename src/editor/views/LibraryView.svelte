@@ -116,7 +116,7 @@
       e.stopPropagation();
       renaming = null;
     }
-    void tick().then(() => card?.querySelector<HTMLElement>('.more-btn')?.focus());
+    void tick().then(() => card?.querySelector<HTMLElement>('.more [aria-haspopup="menu"]')?.focus());
   }
 
   async function remove(entry: LibraryEntry): Promise<void> {
@@ -235,15 +235,15 @@
             <span class="sub" title={fullDate(entry.updatedAt)}>{timeAgo(entry.updatedAt)} · {formatBytes(entry.bytes)}</span>
           </div>
           <div class="more">
-            <!-- Own trigger: the stock icon-only trigger swaps its tooltip
-                 wrapper while focused, which Svelte rejects mid-update. -->
-            <Menu items={menuFor()} label="More actions for {entry.name}" placement="bottom-end" onselect={(id) => onMenu(entry, id)}>
-              {#snippet trigger(props)}
-                <button type="button" class="more-btn" {...props} aria-label="More actions for {entry.name}" title="More actions">
-                  <Ellipsis size={16} aria-hidden="true" />
-                </button>
-              {/snippet}
-            </Menu>
+            <Menu
+              items={menuFor()}
+              label="More actions for {entry.name}"
+              iconOnly
+              icon={Ellipsis}
+              size="sm"
+              placement="bottom-end"
+              onselect={(id) => onMenu(entry, id)}
+            />
           </div>
         </li>
       {/each}
@@ -377,28 +377,9 @@
     right: var(--space-1-5);
     bottom: var(--space-2-5, 10px);
   }
-  .more-btn {
-    display: grid;
-    place-items: center;
-    width: var(--control-sm);
-    height: var(--control-sm);
-    padding: 0;
-    border: 0;
-    border-radius: var(--radius-sm);
-    background: transparent;
-    color: var(--text-3);
-    transition:
-      background-color var(--fade-1) linear,
-      color var(--fade-1) linear;
-  }
-  .more-btn:hover,
-  .more-btn[aria-expanded='true'] {
+  .more :global(.icon-btn[aria-expanded='true']) {
     background: var(--surface-hover);
     color: var(--text);
-  }
-  .more-btn:focus-visible {
-    outline: var(--focus-width) solid var(--focus-color);
-    outline-offset: 1px;
   }
   .none {
     margin: 0;
