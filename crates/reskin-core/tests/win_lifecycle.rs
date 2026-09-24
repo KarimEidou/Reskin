@@ -17,7 +17,8 @@ use reskin_core::settings::autostart::{self, StartupEntry};
 use reskin_core::win::elevate;
 use windows::Win32::Foundation::ERROR_SUCCESS;
 use windows::Win32::System::Registry::{
-    HKEY_CURRENT_USER, REG_BINARY, RRF_RT_ANY, RegDeleteKeyValueW, RegGetValueW, RegSetKeyValueW,
+    HKEY_CURRENT_USER, REG_BINARY, REG_SZ, RRF_RT_ANY, RegDeleteKeyValueW, RegGetValueW,
+    RegSetKeyValueW,
 };
 use windows::Win32::UI::WindowsAndMessaging::FindWindowW;
 use windows::core::{HSTRING, PCWSTR, w};
@@ -83,6 +84,23 @@ fn run_value(name: &str) -> Option<OsString> {
     })
 }
 
+/// Writes a `Run` value as another program (an older Reskin) would.
+fn set_run_value(name: &str, command: &str) {
+    let data: Vec<u16> = command.encode_utf16().chain([0]).collect();
+    // SAFETY: `data` is a NUL-terminated UTF-16 string of the given size.
+    let e = unsafe {
+        RegSetKeyValueW(
+            HKEY_CURRENT_USER,
+            &HSTRING::from(RUN_KEY),
+            &HSTRING::from(name),
+            REG_SZ.0,
+            Some(data.as_ptr().cast()),
+            (data.len() * 2) as u32,
+        )
+    };
+    assert_eq!(e, ERROR_SUCCESS);
+}
+
 /// What Task Manager writes when the user turns an entry off.
 fn turn_off_in_task_manager(name: &str) {
     let flags = [3u8, 0, 0, 0, 0x60, 0x2d, 0x1b, 0x9c, 0x4e, 0x2f, 0xdb, 0x01];
@@ -141,7 +159,8 @@ fn start_with_windows_quotes_the_exe_and_respects_task_manager() {
     assert_eq!(autostart::state(name).unwrap(), StartupEntry::Disabled);
     let flags = raw_value(APPROVED_KEY, name).unwrap();
 
-    // The exe moved: the entry follows it and stays off.
+    // The exe it starts is gone (moved, uninstalled): the running one
+    // takes the entry over, which stays off.
     let moved = Path::new(r"D:\Apps\reskin.exe");
     assert!(autostart::repoint(name, moved).unwrap());
     assert!(!autostart::repoint(name, moved).unwrap());
@@ -151,6 +170,17 @@ fn start_with_windows_quotes_the_exe_and_respects_task_manager() {
     );
     assert_eq!(raw_value(APPROVED_KEY, name).unwrap(), flags);
     assert_eq!(autostart::state(name).unwrap(), StartupEntry::Disabled);
+
+    // Another copy that exists keeps the entry (this test binary stands in
+    // for it); written unquoted by an older Reskin, it gets quoted.
+    let other = std::env::current_exe().unwrap();
+    let unquoted = format!("{} --autostart", other.display());
+    set_run_value(name, &unquoted);
+    assert!(autostart::repoint(name, moved).unwrap());
+    assert_eq!(run_value(name).unwrap(), autostart::run_command(&other));
+    assert!(!autostart::repoint(name, moved).unwrap());
+    assert_eq!(run_value(name).unwrap(), autostart::run_command(&other));
+    assert_eq!(raw_value(APPROVED_KEY, name).unwrap(), flags);
 
     // Turning it on in Reskin overrides Task Manager.
     autostart::enable(name, moved).unwrap();

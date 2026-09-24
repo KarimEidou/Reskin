@@ -189,13 +189,16 @@ Pure (all hosts, unit tested on Linux):
   verb), `apply_system_change(sys, old, new) -> (Settings, errors)` (a
   refused change is taken back), `reconcile_system_settings(sys, saved)`
   (startup: hotkey registered, "Start with Windows" follows Task Manager,
-  a missing entry is recreated, the verb re-pointed).
+  a missing entry is recreated, an unreadable one left alone, the verb
+  re-pointed).
   `settings::autostart`: `run_command(exe)` (`"<exe>" --autostart`, quoted),
-  `is_run_command_for`, `is_approved(flags)` (Task Manager's
-  `StartupApproved`), `StartupEntry::{Missing, Enabled, Disabled}`; on
-  Windows `state(name)`, `enable(name, exe)`, `disable(name)`,
-  `repoint(name, exe)` (fixes the path, keeps Task Manager's choice) for
-  `HKCU\…\Run\Reskin` (`ENTRY_NAME`).
+  `is_run_command_for`, `run_target(value)`, `repaired_run_command(value,
+  exe, exists)` (quoted, and pointed at `exe` only when the executable it
+  starts is gone: another copy of Reskin keeps it), `is_approved(flags)`
+  (Task Manager's `StartupApproved`), `StartupEntry::{Missing, Enabled,
+  Disabled}`; on Windows `state(name)`, `enable(name, exe)`,
+  `disable(name)`, `repoint(name, exe)` (repairs the value, keeps Task
+  Manager's choice) for `HKCU\…\Run\Reskin` (`ENTRY_NAME`).
 * `history` — `Journal` persisted as `{version, entries, failures}`:
   `load` (missing → empty; damaged → backed up; newer version → error),
   `entries`, `get`, `failure(id)`, `pending`, `entries_for`, `active_for`,
@@ -265,7 +268,8 @@ Windows (`win/`, `#[cfg(windows)]`, type-checked on Linux with
   creates the box (visible; a failure is reported, not returned into Tauri),
   reconciles the OS-backed settings on a thread (`commands::settings::
   reconcile_at_startup`) and schedules the editor pre-warm (skipped in
-  low-memory mode unless the welcome or `--edit` opens it);
+  low-memory mode unless the welcome or `--edit` opens it; the welcome,
+  due while `!onboarded`, never opens at an `--autostart` start);
   `invoke_handler` registers every command in `commands.ts`. Error boxes
   never show under `--smoke-test`.
 * `hotkey.rs`: `apply(app, hotkey)` registers the new shortcut before

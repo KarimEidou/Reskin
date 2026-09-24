@@ -14,9 +14,13 @@
 //! turn an entry off by flagging it in `StartupApproved` and leave the `Run`
 //! value alone; [`StartupEntry::Disabled`] reports that. Only [`enable`] and
 //! [`disable`] — the user's own choice in Reskin — override it.
+//!
+//! Several copies of Reskin may share the entry (installed and portable, or
+//! a newer build tried out): [`repoint`] only points it at the running
+//! executable when the one it starts is gone ([`repaired_run_command`]).
 
 use std::ffi::{OsStr, OsString};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 /// Flag Windows passes Reskin when it starts it at sign-in.
 pub const AUTOSTART_ARG: &str = "--autostart";
@@ -61,6 +65,41 @@ pub fn is_run_command_for(value: &OsStr, exe: &Path) -> bool {
     value.to_string_lossy().to_lowercase() == run_command(exe).to_string_lossy().to_lowercase()
 }
 
+/// The executable a `Run` value starts: the quoted path of `"<exe>" …`, or
+/// an unquoted path followed by [`AUTOSTART_ARG`] (how tauri-plugin-autostart
+/// wrote it, and older Reskins with it). `None` when it names no path.
+pub fn run_target(value: &OsStr) -> Option<PathBuf> {
+    let value = value.to_string_lossy();
+    let value = value.trim();
+    let path = match value.strip_prefix('"') {
+        Some(quoted) => quoted.split_once('"')?.0,
+        None => {
+            let split = value.len().checked_sub(AUTOSTART_ARG.len());
+            match split.and_then(|i| Some((value.get(..i)?, value.get(i..)?))) {
+                Some((head, flag)) if flag.eq_ignore_ascii_case(AUTOSTART_ARG) => head.trim_end(),
+                _ => value,
+            }
+        }
+    };
+    (!path.is_empty()).then(|| PathBuf::from(path))
+}
+
+/// What an existing `Run` value should become (`None`: it is fine as is).
+/// It keeps starting the executable it names while that exists — another
+/// copy of Reskin, say the installed one while a portable one runs — but
+/// quoted, with [`AUTOSTART_ARG`]; one that is gone (moved, deleted) or a
+/// value that names none is replaced by `exe`.
+pub fn repaired_run_command(
+    value: &OsStr,
+    exe: &Path,
+    exists: impl Fn(&Path) -> bool,
+) -> Option<OsString> {
+    let target = run_target(value)
+        .filter(|t| exists(t))
+        .unwrap_or_else(|| exe.to_path_buf());
+    (!is_run_command_for(value, &target)).then(|| run_command(&target))
+}
+
 /// Reads Task Manager's `StartupApproved` flags: an odd first byte means
 /// the user turned the entry off (`03`, followed by when); an even one
 /// (`02`, `06`) or an empty value means on.
@@ -86,7 +125,7 @@ mod registry {
     };
     use windows::core::HSTRING;
 
-    use super::{StartupEntry, is_run_command_for, run_command};
+    use super::{StartupEntry, repaired_run_command, run_command};
     use crate::{Error, Result};
 
     const RUN_KEY: &str = r"Software\Microsoft\Windows\CurrentVersion\Run";
@@ -204,16 +243,20 @@ mod registry {
         delete_value(APPROVED_KEY, name)
     }
 
-    /// Points an existing entry at `exe` (it moved, or an older Reskin
-    /// wrote the path unquoted) without touching its approval flag. Returns
-    /// whether the value was rewritten.
+    /// Repairs an existing entry ([`repaired_run_command`]): quotes one an
+    /// older Reskin wrote unquoted, points one whose executable is gone at
+    /// `exe`; an entry for another copy that still exists keeps it. Leaves
+    /// the approval flag alone. Returns whether the value was rewritten.
     pub fn repoint(name: &str, exe: &Path) -> Result<bool> {
-        match run_value(name)? {
-            Some(value) if !is_run_command_for(&value, exe) => {
-                write_run_value(name, &run_command(exe))?;
+        let Some(value) = run_value(name)? else {
+            return Ok(false);
+        };
+        match repaired_run_command(&value, exe, Path::is_file) {
+            Some(command) => {
+                write_run_value(name, &command)?;
                 Ok(true)
             }
-            _ => Ok(false),
+            None => Ok(false),
         }
     }
 }
@@ -249,6 +292,77 @@ mod tests {
         ] {
             assert!(!is_run_command_for(OsStr::new(other), exe), "{other}");
         }
+    }
+
+    #[test]
+    fn the_target_of_a_run_value() {
+        let target = |v: &str| run_target(OsStr::new(v));
+        let installed = PathBuf::from(r"C:\Program Files\Reskin\reskin.exe");
+        for value in [
+            r#""C:\Program Files\Reskin\reskin.exe" --autostart"#,
+            r#""C:\Program Files\Reskin\reskin.exe""#,
+            r#"  "C:\Program Files\Reskin\reskin.exe" --other "x y"  "#,
+            // Unquoted, as tauri-plugin-autostart wrote it.
+            r"C:\Program Files\Reskin\reskin.exe --autostart",
+            r"C:\Program Files\Reskin\reskin.exe --AUTOSTART ",
+            r"C:\Program Files\Reskin\reskin.exe",
+        ] {
+            assert_eq!(target(value), Some(installed.clone()), "{value}");
+        }
+        assert_eq!(
+            target("C:\\Users\\Zoë Ünal\\reskin.exe --autostart"),
+            Some(PathBuf::from("C:\\Users\\Zoë Ünal\\reskin.exe"))
+        );
+        for nothing in ["", "   ", "\"\" --autostart", "--autostart", "\"C:\\no end"] {
+            assert_eq!(target(nothing), None, "{nothing:?}");
+        }
+    }
+
+    #[test]
+    fn repairing_keeps_other_copies_and_replaces_missing_ones() {
+        let running = Path::new(r"D:\Portable\Reskin_1.0.0_x64_portable.exe");
+        let installed = Path::new(r"C:\Program Files\Reskin\reskin.exe");
+        let only_installed = |p: &Path| p == installed;
+        let repaired = |value: &str, exists: &dyn Fn(&Path) -> bool| {
+            repaired_run_command(OsStr::new(value), running, exists)
+        };
+
+        // The installed copy starts at sign-in and still exists: a portable
+        // copy that runs doesn't take the entry over.
+        let quoted = run_command(installed);
+        assert_eq!(repaired(&quoted.to_string_lossy(), &only_installed), None);
+        // Written unquoted by an older Reskin: quoted, same executable.
+        assert_eq!(
+            repaired(
+                r"C:\Program Files\Reskin\reskin.exe --autostart",
+                &only_installed
+            ),
+            Some(quoted.clone())
+        );
+        // Without the flag: it is added.
+        assert_eq!(
+            repaired(r#""C:\Program Files\Reskin\reskin.exe""#, &only_installed),
+            Some(quoted)
+        );
+
+        // Uninstalled (or moved): the running copy takes over.
+        let nothing = |_: &Path| false;
+        let ours = run_command(running);
+        assert_eq!(
+            repaired(
+                r#""C:\Program Files\Reskin\reskin.exe" --autostart"#,
+                &nothing
+            ),
+            Some(ours.clone())
+        );
+        assert_eq!(repaired("", &nothing), Some(ours.clone()));
+        assert_eq!(repaired("\"C:\\no end", &nothing), Some(ours.clone()));
+        // Already the running copy (in whatever case): nothing to do.
+        assert_eq!(repaired(&ours.to_string_lossy(), &nothing), None);
+        assert_eq!(
+            repaired(&ours.to_string_lossy().to_uppercase(), &|_: &Path| true),
+            None
+        );
     }
 
     #[test]

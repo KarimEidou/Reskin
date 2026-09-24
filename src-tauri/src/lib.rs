@@ -173,6 +173,13 @@ fn restarted_unelevated(argv: &[String]) -> bool {
     }
 }
 
+/// The first-run welcome (due until it was finished) opens at this start:
+/// not under `--smoke-test`, and not when Windows starts Reskin at sign-in —
+/// it waits for a start by the user rather than pop up over the desktop.
+fn welcome_due(first_run: bool, args: &AppArgs) -> bool {
+    first_run && !args.smoke && !args.autostart
+}
+
 /// The app (every mode but the early helper modes, see `cli::run_early`).
 /// Returns the process exit code.
 pub fn run(argv: &[String]) -> i32 {
@@ -233,6 +240,7 @@ pub fn run(argv: &[String]) -> i32 {
         Duration::from_millis(1500)
     };
     let edit_paths = args.edit.clone();
+    let welcome = welcome_due(!settings.onboarded, &args);
     let state = AppState::new(&args, dirs, settings, journal, sta);
 
     let app = tauri::Builder::default()
@@ -285,17 +293,16 @@ pub fn run(argv: &[String]) -> i32 {
             }
             restore::reconcile_at_startup(&handle);
 
-            let first_run = state.first_run() && !smoke;
             // Low-memory mode builds the editor only when it opens, unless
             // it is about to open anyway.
-            if settings.low_memory && !smoke && !first_run && edit_paths.is_empty() {
+            if settings.low_memory && !smoke && !welcome && edit_paths.is_empty() {
                 return Ok(());
             }
             // Pre-warm the editor off the main thread: building a webview
             // from the event-loop thread outside `setup` can deadlock on
             // Windows, and the build call dispatches to the loop anyway.
             std::thread::spawn(move || {
-                std::thread::sleep(if first_run || !edit_paths.is_empty() {
+                std::thread::sleep(if welcome || !edit_paths.is_empty() {
                     Duration::from_millis(300)
                 } else {
                     prewarm
@@ -305,7 +312,7 @@ pub fn run(argv: &[String]) -> i32 {
                     log::line(&format!("editor pre-warm failed: {e}"));
                     return;
                 }
-                if first_run {
+                if welcome {
                     actions::open_editor(&handle, vec![], EditorView::Welcome);
                 } else if !edit_paths.is_empty() {
                     actions::open_paths(&handle, edit_paths);
@@ -374,4 +381,31 @@ pub fn run(argv: &[String]) -> i32 {
             api.prevent_exit();
         }
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_welcome_waits_for_a_start_by_the_user() {
+        let args = |argv: &[&str]| {
+            let argv: Vec<String> = ["reskin.exe"]
+                .iter()
+                .chain(argv)
+                .map(|a| a.to_string())
+                .collect();
+            AppArgs::parse(&argv)
+        };
+        assert!(welcome_due(true, &args(&[])));
+        assert!(welcome_due(
+            true,
+            &args(&["--edit", r"C:\Users\a\Desktop\x.lnk"])
+        ));
+        assert!(!welcome_due(false, &args(&[])));
+        // Started by Windows at sign-in (the welcome was closed without
+        // finishing it, and "Start with Windows" turned on since).
+        assert!(!welcome_due(true, &args(&["--autostart"])));
+        assert!(!welcome_due(true, &args(&["--smoke-test"])));
+    }
 }

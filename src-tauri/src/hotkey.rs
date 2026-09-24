@@ -44,9 +44,16 @@ pub fn apply<R: Runtime>(app: &AppHandle<R>, hotkey: &str) -> Result<(), String>
             }
         });
         if let Err(e) = registered {
-            log::line(&format!("hotkey {hotkey}: {e}"));
             let why = format!("{hotkey} is already in use by another app");
-            state().failures.insert(hotkey.to_owned(), why.clone());
+            // Every settings change retries a saved hotkey that is taken:
+            // logged once until it works.
+            if state()
+                .failures
+                .insert(hotkey.to_owned(), why.clone())
+                .is_none()
+            {
+                log::line(&format!("hotkey {hotkey}: {e}"));
+            }
             return Err(why);
         }
         Some((hotkey.to_owned(), shortcut))

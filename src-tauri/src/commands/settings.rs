@@ -63,8 +63,8 @@ pub async fn settings_set(app: AppHandle, settings: Settings) -> CmdResult<Setti
 pub fn reconcile_at_startup<R: Runtime>(app: &AppHandle<R>) {
     let state = app.state::<AppState>();
     let _one_at_a_time = state.lock_settings_changes();
-    // An entry that points elsewhere (the exe moved, or an older Reskin
-    // wrote it unquoted) is fixed without changing whether it is on.
+    // An entry an older Reskin wrote unquoted, or whose exe is gone, is
+    // repaired without changing whether it is on.
     if let Ok(exe) = std::env::current_exe()
         && let Err(e) = autostart::repoint(ENTRY_NAME, &exe)
     {
@@ -101,11 +101,8 @@ impl<R: Runtime> SystemSettings for Os<'_, R> {
         hotkey::apply(self.app, hotkey).map_err(reskin_core::Error::Other)
     }
 
-    fn autostart(&self) -> StartupEntry {
-        autostart::state(ENTRY_NAME).unwrap_or_else(|e| {
-            log::line(&format!("settings: reading Start with Windows: {e}"));
-            StartupEntry::Missing
-        })
+    fn autostart(&self) -> reskin_core::Result<StartupEntry> {
+        autostart::state(ENTRY_NAME)
     }
 
     fn set_autostart(&mut self, on: bool) -> reskin_core::Result<()> {

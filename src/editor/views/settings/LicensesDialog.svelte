@@ -45,10 +45,15 @@
     void (async () => {
       try {
         const response = await fetch(NOTICES_FILE);
-        if (response.status === 404) return show({ kind: 'missing' });
-        if (!response.ok) throw new Error(`${response.status} ${response.statusText}`.trim());
-        cached = await response.text();
-        show({ kind: 'ready', text: cached });
+        const text = await response.text();
+        if (!response.ok) {
+          // Not in this build: the dev server answers 404, Tauri's asset
+          // protocol 500 "asset not found: …".
+          if (response.status === 404 || text.startsWith('asset not found')) return show({ kind: 'missing' });
+          throw new Error(`${response.status} ${response.statusText}`.trim());
+        }
+        cached = text;
+        show({ kind: 'ready', text });
       } catch (e) {
         show({ kind: 'failed', message: errorText(e) });
       }

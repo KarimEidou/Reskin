@@ -173,7 +173,7 @@ pub trait SystemSettings {
     /// one. On failure the current one must stay registered.
     fn set_hotkey(&mut self, hotkey: &str) -> Result<()>;
     /// The "Start with Windows" entry as Windows has it.
-    fn autostart(&self) -> StartupEntry;
+    fn autostart(&self) -> Result<StartupEntry>;
     /// Creates (for this executable, enabled) or removes the entry.
     fn set_autostart(&mut self, on: bool) -> Result<()>;
     /// The Explorer verb is registered.
@@ -186,7 +186,8 @@ pub trait SystemSettings {
 /// returns the settings to save, with a user-facing message for every
 /// change that failed. A failed change is taken back so the saved settings
 /// match the OS: the hotkey keeps its old value (still registered), "Start
-/// with Windows" and the Explorer verb take the state Windows reports.
+/// with Windows" and the Explorer verb take the state Windows reports (the
+/// old value when it can't be read either).
 ///
 /// A saved hotkey that isn't registered (it was taken when Reskin started)
 /// is tried again with every change; that attempt failing is no error of
@@ -208,7 +209,9 @@ pub fn apply_system_change(
         && let Err(e) = sys.set_autostart(new.autostart)
     {
         errors.push(format!("Start with Windows: {e}"));
-        new.autostart = sys.autostart() == StartupEntry::Enabled;
+        new.autostart = sys
+            .autostart()
+            .map_or(old.autostart, |entry| entry == StartupEntry::Enabled);
     }
     if new.context_menu != old.context_menu
         && let Err(e) = sys.set_context_menu(new.context_menu)
@@ -226,7 +229,8 @@ pub fn apply_system_change(
 ///   other app may be gone next time) and the error reported;
 /// * "Start with Windows" follows Windows: an entry turned off (or back on)
 ///   in Task Manager updates the setting instead of being overridden; a
-///   missing entry is created again when the setting is on;
+///   missing entry is created again when the setting is on; an entry that
+///   can't be read is left alone, and so is the setting;
 /// * the Explorer verb is registered again when on (pointing it at this
 ///   executable, which may have moved).
 pub fn reconcile_system_settings(
@@ -240,9 +244,9 @@ pub fn reconcile_system_settings(
         errors.push(format!("Global shortcut: {e}"));
     }
     match sys.autostart() {
-        StartupEntry::Enabled => saved.autostart = true,
-        StartupEntry::Disabled => saved.autostart = false,
-        StartupEntry::Missing => {
+        Ok(StartupEntry::Enabled) => saved.autostart = true,
+        Ok(StartupEntry::Disabled) => saved.autostart = false,
+        Ok(StartupEntry::Missing) => {
             if saved.autostart
                 && let Err(e) = sys.set_autostart(true)
             {
@@ -250,6 +254,8 @@ pub fn reconcile_system_settings(
                 saved.autostart = false;
             }
         }
+        // Writing now could undo what the user chose in Task Manager.
+        Err(e) => errors.push(format!("Start with Windows: {e}")),
     }
     if saved.context_menu
         && let Err(e) = sys.set_context_menu(true)
@@ -558,6 +564,8 @@ mod tests {
         entry: Option<StartupEntry>,
         verb: bool,
         registry_locked: bool,
+        /// Reading the "Start with Windows" entry fails.
+        registry_unreadable: bool,
         calls: Vec<String>,
     }
 
@@ -573,8 +581,11 @@ mod tests {
             self.registered = hotkey.to_owned();
             Ok(())
         }
-        fn autostart(&self) -> StartupEntry {
-            self.entry.unwrap_or(StartupEntry::Missing)
+        fn autostart(&self) -> Result<StartupEntry> {
+            if self.registry_unreadable {
+                return Err(Error::AccessDenied("StartupApproved key".into()));
+            }
+            Ok(self.entry.unwrap_or(StartupEntry::Missing))
         }
         fn set_autostart(&mut self, on: bool) -> Result<()> {
             self.calls.push(format!("autostart {on}"));
@@ -689,11 +700,16 @@ mod tests {
         let (saved, errors) = apply_system_change(&mut sys, &on, Settings::default());
         assert!(saved.autostart && saved.context_menu);
         assert_eq!(errors.len(), 2);
+        // Nor can the entry be read: the setting stays what it was.
+        sys.registry_unreadable = true;
+        let (saved, _) = apply_system_change(&mut sys, &on, Settings::default());
+        assert!(saved.autostart);
+        sys.registry_unreadable = false;
 
         sys.registry_locked = false;
         let (saved, errors) = apply_system_change(&mut sys, &on, Settings::default());
         assert!(!saved.autostart && !saved.context_menu && errors.is_empty());
-        assert_eq!(sys.autostart(), StartupEntry::Missing);
+        assert_eq!(sys.autostart().unwrap(), StartupEntry::Missing);
         assert!(!sys.verb);
     }
 
@@ -712,7 +728,7 @@ mod tests {
             "{:?}",
             sys.calls
         );
-        assert_eq!(sys.autostart(), StartupEntry::Disabled);
+        assert_eq!(sys.autostart().unwrap(), StartupEntry::Disabled);
 
         // Turned back on there: the setting follows again.
         sys.entry = Some(StartupEntry::Enabled);
@@ -724,14 +740,32 @@ mod tests {
         let mut sys = FakeSystem::default();
         let (s, errors) = reconcile_system_settings(&mut sys, on.clone());
         assert!(s.autostart && errors.is_empty());
-        assert_eq!(sys.autostart(), StartupEntry::Enabled);
+        assert_eq!(sys.autostart().unwrap(), StartupEntry::Enabled);
         let mut sys = FakeSystem {
             registry_locked: true,
             ..FakeSystem::default()
         };
-        let (s, errors) = reconcile_system_settings(&mut sys, on);
+        let (s, errors) = reconcile_system_settings(&mut sys, on.clone());
         assert!(!s.autostart);
         assert_eq!(errors.len(), 1);
+
+        // Unreadable (it may be turned off in Task Manager): nothing is
+        // written, and the setting stays as it was.
+        let mut sys = FakeSystem {
+            entry: Some(StartupEntry::Disabled),
+            registry_unreadable: true,
+            ..FakeSystem::default()
+        };
+        let (s, errors) = reconcile_system_settings(&mut sys, on);
+        assert!(s.autostart);
+        assert_eq!(errors.len(), 1, "{errors:?}");
+        assert!(errors[0].starts_with("Start with Windows: "), "{errors:?}");
+        assert!(
+            !sys.calls.iter().any(|c| c.starts_with("autostart")),
+            "{:?}",
+            sys.calls
+        );
+        assert_eq!(sys.entry, Some(StartupEntry::Disabled));
     }
 
     #[test]

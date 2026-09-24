@@ -90,6 +90,31 @@ test.describe('Windows changes while a page lives on', () => {
     await expect(view.getByTestId('hotkey-error')).toHaveText('');
     expect(await calls(page, 'settings_set')).toHaveLength(2);
   });
+
+  test('a new shortcut another app holds leaves the old one in place', async ({ openEditor, page }) => {
+    await openEditor();
+    // Rust refuses it, keeps the old one registered and saved.
+    await page.evaluate(() => {
+      const w = window as unknown as Win;
+      const inner = w.__TAURI_INTERNALS__.invoke;
+      w.__TAURI_INTERNALS__.invoke = async (cmd, args, opts) => {
+        const next = (args as { settings?: { hotkey?: string } } | undefined)?.settings;
+        if (cmd === 'settings_set' && next?.hotkey === 'Ctrl+Alt+K') {
+          throw 'Global shortcut: Ctrl+Alt+K is already in use by another app';
+        }
+        return inner(cmd, args, opts);
+      };
+    });
+    await simulateOpen(page, [], 'settings');
+    const view = page.getByTestId('settings-view');
+    await view.getByRole('button', { name: 'Change', exact: true }).click();
+    await page.keyboard.press('Control+Alt+K');
+    const refused = 'Ctrl+Alt+K is already in use by another app';
+    await expect(view.getByTestId('hotkey-error')).toHaveText(refused);
+    await expect(page.getByRole('alert').filter({ hasText: `Couldn't use that shortcut: ${refused}` })).toBeVisible();
+    await expect(view.getByRole('button', { name: 'Global shortcut: Ctrl+Alt+Shift+R. Activate to change' })).toBeVisible();
+    await expect(view.getByTestId('hotkey-problem')).toHaveCount(0);
+  });
 });
 
 test.describe('open-source licenses', () => {
@@ -141,5 +166,27 @@ test.describe('open-source licenses', () => {
     const dialog = page.getByRole('dialog', { name: 'Open-source licenses' });
     await expect(dialog.getByTestId('licenses-dialog')).toHaveAttribute('data-state', 'missing');
     await expect(dialog).toContainText('only release builds do');
+  });
+
+  test('a Tauri build without the notices says so too; other failures are errors', async ({ openEditor, page }) => {
+    // Tauri's asset protocol answers a file it doesn't embed with a 500.
+    let answer = { status: 500, body: 'asset not found: THIRD_PARTY_NOTICES.txt' };
+    await page.route('**/THIRD_PARTY_NOTICES.txt', (route) =>
+      route.fulfill({ status: answer.status, contentType: 'text/plain', body: answer.body }),
+    );
+    await openEditor();
+    await simulateOpen(page, [], 'settings');
+    const view = page.getByTestId('settings-view');
+    const dialog = page.getByRole('dialog', { name: 'Open-source licenses' });
+    await view.getByRole('button', { name: 'Open-source licenses' }).click();
+    await expect(dialog.getByTestId('licenses-dialog')).toHaveAttribute('data-state', 'missing');
+    await dialog.getByRole('button', { name: 'Close', exact: true }).last().click();
+    await expect(dialog).toBeHidden();
+
+    // Nothing cached: the next open asks again.
+    answer = { status: 500, body: 'failed to read the embedded asset' };
+    await view.getByRole('button', { name: 'Open-source licenses' }).click();
+    await expect(dialog.getByTestId('licenses-dialog')).toHaveAttribute('data-state', 'failed');
+    await expect(dialog.getByRole('alert')).toContainText("The license list couldn't be loaded: 500");
   });
 });

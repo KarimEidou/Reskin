@@ -105,7 +105,8 @@
     try {
       await updateSettings({ hotkey });
     } catch (e) {
-      failure = errorText(e);
+      // Rust names the setting ("Global shortcut: …"); here it goes without saying.
+      failure = errorText(e).replace(/^Global shortcut: /, '');
     }
     // Saving the shortcut that is already saved only retries registering
     // it, which fails quietly while another app holds it: ask Rust.

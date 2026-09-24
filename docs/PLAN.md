@@ -68,8 +68,9 @@ from the drop point into the box with squash and stretch), `busy` (progress ring
 **Box extras:** skins Glass, Neon, Minimal, Aurora; sizes S/M/L; adjustable idle opacity; auto-hides while a fullscreen app runs
 (`SHQueryUserNotificationState`). Click opens the editor's Start view. Right-click calls `box_menu` → native popup menu:
 Open editor, Library, System icons ▸, Restore all…, Settings, Hide box, Quit. Tray icon has the same menu. Global hotkey
-(default `Ctrl+Alt+Shift+R`, rebindable) toggles the box. **First run** (until the welcome is finished: `Settings.onboarded`):
-editor opens on a short animated welcome, then morphs down into the box with the hint "drag a shortcut onto me".
+(default `Ctrl+Alt+Shift+R`, rebindable) toggles the box. **First run** (until the welcome is finished: `Settings.onboarded`;
+not at an `--autostart` start): editor opens on a short animated welcome, then morphs down into the box with the hint "drag a
+shortcut onto me".
 
 **Open (handoff protocol).** Neither window ever resizes while visible.
 1. Rust computes `geom::place_editor(box_rect, work_area, size)` (editor contains the box, grows toward screen centre, clamped to
