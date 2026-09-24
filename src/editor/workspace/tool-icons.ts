@@ -33,12 +33,22 @@ import TextAlignStart from '@lucide/svelte/icons/text-align-start';
 import Type from '@lucide/svelte/icons/type';
 import ZoomIn from '@lucide/svelte/icons/zoom-in';
 import ZoomOut from '@lucide/svelte/icons/zoom-out';
+import Lasso from '@lucide/svelte/icons/lasso';
+import WandSparkles from '@lucide/svelte/icons/wand-sparkles';
+import SprayCan from '@lucide/svelte/icons/spray-can';
+import Stamp from '@lucide/svelte/icons/stamp';
+import Pointer from '@lucide/svelte/icons/pointer';
+import Droplets from '@lucide/svelte/icons/droplets';
+import Sun from '@lucide/svelte/icons/sun';
 
 export const TOOL_ICONS: Record<ToolId, IconComponent> = {
   move: Move,
   selectRect: SquareDashed,
   selectEllipse: CircleDashed,
+  lasso: Lasso,
+  magicWand: WandSparkles,
   brush: Brush,
+  spray: SprayCan,
   pencil: Pencil,
   eraser: Eraser,
   fill: PaintBucket,
@@ -46,6 +56,10 @@ export const TOOL_ICONS: Record<ToolId, IconComponent> = {
   shape: Shapes,
   text: Type,
   eyedropper: Pipette,
+  stamp: Stamp,
+  smudge: Pointer,
+  blurSharpen: Droplets,
+  dodgeBurn: Sun,
   hand: Hand,
   zoom: ZoomIn,
 };

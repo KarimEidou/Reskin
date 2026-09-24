@@ -15,7 +15,7 @@ describe('tool rail groups', () => {
   });
 
   it('finds a tool’s group', () => {
-    expect(groupOf('selectEllipse').tools).toEqual(['selectRect', 'selectEllipse']);
+    expect(groupOf('selectEllipse').tools).toEqual(['selectRect', 'selectEllipse', 'lasso', 'magicWand']);
     expect(groupOf('gradient').id).toBe('fill');
     expect(() => groupOf('nope' as never)).toThrow();
   });

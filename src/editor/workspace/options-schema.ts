@@ -125,6 +125,14 @@ const selectSpecs: SpecsFor<ToolOptionsMap['selectRect']> = [
 
 export const TOOL_OPTION_SPECS: { readonly [K in ToolId]: SpecsFor<ToolOptionsMap[K]> } = {
   move: [],
+  // Placeholders until the options bar gets controls for these tools.
+  lasso: [],
+  magicWand: [],
+  spray: [],
+  stamp: [],
+  smudge: [],
+  blurSharpen: [],
+  dodgeBurn: [],
   selectRect: selectSpecs,
   selectEllipse: selectSpecs,
   brush: brushSpecs,

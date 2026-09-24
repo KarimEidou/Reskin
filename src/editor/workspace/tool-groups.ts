@@ -1,7 +1,7 @@
 // How the tool rail groups the engine's tools (docs/UI.md "Tool rail").
 // Pure data, unit tested against the engine's TOOL_ORDER.
 
-import { TOOL_ORDER, type ToolId } from '$engine/index';
+import { TOOL_META, TOOL_ORDER, type ToolId } from '$engine/index';
 
 export interface RailGroup {
   id: string;
@@ -18,10 +18,10 @@ export interface RailGroup {
 export const RAIL_SECTIONS: readonly (readonly RailGroup[])[] = [
   [
     { id: 'move', label: 'Move', tools: ['move'] },
-    { id: 'select', label: 'Selection tools', tools: ['selectRect', 'selectEllipse'] },
+    { id: 'select', label: 'Selection tools', tools: ['selectRect', 'selectEllipse', 'lasso', 'magicWand'] },
   ],
   [
-    { id: 'brush', label: 'Brush', tools: ['brush'] },
+    { id: 'brush', label: 'Brush tools', tools: ['brush', 'spray'] },
     { id: 'pencil', label: 'Pencil', tools: ['pencil'] },
     { id: 'eraser', label: 'Eraser', tools: ['eraser'] },
   ],
@@ -30,6 +30,8 @@ export const RAIL_SECTIONS: readonly (readonly RailGroup[])[] = [
     { id: 'shape', label: 'Shapes', tools: ['shape'] },
     { id: 'text', label: 'Text', tools: ['text'] },
     { id: 'eyedropper', label: 'Eyedropper', tools: ['eyedropper'] },
+    { id: 'stamp', label: 'Sticker stamp', tools: ['stamp'] },
+    { id: 'retouch', label: 'Retouch tools', tools: ['smudge', 'blurSharpen', 'dodgeBurn'] },
   ],
   [{ id: 'view', label: 'View tools', tools: ['hand', 'zoom'] }],
 ];
@@ -55,7 +57,7 @@ export function missingFromRail(order: readonly ToolId[] = TOOL_ORDER): ToolId[]
 }
 
 /** Tools that paint strokes and therefore take the symmetry settings. */
-export const SYMMETRY_TOOLS: readonly ToolId[] = ['brush', 'pencil', 'eraser'];
+export const SYMMETRY_TOOLS: readonly ToolId[] = TOOL_ORDER.filter((id) => TOOL_META[id].usesSymmetry);
 
 /** Selection tools (the options bar adds select all / deselect / invert / feather). */
 export const SELECTION_TOOLS: readonly ToolId[] = ['selectRect', 'selectEllipse'];
