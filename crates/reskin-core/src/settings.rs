@@ -1,5 +1,8 @@
 //! `settings.json`: loading (with recovery from damaged files), saving,
-//! sanitising, and the global-hotkey parser.
+//! sanitising, the global-hotkey parser, and how the settings that mirror
+//! OS state (hotkey, "Start with Windows", Explorer verb) stay true to it.
+
+pub mod autostart;
 
 use std::fmt;
 use std::io;
@@ -7,6 +10,7 @@ use std::path::{Path, PathBuf};
 
 use serde_json::{Map, Value};
 
+use self::autostart::StartupEntry;
 use crate::model::{ICO_SIZES, Settings};
 use crate::{Error, Result, now_ms, store};
 
@@ -22,29 +26,36 @@ pub const MAX_RECENT_COLORS: usize = 16;
 
 const DEFAULT_PIXEL_GRID: u32 = 32;
 
-/// Loads settings. Returns the settings and whether this is the first run
-/// (no settings file existed).
+/// Loads settings. The first-run welcome is due while `onboarded` is false
+/// (the welcome sets it when the user finishes it), so a settings file
+/// written before that — the box dragged, a setting changed — doesn't skip
+/// it.
 ///
-/// * missing file → defaults, first run;
+/// * missing file → defaults (not onboarded: first run);
 /// * a file that is not a JSON object → it is moved aside to
 ///   `settings.json.bak-<unix ms>` and defaults are used;
 /// * a JSON object with some unusable fields (wrong types) → those fields
 ///   fall back to their defaults, the rest are kept;
 /// * a file that cannot be read at all → defaults, left untouched.
 ///
-/// The result is always [`normalize`]d.
-pub fn load(path: &Path) -> (Settings, bool) {
+/// Recovered defaults count as onboarded: a settings file existed, so
+/// Reskin has run here before. The result is always [`normalize`]d.
+pub fn load(path: &Path) -> Settings {
+    let been_here = Settings {
+        onboarded: true,
+        ..Settings::default()
+    };
     let bytes = match std::fs::read(path) {
         Ok(b) => b,
-        Err(e) if e.kind() == io::ErrorKind::NotFound => return (Settings::default(), true),
-        Err(_) => return (Settings::default(), false),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Settings::default(),
+        Err(_) => return been_here,
     };
     match parse_lenient(&bytes) {
-        Some(settings) => (normalize(settings), false),
+        Some(settings) => normalize(settings),
         None => {
             // Best effort: if the rename fails the next save overwrites it.
             let _ = std::fs::rename(path, backup_path(path));
-            (Settings::default(), false)
+            been_here
         }
     }
 }
@@ -146,6 +157,107 @@ pub fn is_hex_color(s: &str) -> bool {
     s.strip_prefix('#').is_some_and(|hex| {
         (hex.len() == 6 || hex.len() == 8) && hex.bytes().all(|b| b.is_ascii_hexdigit())
     })
+}
+
+// ---------------------------------------------------------------------------
+// Settings that mirror OS state
+// ---------------------------------------------------------------------------
+
+/// The OS state behind the settings that mirror it: the global hotkey's
+/// registration, the "Start with Windows" entry and the Explorer verb.
+/// The app implements it on Windows; tests fake it.
+pub trait SystemSettings {
+    /// The hotkey registered right now (canonical form, `""` = none).
+    fn hotkey(&self) -> String;
+    /// Registers `hotkey` (canonical, `""` = none) in place of the current
+    /// one. On failure the current one must stay registered.
+    fn set_hotkey(&mut self, hotkey: &str) -> Result<()>;
+    /// The "Start with Windows" entry as Windows has it.
+    fn autostart(&self) -> StartupEntry;
+    /// Creates (for this executable, enabled) or removes the entry.
+    fn set_autostart(&mut self, on: bool) -> Result<()>;
+    /// The Explorer verb is registered.
+    fn context_menu(&self) -> bool;
+    /// Registers (for this executable) or removes the Explorer verb.
+    fn set_context_menu(&mut self, on: bool) -> Result<()>;
+}
+
+/// Applies the OS side of a settings change from `old` to `new` and
+/// returns the settings to save, with a user-facing message for every
+/// change that failed. A failed change is taken back so the saved settings
+/// match the OS: the hotkey keeps its old value (still registered), "Start
+/// with Windows" and the Explorer verb take the state Windows reports.
+///
+/// A saved hotkey that isn't registered (it was taken when Reskin started)
+/// is tried again with every change; that attempt failing is no error of
+/// the change, since the hotkey wasn't part of it.
+pub fn apply_system_change(
+    sys: &mut impl SystemSettings,
+    old: &Settings,
+    mut new: Settings,
+) -> (Settings, Vec<String>) {
+    let mut errors = Vec::new();
+    if new.hotkey != sys.hotkey()
+        && let Err(e) = sys.set_hotkey(&new.hotkey)
+        && new.hotkey != old.hotkey
+    {
+        errors.push(format!("Global shortcut: {e}"));
+        new.hotkey = old.hotkey.clone();
+    }
+    if new.autostart != old.autostart
+        && let Err(e) = sys.set_autostart(new.autostart)
+    {
+        errors.push(format!("Start with Windows: {e}"));
+        new.autostart = sys.autostart() == StartupEntry::Enabled;
+    }
+    if new.context_menu != old.context_menu
+        && let Err(e) = sys.set_context_menu(new.context_menu)
+    {
+        errors.push(format!("Explorer menu: {e}"));
+        new.context_menu = sys.context_menu();
+    }
+    (new, errors)
+}
+
+/// Startup: brings the OS state and the saved settings back in line and
+/// returns the settings to use, with a message for everything that failed.
+///
+/// * the hotkey is registered; when that fails the setting is kept (the
+///   other app may be gone next time) and the error reported;
+/// * "Start with Windows" follows Windows: an entry turned off (or back on)
+///   in Task Manager updates the setting instead of being overridden; a
+///   missing entry is created again when the setting is on;
+/// * the Explorer verb is registered again when on (pointing it at this
+///   executable, which may have moved).
+pub fn reconcile_system_settings(
+    sys: &mut impl SystemSettings,
+    mut saved: Settings,
+) -> (Settings, Vec<String>) {
+    let mut errors = Vec::new();
+    if !saved.hotkey.is_empty()
+        && let Err(e) = sys.set_hotkey(&saved.hotkey)
+    {
+        errors.push(format!("Global shortcut: {e}"));
+    }
+    match sys.autostart() {
+        StartupEntry::Enabled => saved.autostart = true,
+        StartupEntry::Disabled => saved.autostart = false,
+        StartupEntry::Missing => {
+            if saved.autostart
+                && let Err(e) = sys.set_autostart(true)
+            {
+                errors.push(format!("Start with Windows: {e}"));
+                saved.autostart = false;
+            }
+        }
+    }
+    if saved.context_menu
+        && let Err(e) = sys.set_context_menu(true)
+    {
+        errors.push(format!("Explorer menu: {e}"));
+        saved.context_menu = sys.context_menu();
+    }
+    (saved, errors)
 }
 
 // ---------------------------------------------------------------------------
@@ -436,5 +548,217 @@ mod tests {
         for bad in ["a0b1c2", "#a0b1c", "#a0b1c2f", "#ggg000", "", "#"] {
             assert!(!is_hex_color(bad), "{bad}");
         }
+    }
+
+    /// Windows, faked: hotkeys another app holds, and failing writes.
+    #[derive(Default)]
+    struct FakeSystem {
+        registered: String,
+        taken: Vec<&'static str>,
+        entry: Option<StartupEntry>,
+        verb: bool,
+        registry_locked: bool,
+        calls: Vec<String>,
+    }
+
+    impl SystemSettings for FakeSystem {
+        fn hotkey(&self) -> String {
+            self.registered.clone()
+        }
+        fn set_hotkey(&mut self, hotkey: &str) -> Result<()> {
+            self.calls.push(format!("hotkey {hotkey}"));
+            if self.taken.contains(&hotkey) {
+                return Err(Error::Other(format!("{hotkey} is in use by another app")));
+            }
+            self.registered = hotkey.to_owned();
+            Ok(())
+        }
+        fn autostart(&self) -> StartupEntry {
+            self.entry.unwrap_or(StartupEntry::Missing)
+        }
+        fn set_autostart(&mut self, on: bool) -> Result<()> {
+            self.calls.push(format!("autostart {on}"));
+            if self.registry_locked {
+                return Err(Error::AccessDenied("Run key".into()));
+            }
+            self.entry = Some(if on {
+                StartupEntry::Enabled
+            } else {
+                StartupEntry::Missing
+            });
+            Ok(())
+        }
+        fn context_menu(&self) -> bool {
+            self.verb
+        }
+        fn set_context_menu(&mut self, on: bool) -> Result<()> {
+            self.calls.push(format!("verb {on}"));
+            if self.registry_locked {
+                return Err(Error::AccessDenied("Classes key".into()));
+            }
+            self.verb = on;
+            Ok(())
+        }
+    }
+
+    fn with(f: impl FnOnce(&mut Settings)) -> Settings {
+        let mut s = Settings::default();
+        f(&mut s);
+        s
+    }
+
+    #[test]
+    fn a_hotkey_taken_by_another_app_keeps_the_old_one() {
+        let old = Settings::default();
+        let mut sys = FakeSystem {
+            registered: old.hotkey.clone(),
+            taken: vec!["Ctrl+Alt+K"],
+            ..FakeSystem::default()
+        };
+        let (saved, errors) =
+            apply_system_change(&mut sys, &old, with(|s| s.hotkey = "Ctrl+Alt+K".into()));
+        assert_eq!(saved.hotkey, old.hotkey);
+        assert_eq!(sys.registered, old.hotkey);
+        assert_eq!(
+            errors,
+            ["Global shortcut: Ctrl+Alt+K is in use by another app"]
+        );
+
+        let (saved, errors) =
+            apply_system_change(&mut sys, &old, with(|s| s.hotkey = "Ctrl+Alt+J".into()));
+        assert_eq!((saved.hotkey.as_str(), errors.len()), ("Ctrl+Alt+J", 0));
+        assert_eq!(sys.registered, "Ctrl+Alt+J");
+    }
+
+    #[test]
+    fn an_unregistered_hotkey_is_retried_without_blaming_other_changes() {
+        let old = Settings::default();
+        let mut sys = FakeSystem {
+            taken: vec!["Ctrl+Alt+Shift+R"],
+            ..FakeSystem::default()
+        };
+        let (saved, errors) = apply_system_change(&mut sys, &old, with(|s| s.sounds = true));
+        assert!(saved.sounds);
+        assert_eq!(saved.hotkey, old.hotkey, "the user's choice is kept");
+        assert!(errors.is_empty(), "{errors:?}");
+        assert_eq!(sys.calls, ["hotkey Ctrl+Alt+Shift+R"]);
+
+        // The other app let go of it: the next change registers it.
+        sys.taken.clear();
+        apply_system_change(&mut sys, &saved, saved.clone());
+        assert_eq!(sys.registered, old.hotkey);
+        // Registered: nothing to do any more.
+        sys.calls.clear();
+        apply_system_change(
+            &mut sys,
+            &saved,
+            with(|s| s.theme = crate::model::ThemeMode::Dark),
+        );
+        assert!(sys.calls.is_empty(), "{:?}", sys.calls);
+    }
+
+    #[test]
+    fn failed_os_writes_leave_the_setting_as_windows_has_it() {
+        let old = Settings::default();
+        let mut sys = FakeSystem {
+            registered: old.hotkey.clone(),
+            registry_locked: true,
+            ..FakeSystem::default()
+        };
+        let (saved, errors) = apply_system_change(
+            &mut sys,
+            &old,
+            with(|s| {
+                s.autostart = true;
+                s.context_menu = true;
+                s.sounds = true;
+            }),
+        );
+        assert!(!saved.autostart && !saved.context_menu && saved.sounds);
+        assert_eq!(errors.len(), 2, "{errors:?}");
+        assert!(errors[0].starts_with("Start with Windows: "), "{errors:?}");
+        assert!(errors[1].starts_with("Explorer menu: "), "{errors:?}");
+
+        // Turning them off fails too: they stay on, as Windows has them.
+        let on = with(|s| {
+            s.autostart = true;
+            s.context_menu = true;
+        });
+        sys.entry = Some(StartupEntry::Enabled);
+        sys.verb = true;
+        let (saved, errors) = apply_system_change(&mut sys, &on, Settings::default());
+        assert!(saved.autostart && saved.context_menu);
+        assert_eq!(errors.len(), 2);
+
+        sys.registry_locked = false;
+        let (saved, errors) = apply_system_change(&mut sys, &on, Settings::default());
+        assert!(!saved.autostart && !saved.context_menu && errors.is_empty());
+        assert_eq!(sys.autostart(), StartupEntry::Missing);
+        assert!(!sys.verb);
+    }
+
+    #[test]
+    fn startup_follows_task_manager_and_restores_what_is_missing() {
+        let on = with(|s| s.autostart = true);
+        // Turned off in Task Manager: the setting follows, the entry stays.
+        let mut sys = FakeSystem {
+            entry: Some(StartupEntry::Disabled),
+            ..FakeSystem::default()
+        };
+        let (s, errors) = reconcile_system_settings(&mut sys, on.clone());
+        assert!(!s.autostart && errors.is_empty());
+        assert!(
+            !sys.calls.iter().any(|c| c.starts_with("autostart")),
+            "{:?}",
+            sys.calls
+        );
+        assert_eq!(sys.autostart(), StartupEntry::Disabled);
+
+        // Turned back on there: the setting follows again.
+        sys.entry = Some(StartupEntry::Enabled);
+        let (s, _) = reconcile_system_settings(&mut sys, Settings::default());
+        assert!(s.autostart);
+
+        // Gone (e.g. removed by an uninstall that kept the settings): the
+        // setting puts it back.
+        let mut sys = FakeSystem::default();
+        let (s, errors) = reconcile_system_settings(&mut sys, on.clone());
+        assert!(s.autostart && errors.is_empty());
+        assert_eq!(sys.autostart(), StartupEntry::Enabled);
+        let mut sys = FakeSystem {
+            registry_locked: true,
+            ..FakeSystem::default()
+        };
+        let (s, errors) = reconcile_system_settings(&mut sys, on);
+        assert!(!s.autostart);
+        assert_eq!(errors.len(), 1);
+    }
+
+    #[test]
+    fn startup_registers_the_hotkey_and_the_verb() {
+        let saved = with(|s| s.context_menu = true);
+        let mut sys = FakeSystem::default();
+        let (s, errors) = reconcile_system_settings(&mut sys, saved.clone());
+        assert_eq!(s, saved);
+        assert!(errors.is_empty());
+        assert_eq!(sys.registered, saved.hotkey);
+        assert_eq!(sys.calls, ["hotkey Ctrl+Alt+Shift+R", "verb true"]);
+
+        // A hotkey another app holds is reported but stays the setting.
+        let mut sys = FakeSystem {
+            taken: vec!["Ctrl+Alt+Shift+R"],
+            ..FakeSystem::default()
+        };
+        let (s, errors) = reconcile_system_settings(&mut sys, saved.clone());
+        assert_eq!(s.hotkey, saved.hotkey);
+        assert_eq!(
+            errors,
+            ["Global shortcut: Ctrl+Alt+Shift+R is in use by another app"]
+        );
+
+        // No hotkey, verb off: nothing to do.
+        let mut sys = FakeSystem::default();
+        reconcile_system_settings(&mut sys, with(|s| s.hotkey.clear()));
+        assert!(sys.calls.is_empty(), "{:?}", sys.calls);
     }
 }

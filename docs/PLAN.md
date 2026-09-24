@@ -16,15 +16,20 @@ Once Windows CI is green, v1.0.0 is published as a GitHub Release by pushing a `
 ## Stack
 - **Tauri 2.11 + WebView2** (~5–8 MB installer, native Win32/COM access).
   - `tauri` 2.11.6 (`tray-icon`), `tauri-build` 2.6.3, `@tauri-apps/cli` 2.11.5, `@tauri-apps/api` 2.11.1
-  - plugins: single-instance 2.4.5 (registered first), dialog 2.7.3, opener 2.5.5, autostart 2.5.1, global-shortcut 2.3.2
-- **Front end**: Svelte 5.57 + TypeScript ~5.9.3 + Vite 8.3, multi-page build (`build.rolldownOptions.input` = `box.html` + `editor.html`).
+  - plugins: single-instance 2.4.5 (registered first), dialog 2.7.3, opener 2.5.5, global-shortcut 2.3.2. "Start with
+    Windows" is Reskin's own quoted HKCU `Run` value (`reskin-core` `settings::autostart`).
+- **Front end**: Svelte 5.57 + TypeScript ~5.9.3 + Vite 8.3. `vite build` builds each page on its own (`vite.config.ts`
+  `environments`: the editor, then the box, into one outDir), so the box never loads chunks shared with the editor; its
+  initial JS stays ≤ 33 KB gz (`pnpm bundle:budget`). The dev server serves both pages from one environment.
   `@sveltejs/vite-plugin-svelte` 7.3, `@lucide/svelte` 1.47 (tree-shaken UI icons). UI font: system Segoe UI Variable.
   Sounds synthesized with WebAudio. No font or audio assets ship.
 - **Rust**: `windows` = 0.61.3 (same as tauri/tao/webview2-com), `webview2-com` 0.38, `ico` 0.5, `png` 0.17, `sha2`, `base64`,
   `serde`/`serde_json`, `ts-rs` (IPC types for TS). No crates that compile C. `rust-toolchain.toml` pins 1.94.1.
-- **Tests**: Vitest 5 (node unit tests). `@playwright/test` 1.56.1 (Chromium 1194). `pngjs` for e2e assertions.
+- **Tests**: Vitest 5 (node unit tests), `node --test` for the build scripts. `@playwright/test` 1.56.1 (Chromium 1194).
+  `pngjs` for e2e assertions.
 - **Bundles**: NSIS setup `.exe` (`installMode: currentUser`, `webviewInstallMode: downloadBootstrapper(silent)`), `.msi`,
-  portable `.exe`, `SHA256SUMS.txt`. Release profile: `lto`, `codegen-units=1`, `opt-level="s"`, `strip`, `panic="abort"`.
+  portable `.exe`, `THIRD_PARTY_NOTICES.txt`, `SHA256SUMS.txt`. Release profile: `lto`, `codegen-units=1`, `opt-level="s"`,
+  `strip`, `panic="abort"` (a panic hook logs to `reskin.log` and tells the user before the process ends).
 
 ## Architecture
 - **Two transparent, frameless, `shadow:false` windows**, declared in `tauri.conf.json` with `"create": false` and built in Rust via
@@ -32,10 +37,12 @@ Once Windows CI is green, v1.0.0 is published as a GitHub Release by pushing a `
   context menu, pinch zoom and swipe off; memory target LOW while hidden).
   - **box**: 148×148 logical (Medium), 120 px visual (14 px margin for glow/scale); topmost, `skipTaskbar`, `focused(false)`,
     created visible at its saved position; never resized (except when the size setting changes).
-  - **editor**: pre-warmed ~1.5 s after launch (10 s with `--autostart`); created hidden off-screen, then shown and hidden once
-    ("prime") to dodge wry/tauri hidden-window bugs; sizes S/M/L from Settings; never resized while visible.
+  - **editor**: pre-warmed ~1.5 s after launch (10 s with `--autostart`; not at all in low-memory mode, unless the welcome or
+    an `--edit` opens it right away); created hidden off-screen, then shown and hidden once ("prime") to dodge wry/tauri
+    hidden-window bugs; sizes S/M/L from Settings; never resized while visible.
   - **Transparent windows are only ever hidden, never minimized.** No cursor-event toggling (tauri#15947).
-  - **Compatibility (opaque) mode** setting: solid backgrounds and Win11 rounded corners via DWM.
+  - **Compatibility (opaque) mode** setting: solid backgrounds and Win11 rounded corners via DWM; the box is clipped to its
+    visual with a window region, rebuilt when the box changes size or moves to a monitor with another DPI.
 - **Rust animator thread** owns every box movement: time-based `SetWindowPos(..NOSIZE|NOZORDER|NOACTIVATE|ASYNCWINDOWPOS)`
   paced by `DwmFlush()`; HWNDs cross threads as `isize`.
   - **`box_drag`** (JS pointerdown invokes it) runs the move loop with `GetCursorPos` + `GetAsyncKeyState`; 4 px threshold
@@ -61,8 +68,8 @@ from the drop point into the box with squash and stretch), `busy` (progress ring
 **Box extras:** skins Glass, Neon, Minimal, Aurora; sizes S/M/L; adjustable idle opacity; auto-hides while a fullscreen app runs
 (`SHQueryUserNotificationState`). Click opens the editor's Start view. Right-click calls `box_menu` → native popup menu:
 Open editor, Library, System icons ▸, Restore all…, Settings, Hide box, Quit. Tray icon has the same menu. Global hotkey
-(default `Ctrl+Alt+Shift+R`, rebindable) toggles the box. **First run:** editor opens on a short animated welcome, then morphs
-down into the box with the hint "drag a shortcut onto me".
+(default `Ctrl+Alt+Shift+R`, rebindable) toggles the box. **First run** (until the welcome is finished: `Settings.onboarded`):
+editor opens on a short animated welcome, then morphs down into the box with the hint "drag a shortcut onto me".
 
 **Open (handoff protocol).** Neither window ever resizes while visible.
 1. Rust computes `geom::place_editor(box_rect, work_area, size)` (editor contains the box, grows toward screen centre, clamped to
@@ -111,9 +118,13 @@ actual wallpaper with its label; taskbar light/dark previews. Import from dialog
 Restore original / Restore all. Autosave + crash recovery.
 
 **App:** command palette (Ctrl+K), shortcuts overlay (`?`), toasts; themes dark/light/system + Windows accent; animation speed and
-reduced motion (Windows `SPI_GETCLIENTAREAANIMATION` + media query); optional sounds, autostart, Explorer context-menu verb
-"Reskin this icon" (HKCU, toggle); "Refresh desktop icons" (`SHChangeNotify` or `ie4uinit -show`); low-memory mode (destroy
-the editor on close); About with a link to Releases (private repo: no automatic update check).
+reduced motion (Windows `SPI_GETCLIENTAREAANIMATION`, read live, + media query; the pages re-read accent and animation effects
+when their window gains focus); optional sounds, autostart, Explorer context-menu verb "Reskin this icon" (HKCU, toggle);
+"Refresh desktop icons" (`SHChangeNotify` or `ie4uinit -show`); low-memory mode (destroy the editor on close, no pre-warm);
+About with a link to Releases (private repo: no automatic update check) and the open-source licenses.
+Hotkey, autostart and Explorer verb mirror OS state: a change Windows refuses is taken back before it is saved (a new hotkey is
+registered before the old one is released), "Start with Windows" follows Task Manager at startup, and a hotkey another app
+holds is flagged in Settings.
 
 ## Windows integration (`crates/reskin-core/src/win/*`)
 - **Extraction ladder:** (a) `.ico` files: all frames; (b) PE `RT_GROUP_ICON`: exact ICO rebuild via
@@ -137,6 +148,8 @@ the editor on close); About with a link to Releases (private repo: no automatic 
   `MapWindowPoints`; icon size; `FWF_NOICONS`; z-order walk for occlusion (skip own, hidden, minimized, cloaked windows).
 - **CLI:** in `main()` before the builder: `--elevated-apply <job>` (exit 0/2/3), `--restore-all [--quiet]`, `--self-test` (JSON).
   In-app: `--edit <path>` (context-menu verb, forwarded by single-instance), `--autostart`, `--smoke-test [--capture-handoff]`.
+  Started "as administrator", the app starts itself again unelevated through Explorer (`IShellDispatch2::ShellExecute`,
+  marked `--relaunched`) and exits; if that fails it warns and carries on.
 - **Uninstall:** `src-tauri/windows/hooks.nsh` (`NSIS_HOOK_PREUNINSTALL`) deletes the context-menu keys; if
   `$DeleteAppDataCheckboxState = 1` and not an update, runs `reskin.exe --restore-all --quiet`.
 
@@ -147,8 +160,12 @@ the editor on close); About with a link to Releases (private repo: no automatic 
 - `ci.yml`: web (ubuntu), rust-core (ubuntu, incl. msvc-target clippy + ts-rs bindings diff), windows (windows-latest: build,
   clippy, `cargo test --workspace -- --include-ignored`, ensure-webview2, `pnpm tauri build`, `--smoke-test --capture-handoff`,
   installer round-trip, upload artifacts).
-- `release.yml` on `v*` tags: build, stage `Reskin_<v>_x64-setup.exe`, `Reskin_<v>_x64_en-US.msi`, `Reskin_<v>_x64_portable.exe`,
-  `SHA256SUMS.txt`; publish with `softprops/action-gh-release@v3`.
+- `release.yml` on `v*` tags: a gate job checks that the tag matches package.json, tauri.conf.json and the Cargo workspace
+  version and that `ci.yml` succeeded on the tagged commit (waiting for a run in progress); then build (`pnpm build` under
+  `tauri build` also writes `THIRD_PARTY_NOTICES.txt` from the production npm tree and the crates linked into `reskin.exe`,
+  `scripts/third-party-notices.mjs`), `--smoke-test --capture-handoff`, stage `Reskin_<v>_x64-setup.exe`,
+  `Reskin_<v>_x64_en-US.msi`, `Reskin_<v>_x64_portable.exe`, `THIRD_PARTY_NOTICES.txt`, `SHA256SUMS.txt`; publish with
+  `softprops/action-gh-release@v3`.
 
 ## Milestones
 1. M1 Skeleton + CI  2. M2 Box, drop, inspect, morph  3. M3 Editor core  4. M4 Apply, restore, history
@@ -159,5 +176,6 @@ original plan; summarized in ARCHITECTURE.md "Verification".)
 Morph glitches → ack protocol + invariant + shared BoxVisual + 400 ms crossfade fallback. Hidden-window IPC/drop bugs → prime,
 mailbox, box created visible, recreate editor if mailbox silent 2 s. Transparency failures → no cursor toggling/minimize/idle
 animation + compatibility mode. Stale icon cache → content-hashed paths, SHChangeNotify, `ie4uinit -show`. Elevation/UIPI → app
-always non-elevated; privileged writes only via the validated helper. Desktop lookup fails → celebrate in place.
-Unsigned exe SmartScreen → documented. Missing WebView2 → bootstrapper + CI step.
+always non-elevated (started as administrator, it restarts unelevated through Explorer); privileged writes only via the
+validated helper. Desktop lookup fails → celebrate in place. Unsigned exe SmartScreen → documented. Missing WebView2 →
+bootstrapper + CI step; the portable exe checks for the runtime before building any window and offers Microsoft's download.

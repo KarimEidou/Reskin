@@ -5,16 +5,84 @@ on:
     tags: ['v*']
 
 permissions:
-  contents: write
+  contents: read
 
 env:
   CARGO_TERM_COLOR: always
   CARGO_INCREMENTAL: 0
 
 jobs:
+  gate:
+    name: gate (versions match the tag, CI passed)
+    runs-on: ubuntu-latest
+    timeout-minutes: 100
+    permissions:
+      contents: read
+      actions: read
+    steps:
+      - uses: actions/checkout@v5
+      - name: Versions match the tag
+        run: |
+          node --input-type=module -e '
+            import { readFileSync } from "node:fs";
+            const tag = process.env.GITHUB_REF_NAME.replace(/^v/, "");
+            let table = "";
+            let cargo;
+            for (const line of readFileSync("Cargo.toml", "utf8").split(/\r?\n/)) {
+              const header = /^\s*\[([^\]]+)\]/.exec(line);
+              if (header) table = header[1];
+              const version = /^\s*version\s*=\s*"([^"]+)"/.exec(line);
+              if (table === "workspace.package" && version) cargo = version[1];
+            }
+            const found = {
+              "package.json": JSON.parse(readFileSync("package.json", "utf8")).version,
+              "src-tauri/tauri.conf.json": JSON.parse(readFileSync("src-tauri/tauri.conf.json", "utf8")).version,
+              "Cargo.toml [workspace.package]": cargo,
+            };
+            const wrong = Object.entries(found).filter(([, v]) => v !== tag);
+            for (const [file, v] of wrong) console.log(`::error::${file} has version ${v}, the tag says ${tag}`);
+            if (wrong.length > 0) process.exit(1);
+            console.log(`package.json, tauri.conf.json and Cargo.toml are all ${tag}`);
+          '
+      - name: CI passed on this commit
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          # ci.yml runs the whole suite on every pushed commit (clippy, cargo
+          # tests with the real shell integration, e2e, the installer
+          # round-trip); only a commit it passed is released. A run still in
+          # progress is waited for, and one about to start too: the branch
+          # may have been pushed together with the tag.
+          deadline=$((SECONDS + 90 * 60))
+          appear_by=$((SECONDS + 5 * 60))
+          while :; do
+            runs=$(gh api "repos/$GITHUB_REPOSITORY/actions/workflows/ci.yml/runs?head_sha=$GITHUB_SHA&per_page=100" \
+              --jq '[.workflow_runs[] | {status, conclusion, url: .html_url}]')
+            if jq -e 'any(.[]; .conclusion == "success")' <<<"$runs" >/dev/null; then
+              echo "CI passed: $(jq -r 'map(select(.conclusion == "success"))[0].url' <<<"$runs")"
+              exit 0
+            fi
+            total=$(jq 'length' <<<"$runs")
+            running=$(jq 'map(select(.status != "completed")) | length' <<<"$runs")
+            if [ "$running" -eq 0 ] && { [ "$total" -gt 0 ] || [ "$SECONDS" -ge "$appear_by" ]; }; then
+              echo "::error::ci.yml has not passed on $GITHUB_SHA. Fix it (or push the commit to a branch so CI runs), then tag again."
+              jq -r '.[] | "  \(.conclusion // .status): \(.url)"' <<<"$runs"
+              exit 1
+            fi
+            if [ "$SECONDS" -ge "$deadline" ]; then
+              echo "::error::timed out waiting for ci.yml on $GITHUB_SHA"
+              exit 1
+            fi
+            echo "waiting for ci.yml on $GITHUB_SHA ($running of $total run(s) still going)"
+            sleep 30
+          done
+
   release:
+    needs: gate
     runs-on: windows-latest
     timeout-minutes: 60
+    permissions:
+      contents: write
     steps:
       - uses: actions/checkout@v5
       - uses: pnpm/action-setup@v4
@@ -28,22 +96,19 @@ jobs:
         with:
           cache-on-failure: true
       - run: pnpm install --frozen-lockfile
-      - name: Version matches tag
-        shell: pwsh
-        run: |
-          $tag = '${{ github.ref_name }}'.TrimStart('v')
-          $pkg = (Get-Content package.json -Raw | ConvertFrom-Json).version
-          $conf = (Get-Content src-tauri\tauri.conf.json -Raw | ConvertFrom-Json).version
-          if ($tag -ne $pkg -or $tag -ne $conf) { throw "tag $tag != package.json $pkg / tauri.conf.json $conf" }
       - name: Ensure WebView2 Runtime
         shell: pwsh
         run: ./scripts/ensure-webview2.ps1
       - name: Build bundles
+        # `pnpm build` (the beforeBuildCommand) also writes
+        # dist/THIRD_PARTY_NOTICES.txt, which the app embeds.
         run: pnpm tauri build
       - name: Smoke test
         shell: pwsh
         run: |
-          $p = Start-Process -FilePath 'target\release\reskin.exe' -ArgumentList '--smoke-test' -PassThru -Wait
+          Remove-Item "$env:TEMP\reskin.log" -ErrorAction SilentlyContinue
+          $p = Start-Process -FilePath 'target\release\reskin.exe' -ArgumentList '--smoke-test', '--capture-handoff' -PassThru -Wait
+          Write-Host "exit code: $($p.ExitCode)"
           Get-Content "$env:TEMP\reskin.log" -ErrorAction SilentlyContinue
           if ($p.ExitCode -ne 0) { throw "smoke test failed with exit code $($p.ExitCode)" }
       - name: Stage release assets
@@ -54,6 +119,7 @@ jobs:
           Copy-Item "target\release\bundle\nsis\Reskin_${v}_x64-setup.exe" release-assets\
           Copy-Item "target\release\bundle\msi\Reskin_${v}_x64_en-US.msi" release-assets\
           Copy-Item 'target\release\reskin.exe' "release-assets\Reskin_${v}_x64_portable.exe"
+          Copy-Item 'dist\THIRD_PARTY_NOTICES.txt' release-assets\
           Push-Location release-assets
           $lines = Get-ChildItem -File | Sort-Object Name | ForEach-Object {
             "$((Get-FileHash $_.FullName -Algorithm SHA256).Hash.ToLower())  $($_.Name)"
@@ -78,4 +144,5 @@ jobs:
           files: |
             release-assets/*.exe
             release-assets/*.msi
+            release-assets/THIRD_PARTY_NOTICES.txt
             release-assets/SHA256SUMS.txt

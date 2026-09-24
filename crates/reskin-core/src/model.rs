@@ -280,11 +280,16 @@ pub struct BootInfo {
     pub build: String,
     /// Running under `--smoke-test`.
     pub smoke: bool,
-    /// No settings.json existed at startup.
+    /// The first-run welcome hasn't been finished (`Settings::onboarded`).
     pub first_run: bool,
     pub box_metrics: BoxMetrics,
     /// Windows 11 or later (rounded corners, Mica-era visuals).
     pub windows11: bool,
+    /// Why the saved global hotkey doesn't work right now (another app
+    /// held it when Reskin tried to register it); absent when it works.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts", ts(optional))]
+    pub hotkey_error: Option<String>,
 }
 
 // ---------------------------------------------------------------------------
