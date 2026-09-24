@@ -9,7 +9,11 @@
 // `enqueue()` runs any other storage task in the same order.
 
 export interface AutosaveOptions {
-  /** Produces the data to save (e.g. `engine.serialize()`), or null when there is nothing to save. */
+  /**
+   * Produces the data to save (e.g. `engine.serialize()`), or null when
+   * there is nothing to save. Called when its save's turn comes; it takes
+   * the data as it is at that moment (a promise may finish encoding it).
+   */
   produce: () => Promise<string | null> | string | null;
   /** Persists it (e.g. `commands.autosave`). */
   save: (data: string) => Promise<void>;
@@ -27,6 +31,8 @@ export class Autosave {
   private timer: ReturnType<typeof setTimeout> | null = null;
   private firstPendingAt = 0;
   private dirty = false;
+  /** Saves handed a change that have not produced their data yet. */
+  private unproduced = 0;
   /** The last storage task; the next one runs after it. */
   private tail: Promise<void> = Promise.resolve();
   private disposed = false;
@@ -36,9 +42,13 @@ export class Autosave {
     this.maxWait = Math.max(opts.maxWaitMs ?? 15000, this.delay);
   }
 
-  /** True when a change has not been handed to a save yet. */
+  /**
+   * True when a change has not been produced for a save yet: not handed to
+   * one, or handed to one still waiting for the saves before it (which
+   * produces whatever is current when its turn comes).
+   */
   get pending(): boolean {
-    return this.dirty;
+    return this.dirty || this.unproduced > 0;
   }
 
   /** Marks the document changed. */
@@ -102,10 +112,16 @@ export class Autosave {
   private run(): void {
     if (!this.dirty || this.disposed) return;
     this.dirty = false;
+    this.unproduced += 1;
     void this.enqueue(async () => {
-      if (this.disposed) return;
       try {
-        const data = await this.opts.produce();
+        let produced: ReturnType<AutosaveOptions['produce']>;
+        try {
+          produced = this.disposed ? null : this.opts.produce();
+        } finally {
+          this.unproduced -= 1;
+        }
+        const data = await produced;
         if (data !== null) await this.opts.save(data);
       } catch (e) {
         this.opts.onError?.(e);

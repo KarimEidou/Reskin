@@ -162,7 +162,7 @@
     try {
       const px = await session.filters.backdrop(s, engine.doc.width, { channel: 'backdrop-apply' });
       // Another design opened (or this one was resized) meanwhile: not meant for it.
-      if (session.designToken !== token || engine.doc.width !== px.width) return;
+      if (!session.isOpenDesign(token) || engine.doc.width !== px.width) return;
       const id = placeBackdrop(engine, px);
       if (id) session.recipe = chainRecipes(session.recipe, backdropRecipe(s));
     } catch (e) {

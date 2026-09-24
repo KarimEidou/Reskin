@@ -50,7 +50,8 @@
   }
 
   const choices = $derived.by((): Choice[] => {
-    const first: ItemInfo | undefined = targets[0];
+    // The first shortcut that can take over the open design (when it has no target yet).
+    const first: ItemInfo | undefined = targets.find((t) => session.canAdopt(t));
     const others = sources.length - 1;
     const one = sources.length === 1;
     const onlyTargets = targets.length === sources.length;
@@ -71,8 +72,7 @@
         : 'Nothing you are editing is replaced.',
     };
     const list: Choice[] = [];
-    // The open design has no target yet: the shortcut can take it over.
-    if (first && !(session.item && isTarget(session.item))) {
+    if (first) {
       list.push({
         how: 'adopt',
         icon: Wand,

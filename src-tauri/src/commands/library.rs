@@ -1,6 +1,6 @@
 //! Library of saved designs and the crash-recovery autosave.
 
-use std::sync::Once;
+use std::sync::Mutex;
 
 use reskin_core::model::{LibraryEntry, LibrarySave};
 use reskin_core::store::{AutosaveSlots, Library};
@@ -36,18 +36,17 @@ pub fn library_delete(state: State<'_, AppState>, id: String) -> CmdResult<()> {
 
 /// The autosave slots. Their first use in this process (= this launch)
 /// rotates them: what the previous launch left in the live slot becomes
-/// the recovery offer before this launch writes its own.
-fn autosave_slots(state: &AppState) -> AutosaveSlots {
-    static ROTATED: Once = Once::new();
+/// the recovery offer before this launch writes its own. Until that
+/// succeeds (it is tried again on every use) the slots are left alone.
+fn autosave_slots(state: &AppState) -> CmdResult<AutosaveSlots> {
+    static ROTATED: Mutex<bool> = Mutex::new(false);
     let slots = AutosaveSlots::new(state.dirs.autosave_file());
-    ROTATED.call_once(|| {
-        if let Err(e) = slots.rotate() {
-            log::line(&format!(
-                "could not keep the last autosave for recovery: {e}"
-            ));
-        }
-    });
-    slots
+    slots.rotate_once(&ROTATED).map_err(|e| {
+        let message = format!("could not keep the last autosave for recovery: {e}");
+        log::line(&message);
+        message
+    })?;
+    Ok(slots)
 }
 
 /// `data`: the open design's unsaved changes for the live slot (an empty
@@ -55,7 +54,7 @@ fn autosave_slots(state: &AppState) -> AutosaveSlots {
 /// unsaved design, the recovery offer included.
 #[tauri::command]
 pub fn autosave(state: State<'_, AppState>, data: Option<String>) -> CmdResult<()> {
-    let slots = autosave_slots(&state);
+    let slots = autosave_slots(&state)?;
     match data {
         Some(data) => slots.write(&data),
         None => slots.discard(),
@@ -66,7 +65,7 @@ pub fn autosave(state: State<'_, AppState>, data: Option<String>) -> CmdResult<(
 /// The design offered for recovery: what an earlier launch left unsaved.
 #[tauri::command]
 pub fn autosave_load(state: State<'_, AppState>) -> CmdResult<Option<String>> {
-    autosave_slots(&state)
+    autosave_slots(&state)?
         .read_recovery()
         .map_err(|e| e.to_string())
 }

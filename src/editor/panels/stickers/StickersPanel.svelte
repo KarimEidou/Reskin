@@ -99,12 +99,12 @@
       if (stamp) {
         const px = await session.panels.request({ op: 'stickerStamp', id: def.id, box, color, outline: outlineFor(box) });
         // Another design opened meanwhile: the size was meant for the old one.
-        if (session.designToken !== token || !px) return;
+        if (!session.isOpenDesign(token) || !px) return;
         useStamp(px);
       } else {
         const px = await session.panels.request({ op: 'sticker', id: def.id, size, box, color, outline: outlineFor(box) });
         // Another design opened (or this one was resized) meanwhile: not meant for it.
-        if (session.designToken !== token || engine.doc.width !== px.width) return;
+        if (!session.isOpenDesign(token) || engine.doc.width !== px.width) return;
         place(def.label, px);
       }
     } catch (e) {

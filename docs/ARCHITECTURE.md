@@ -138,13 +138,17 @@ from Explorer (Tauri drag-drop events) stay the App's (import popover).
   an id `design-<n>` that never reaches Rust) before anything else is
   queued, and a target that arrives while the open design has none takes
   that design over, history included (`meta.source` follows it). Imports
-  (drops, picks, pastes) go through `shell.askImport(sources, at)`: with
-  nothing open they open; otherwise the import popover asks — `layer`,
-  `queue` (images/projects become design entries, `modes: []`), or
-  `adopt`.
+  (drops and picks; `ImportSource` also takes decoded pictures, for
+  pastes) go through `shell.askImport(sources, at)`: with nothing open
+  they open; otherwise the import popover asks — `layer` (projects still
+  join the queue), `queue` (images/projects become design entries,
+  `modes: []`), or `adopt` (offered for a target that `canAdopt`: not
+  queued, or queued and not opened yet).
 * **`designToken`** changes when a design starts to load and again once it
   is in. Code that awaits (worker renders, icon loads) reads it first and
-  drops its result when it changed.
+  lands its result only when `isOpenDesign(token)` — the same design is
+  open and no other is on its way in (work started half-way through a
+  switch is dropped too).
 * **Queue lock.** `queueLocked` (a job in `busy`, or a switch loading):
   `switchTo(i)` and `remove(i)` — the queue strip and the title bar's
   queue menu — are refused, and `apply` / `applyStyleToAll` do not start.
@@ -214,9 +218,11 @@ Pure (all hosts, unit tested on Linux):
   `Library::new(dir)` with `list/save/load/delete` (files
   `{format:"reskin-library", version, id, name, thumb, updatedAt, data}`),
   `autosave_write/autosave_read`, `AutosaveSlots::new(autosave_file)` with
-  `rotate()` (once per launch: a non-blank live `autosave.reskin` becomes
-  `recovery.reskin`, `RECOVERY_FILE`), `write(data)` (empty data removes
-  the live slot), `discard()` (both slots), `read_recovery()`.
+  `rotate()` (a non-blank live `autosave.reskin` becomes
+  `recovery.reskin`, `RECOVERY_FILE`), `rotate_once(&Mutex<bool>)` (once
+  per launch; a failed rotation is retried on the next call and the app
+  leaves the slots alone until it succeeds), `write(data)` (empty data
+  removes the live slot), `discard()` (both slots), `read_recovery()`.
 * `settings` — `load(path) -> (Settings, first_run)` (damaged files backed up),
   `save(path, &Settings) -> Result<Settings>`, `normalize`, `parse_hotkey(&str)
   -> Result<Option<Hotkey>>` (`""` = disabled); `Hotkey` `Display` gives

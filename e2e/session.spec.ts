@@ -1,7 +1,7 @@
 // Work that finishes after the user switched items (a backdrop render, a
-// sticker) never lands on a design being put away or on the one that
-// opened, and the Stickers panel feeds the stamp tool while it is the
-// selected tool.
+// sticker) — or that was started while the switch was half-way — never
+// lands on a design being put away or on the one that opened, and the
+// Stickers panel feeds the stamp tool while it is the selected tool.
 
 import type { Page } from '@playwright/test';
 import { layers, openTab, sidebar } from './panels-driver';
@@ -29,6 +29,8 @@ type Scope = {
   releaseFrames: () => void;
   /** The design open before the switch. */
   before: Session['engine']['doc'];
+  /** A render of the kind being watched finished (see watchRenders). */
+  rendered: boolean;
 };
 
 async function openQueue(page: Page): Promise<void> {
@@ -75,6 +77,20 @@ async function finishAndCheck(page: Page): Promise<void> {
   await expect.poll(async () => (await layers(page)).map((l) => l.name)).toEqual(['Steam']);
 }
 
+/** Notes when a backdrop apply or a sticker render has finished (sets `rendered`). */
+function watchRenders(page: Page): Promise<void> {
+  return page.evaluate(() => {
+    const g = globalThis as unknown as Scope;
+    g.rendered = false;
+    const { filters, panels } = g.__reskinSession;
+    const render = filters.backdrop.bind(filters);
+    const request = panels.request.bind(panels);
+    filters.backdrop = (...args: unknown[]) =>
+      render(...args).finally(() => (g.rendered = (args[2] as { channel?: string } | undefined)?.channel === 'backdrop-apply' || g.rendered));
+    panels.request = (req) => request(req).finally(() => (g.rendered = req.op === 'sticker' || g.rendered));
+  });
+}
+
 test.describe('switching items while a panel works', () => {
   test('a backdrop that renders past the switch is dropped', async ({ page }) => {
     await openQueue(page);
@@ -114,6 +130,35 @@ test.describe('switching items while a panel works', () => {
     await expect(heart).toHaveAttribute('aria-busy', 'true');
     await switchHalfway(page);
     await page.evaluate(() => (globalThis as unknown as Scope).release());
+    await expect(heart).toHaveAttribute('aria-busy', 'false');
+    await finishAndCheck(page);
+  });
+});
+
+test.describe('a panel used while the switch is half-way', () => {
+  test('a backdrop applied then lands on neither design', async ({ page }) => {
+    await openQueue(page);
+    await openTab(page, 'backdrop');
+    await holdSwitch(page);
+    await switchHalfway(page);
+    await watchRenders(page);
+    const button = page.getByTestId('apply-backdrop');
+    await button.click();
+    await page.waitForFunction(() => (globalThis as unknown as Scope).rendered);
+    await expect(button).not.toHaveAttribute('aria-busy', 'true');
+    await finishAndCheck(page);
+  });
+
+  test('a sticker added then lands on neither design', async ({ page }) => {
+    await openQueue(page);
+    await openTab(page, 'stickers');
+    await page.getByTestId('sticker-search').fill('love');
+    await holdSwitch(page);
+    await switchHalfway(page);
+    await watchRenders(page);
+    const heart = page.locator('[data-sticker="heart"]');
+    await heart.click();
+    await page.waitForFunction(() => (globalThis as unknown as Scope).rendered);
     await expect(heart).toHaveAttribute('aria-busy', 'false');
     await finishAndCheck(page);
   });

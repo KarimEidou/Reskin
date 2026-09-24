@@ -103,6 +103,12 @@ function paint(s: EditorSession, rgba: [number, number, number, number] = [0, 25
   });
 }
 
+/**
+ * Whether the engine holds `doc` (as a boolean: a failing `toBe` on two
+ * documents would print megabytes of pixels and take minutes).
+ */
+const holds = (s: EditorSession, doc: unknown) => s.engine.doc === doc;
+
 /** The composite's centre pixel. */
 function center(s: EditorSession): number[] {
   const c = s.engine.composite();
@@ -419,16 +425,65 @@ describe('EditorSession robustness', () => {
       return green;
     });
     const start = s.designToken;
+    expect(s.isOpenDesign(start)).toBe(true);
     const oldDoc = s.engine.doc;
     const switching = s.select(1);
     await vi.waitFor(() => expect(frames).toHaveBeenCalledTimes(2));
     // Put away already, not replaced yet: work for the old design must stop.
-    expect(s.engine.doc).toBe(oldDoc);
+    expect(holds(s, oldDoc)).toBe(true);
     expect(s.designToken).toBe(start + 1);
+    expect(s.isOpenDesign(start)).toBe(false);
+    // Work started now has nothing to land on either.
+    const mid = s.designToken;
+    expect(s.isOpenDesign(mid)).toBe(false);
     gate.resolve();
     await switching;
-    expect(s.engine.doc).not.toBe(oldDoc);
+    expect(holds(s, oldDoc)).toBe(false);
     expect(s.designToken).toBe(start + 2);
+    expect(s.isOpenDesign(mid)).toBe(false);
+    expect(s.isOpenDesign(s.designToken)).toBe(true);
+    s.dispose();
+  });
+
+  it('an icon asked for while another design is on its way in lands on neither', async () => {
+    const { s, deps } = await queued();
+    const gate = deferred();
+    const frames = deps.commands.itemFrames as unknown as ReturnType<typeof vi.fn>;
+    const green = await frameOf([0, 255, 0, 255]);
+    const white = await frameOf([255, 255, 255, 255]);
+    frames
+      .mockImplementationOnce(async () => {
+        await gate.promise;
+        return green;
+      })
+      .mockImplementationOnce(async () => white);
+    const oldDoc = s.engine.doc;
+    const switching = s.select(1);
+    await vi.waitFor(() => expect(frames).toHaveBeenCalledTimes(2));
+    // "a" is put away, "b" still loading: the icon arrives right away.
+    expect(await s.addAsLayer(image('logo'))).toBe(false);
+    expect(oldDoc.layers.map((l) => l.name)).toEqual(['a']);
+    gate.resolve();
+    await switching;
+    expect(s.engine.doc.layers.map((l) => l.name)).toEqual(['b']);
+    await s.select(0);
+    expect(s.engine.doc.layers.map((l) => l.name)).toEqual(['a']);
+    s.dispose();
+  });
+
+  it('a switch fails rather than lose a design that could not be kept', async () => {
+    const { s } = await queued();
+    paint(s, [9, 9, 9, 255]);
+    vi.spyOn(s, 'encodeProject').mockRejectedValueOnce(new Error('The project encoder failed'));
+    await expect(s.select(1)).rejects.toThrow('encoder failed');
+    expect(s.currentIndex).toBe(0);
+    expect(s.queue[1]!.status).toBe('pending');
+    expect(center(s)).toEqual([9, 9, 9, 255]);
+    expect(s.unsaved).toBe(true);
+    // Once it can be kept, the switch goes through and the design is kept.
+    await s.select(1);
+    await s.select(0);
+    expect(center(s)).toEqual([9, 9, 9, 255]);
     s.dispose();
   });
 
@@ -481,7 +536,7 @@ describe('EditorSession designs without a target', () => {
       ['b', 'pending'],
     ]);
     expect(s.currentIndex).toBe(0);
-    expect(s.engine.doc).toBe(doc);
+    expect(holds(s, doc)).toBe(true);
     expect(center(s)).toEqual([9, 9, 9, 255]);
     expect(s.engine.historyEntries.map((h) => h.label)).toEqual(['Paint']);
     expect(s.engine.doc.meta.source).toEqual({ kind: 'shortcut', name: 'a', path: item('a').path });
@@ -513,6 +568,32 @@ describe('EditorSession designs without a target', () => {
     s.dispose();
   });
 
+  it('"Apply this design" to a shortcut waiting in the queue takes its place, unless it has a design of its own', async () => {
+    const deps = makeDeps({ img: await frameOf([0, 0, 255, 255]), a: await frameOf([255, 0, 0, 255]), b: await frameOf([0, 255, 0, 255]) }, applied);
+    const s = new EditorSession(deps, new Engine());
+    await s.openItems([image('img')]);
+    paint(s, [9, 9, 9, 255]);
+    await s.importSources([{ kind: 'item', info: item('a') }, { kind: 'item', info: item('b') }], 'queue');
+    // b is opened (it has a design of its own now); a still waits.
+    await s.select(2);
+    await s.select(0);
+    expect(s.canAdopt(item('a'))).toBe(true);
+    expect(s.canAdopt(item('b'))).toBe(false);
+    expect(s.canAdopt(image('img2'))).toBe(false);
+    expect(await s.importSources([{ kind: 'item', info: item('b') }, { kind: 'item', info: item('a') }], 'adopt')).toBe(0);
+    expect(s.queue.map((q) => [q.info.id, q.status])).toEqual([
+      ['a', 'editing'],
+      ['b', 'editing'],
+    ]);
+    expect(s.currentIndex).toBe(0);
+    expect(center(s)).toEqual([9, 9, 9, 255]);
+    expect(s.canApply).toBe(true);
+    expect(s.canAdopt(item('c'))).toBe(false);
+    await s.select(1);
+    expect(center(s)).toEqual([0, 255, 0, 255]);
+    s.dispose();
+  });
+
   it('queueing a target instead keeps the design as an item of its own, and nothing is lost', async () => {
     const deps = makeDeps({ a: await frameOf([255, 0, 0, 255]) }, applied);
     const s = new EditorSession(deps, new Engine());
@@ -531,7 +612,7 @@ describe('EditorSession designs without a target', () => {
     s.dispose();
   });
 
-  it('layers: pictures, images and other items’ icons join the open design', async () => {
+  it('layers: pictures, images and other items’ icons join the open design; a project joins the queue', async () => {
     const deps = makeDeps({ a: await frameOf([255, 0, 0, 255]), b: await frameOf([0, 255, 0, 255]), logo: await frameOf([1, 2, 3, 255]) }, applied);
     const s = new EditorSession(deps, new Engine());
     await s.openItems([item('a')]);
@@ -545,9 +626,10 @@ describe('EditorSession designs without a target', () => {
       ],
       'layer',
     );
-    expect(added).toBe(0);
+    expect(added).toBe(1);
     expect(s.engine.doc.layers.map((l) => l.name)).toEqual(['a', 'b', 'logo', 'Pasted image']);
-    expect(s.queue).toHaveLength(1);
+    expect(s.queue.map((q) => q.info.id)).toEqual(['a', 'p']);
+    expect(s.currentIndex).toBe(0);
     s.dispose();
   });
 
@@ -699,7 +781,7 @@ describe('EditorSession style recipes', () => {
     const doc = s.engine.doc;
     s.recipe = recipe('Look');
     await s.applyStyleToAll();
-    expect(s.engine.doc).toBe(doc);
+    expect(holds(s, doc)).toBe(true);
     expect(s.engine.historyIndex).toBe(2);
     s.engine.undo();
     expect(center(s)).toEqual([1, 1, 1, 255]);
@@ -850,6 +932,20 @@ describe('EditorSession "Apply style to all" and administrator approval', () => 
     s.dispose();
   });
 
+  it('an item whose design cannot be made is not applied, and says why', async () => {
+    const { s, deps } = await batch({});
+    vi.spyOn(s, 'encodeProject').mockRejectedValueOnce(new Error('Out of memory'));
+    expect(await s.applyStyleToAll()).toEqual({ applied: 2, failed: 1, needsElevation: 0 });
+    expect(deps.applied.map((r) => r.item)).toEqual(['c', 'd']);
+    expect(s.queue.map((q) => [q.status, q.problem])).toEqual([
+      ['editing', null],
+      ['failed', 'Out of memory'],
+      ['applied', null],
+      ['applied', null],
+    ]);
+    s.dispose();
+  });
+
   it('offers Undo for the batch while the editor is open', async () => {
     const { s, deps } = await batch({});
     s.interactive = true;
@@ -983,6 +1079,25 @@ describe('EditorSession autosave', () => {
     await s.flushAutosave();
     await s.apply();
     expect(writes(deps).at(-1)).toBe('');
+    s.dispose();
+  });
+
+  it('an item applied by "Apply style to all" leaves the autosave to what is still unsaved; its Undo takes it back', async () => {
+    const { s, deps } = await queued();
+    s.interactive = true;
+    await s.select(1);
+    paint(s, [5, 5, 5, 255]);
+    // b's unsaved design is written as it is put away.
+    await s.select(0);
+    expect(writes(deps)).toEqual([s.queue[1]!.project]);
+    s.recipe = { label: 'Look', apply: vi.fn() };
+    await s.applyStyleToAll();
+    expect(s.queue.map((q) => q.status)).toEqual(['editing', 'applied', 'applied']);
+    expect(writes(deps).at(-1)).toBe('');
+    // Undone: b's design (now the style's) is unsaved work again.
+    await toasts().at(-1)!.action!.run();
+    expect(s.queue[1]!.unsaved).toBe(true);
+    expect(writes(deps).at(-1)).toBe(s.queue[1]!.project);
     s.dispose();
   });
 

@@ -282,6 +282,41 @@ describe('Autosave', () => {
     expect(saved).toEqual(['produced', 'given']);
   });
 
+  it('a change handed to a save that waits for the ones before it is still pending', async () => {
+    const saved: string[] = [];
+    let current = 'A';
+    const a = new Autosave({
+      produce: () => current,
+      save: async (d) => {
+        await new Promise((r) => setTimeout(r, 100));
+        saved.push(d);
+      },
+      delayMs: 10,
+    });
+    a.schedule();
+    await vi.advanceTimersByTimeAsync(20); // "A" is being saved
+    a.schedule();
+    await vi.advanceTimersByTimeAsync(20); // handed to a save behind it: not produced yet
+    expect(a.pending).toBe(true);
+    await vi.advanceTimersByTimeAsync(70); // its turn: produced now
+    expect(a.pending).toBe(false);
+    current = 'B';
+    await vi.advanceTimersByTimeAsync(200);
+    expect(saved).toEqual(['A', 'A']);
+    // A produce that throws is not left pending either.
+    const failing = new Autosave({
+      produce: () => {
+        throw new Error('no');
+      },
+      save: async () => {},
+      delayMs: 10,
+      onError: () => {},
+    });
+    failing.schedule();
+    await failing.flush();
+    expect(failing.pending).toBe(false);
+  });
+
   it('enqueue runs after the saves before it and rejects with its own failure', async () => {
     const order: string[] = [];
     const a = new Autosave({

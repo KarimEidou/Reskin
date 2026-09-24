@@ -81,8 +81,9 @@ The visual and interaction contract for the box and the editor. Tokens live in
   queued items still waiting the editor stays open: the item gets its
   "applied" badge, a toast offers **Undo** for 6 s, and the next item not
   applied yet opens. The last one collapses the window into the box.
-  Switching or removing queue items waits while a job runs or an item
-  loads (the strip and the title bar's queue menu alike).
+  Queue items cannot be switched or removed while a job runs or an item
+  loads (the strip and the title bar's queue menu alike show them
+  disabled).
 
 ## Views
 

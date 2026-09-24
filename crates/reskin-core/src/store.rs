@@ -5,6 +5,7 @@ use std::fs::{self, OpenOptions};
 use std::io::{self, Write as _};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Mutex, PoisonError};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use serde::de::DeserializeOwned;
@@ -530,9 +531,9 @@ fn remove_if_present(file: &Path) -> Result<()> {
 /// The crash-recovery autosave: two slots side by side.
 ///
 /// The editor keeps the open design's unsaved changes in the *live* slot.
-/// Once per launch, before the first use, [`AutosaveSlots::rotate`] turns
-/// what the previous launch left there into the *recovery* slot — the
-/// design offered for recovery. So a design lost in a crash is still
+/// Once per launch, before the first use, [`AutosaveSlots::rotate_once`]
+/// turns what the previous launch left there into the *recovery* slot —
+/// the design offered for recovery. So a design lost in a crash is still
 /// offered after the next session has started autosaving its own work.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AutosaveSlots {
@@ -557,10 +558,10 @@ impl AutosaveSlots {
         &self.recovery
     }
 
-    /// Once per launch: a design the previous launch left in the live slot
-    /// becomes the one offered for recovery (replacing an older offer). An
-    /// empty live slot is just removed; without one, an offer nobody
-    /// answered yet stays.
+    /// A design the previous launch left in the live slot becomes the one
+    /// offered for recovery (replacing an older offer). An empty live slot
+    /// is just removed; without one, an offer nobody answered yet stays.
+    /// Runs once per launch, before the first use (see `rotate_once`).
     pub fn rotate(&self) -> Result<()> {
         let bytes = match fs::read(&self.live) {
             Ok(b) => b,
@@ -576,20 +577,29 @@ impl AutosaveSlots {
         Ok(())
     }
 
+    /// [`rotate`](Self::rotate), unless `rotated` says this launch already
+    /// did. A rotation that fails is tried again on the next call, and the
+    /// caller leaves the slots alone until one succeeds: the previous
+    /// launch's design is never overwritten before it was kept.
+    pub fn rotate_once(&self, rotated: &Mutex<bool>) -> Result<()> {
+        let mut done = rotated.lock().unwrap_or_else(PoisonError::into_inner);
+        if !*done {
+            self.rotate()?;
+            *done = true;
+        }
+        Ok(())
+    }
+
     /// Keeps the open design's unsaved changes in the live slot. Empty data
     /// (nothing unsaved any more) removes it.
     pub fn write(&self, data: &str) -> Result<()> {
-        if data.trim().is_empty() {
-            remove_if_present(&self.live)
-        } else {
-            write_atomic(&self.live, data.as_bytes())
-        }
+        autosave_write(&self.live, (!data.trim().is_empty()).then_some(data))
     }
 
     /// Forgets every unsaved design: the live slot and the recovery offer.
     pub fn discard(&self) -> Result<()> {
-        remove_if_present(&self.live)?;
-        remove_if_present(&self.recovery)
+        autosave_write(&self.live, None)?;
+        autosave_write(&self.recovery, None)
     }
 
     /// The design offered for recovery, if any.
@@ -687,6 +697,27 @@ mod tests {
         assert!(!slots.live().exists());
         assert_eq!(slots.read_recovery().unwrap(), None);
         slots.discard().unwrap();
+    }
+
+    #[test]
+    fn a_failed_rotation_is_tried_again_and_a_done_one_never_repeats() {
+        let dir = Scratch::new();
+        let slots = AutosaveSlots::new(dir.0.join("autosave.reskin"));
+        let rotated = Mutex::new(false);
+        // The live slot cannot be read (a folder stands in its place).
+        fs::create_dir(slots.live()).unwrap();
+        assert!(slots.rotate_once(&rotated).is_err());
+        assert!(!*rotated.lock().unwrap());
+        fs::remove_dir(slots.live()).unwrap();
+        fs::write(slots.live(), "crashed").unwrap();
+        slots.rotate_once(&rotated).unwrap();
+        assert!(*rotated.lock().unwrap());
+        assert_eq!(slots.read_recovery().unwrap().as_deref(), Some("crashed"));
+        // This launch's own autosave stays live from then on.
+        slots.write("new work").unwrap();
+        slots.rotate_once(&rotated).unwrap();
+        assert_eq!(fs::read_to_string(slots.live()).unwrap(), "new work");
+        assert_eq!(slots.read_recovery().unwrap().as_deref(), Some("crashed"));
     }
 
     #[test]

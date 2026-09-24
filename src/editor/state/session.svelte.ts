@@ -259,9 +259,9 @@ export class EditorSession {
   /**
    * Identity of the open design. It changes when another design starts
    * loading and again once it is in: work that awaits something (a render
-   * in a worker, a decode) reads it first and drops its result when it
-   * changed meanwhile, so the result never lands on a design being put
-   * away or not open any more.
+   * in a worker, a decode) reads it first and, once back, asks
+   * `isOpenDesign(token)` — so its result never lands on a design being
+   * put away or not open any more.
    */
   designToken = $state(0);
   /** The editor panel is open and takes input (the shell mirrors the morph state here). */
@@ -281,6 +281,8 @@ export class EditorSession {
   /** The file a standalone design started from (an image or project), for its queue entry later. */
   private standalone: ItemInfo | null = null;
   private designSerial = 0;
+  /** Designs being put in the engine right now (see `replaceDesign`). */
+  private replacing = 0;
   private switchChain: Promise<void> = Promise.resolve();
   private readonly autosaver: Autosave;
   private readonly unsubscribe: () => void;
@@ -398,11 +400,22 @@ export class EditorSession {
    */
   private async replaceDesign(load: () => Promise<void>): Promise<void> {
     this.designToken += 1;
+    this.replacing += 1;
     try {
       await load();
     } finally {
+      this.replacing -= 1;
       this.designToken += 1;
     }
+  }
+
+  /**
+   * Work that read `designToken` before awaiting may still land: the same
+   * design is open, and no other one is on its way in (work started while
+   * one was would otherwise land on the design being put away).
+   */
+  isOpenDesign(token: number): boolean {
+    return token === this.designToken && this.replacing === 0;
   }
 
   /** Bookkeeping for a design just put in the engine. */
@@ -483,8 +496,9 @@ export class EditorSession {
 
   /**
    * Brings dropped, picked or pasted things in, as `how` says (see
-   * ImportChoice); with nothing open they simply open. Resolves to how
-   * many of them joined the queue.
+   * ImportChoice; projects, which cannot be layers, join the queue); with
+   * nothing open they simply open. Resolves to how many of them joined
+   * the queue.
    */
   async importSources(sources: readonly ImportSource[], how: ImportChoice): Promise<number> {
     const items = sources.flatMap((s) => (s.kind === 'item' ? [s.info] : []));
@@ -499,18 +513,17 @@ export class EditorSession {
       if (pictures.length > 0) this.view = 'edit';
       return this.queue.length - queued;
     }
-    const target = how === 'adopt' && !this.hasTarget ? items.find(isTarget) : undefined;
-    if (target) {
-      const entry = this.enqueue(target);
-      if (entry) this.adopt(entry);
-    }
-    if (how !== 'layer') this.ensureQueued();
+    const target = how === 'adopt' ? items.find((i) => this.canAdopt(i)) : undefined;
+    if (target) this.adopt(this.queued(target) ?? this.pushEntry(target));
+    // A project cannot be a layer: it joins the queue whatever the choice.
+    const asLayer = (s: ImportSource) => how === 'layer' && (s.kind === 'image' || s.info.kind !== 'project');
+    if (!sources.every(asLayer)) this.ensureQueued();
     let added = 0;
     for (const s of sources) {
       if (s.kind === 'item' && s.info === target) continue;
-      if (how === 'layer') {
+      if (asLayer(s)) {
         if (s.kind === 'image') this.importSurface(s.surface, s.name);
-        else if (s.info.kind !== 'project') await this.addAsLayer(s.info);
+        else await this.addAsLayer(s.info);
       } else if (s.kind === 'image') {
         await this.queuePicture(s.name, s.surface);
         added++;
@@ -539,10 +552,25 @@ export class EditorSession {
     return this.queue[this.queue.length - 1]!;
   }
 
+  /** The queue entry of an item, if it is queued. */
+  private queued(info: ItemInfo): QueueEntry | undefined {
+    return this.queue.find((q) => q.info.id === info.id || (info.path !== '' && q.info.path === info.path));
+  }
+
   /** Queues an item unless it is queued already; returns the new entry. */
   private enqueue(info: ItemInfo): QueueEntry | null {
-    const queued = this.queue.some((q) => q.info.id === info.id || (info.path !== '' && q.info.path === info.path));
-    return queued ? null : this.pushEntry(info);
+    return this.queued(info) ? null : this.pushEntry(info);
+  }
+
+  /**
+   * The open design has no target yet and `info` can take it over: a
+   * target not queued, or queued but not opened yet (no design of its own
+   * would be lost).
+   */
+  canAdopt(info: ItemInfo): boolean {
+    if (!this.hasDesign || this.hasTarget || !isTarget(info)) return false;
+    const entry = this.queued(info);
+    return !entry || (entry.status === 'pending' && entry.project === null);
   }
 
   /** A queue entry's item for a design with no file behind it (its `project` holds it). */
@@ -586,9 +614,9 @@ export class EditorSession {
   }
 
   /**
-   * The open design has no target yet: `target`, just queued, takes it
-   * over — design, history and recipe. A queued design source it came
-   * from gives its place in the queue to the target.
+   * The open design has no target yet: `target`, queued and not opened,
+   * takes it over — design, history and recipe. A queued design source
+   * it came from gives its place in the queue to the target.
    */
   private adopt(target: QueueEntry): void {
     const holder = this.current;
@@ -608,7 +636,7 @@ export class EditorSession {
     // Its own icon is only for before/after; it may arrive a little later.
     const token = this.designToken;
     void this.loadIcon(target.info).then((icon) => {
-      if (token === this.designToken) this.original = icon;
+      if (this.isOpenDesign(token)) this.original = icon;
     });
   }
 
@@ -751,6 +779,7 @@ export class EditorSession {
    * Keeps the current item's design (with its recipe, Library link and
    * unsaved state) in its queue entry. Unsaved changes the autosave has
    * not written yet go to it now, before another design is edited.
+   * Rejects when the design could not be kept: the switch must not go on.
    */
   private async stashCurrent(): Promise<void> {
     const entry = this.current;
@@ -761,16 +790,14 @@ export class EditorSession {
     entry.libraryId = this.libraryId;
     entry.unsaved = this.unsaved;
     const autosave = entry.unsaved && this.autosaver.pending;
-    let project: string;
-    try {
-      // Both take the design as it is now, before anything is awaited.
-      const thumb = this.deps.encode(this.engine.thumbnail(THUMB_SIZE));
-      [project, entry.thumb] = await Promise.all([this.encodeProject(), thumb]);
-    } catch (e) {
-      console.warn('could not keep the design', e);
-      return;
-    }
+    // Both take the design as it is now, before anything is awaited.
+    const thumb = this.deps.encode(this.engine.thumbnail(THUMB_SIZE)).then(
+      (url) => (entry.thumb = url),
+      (e: unknown) => console.warn('could not draw the queue thumbnail', e),
+    );
+    const project = await this.encodeProject();
     entry.project = project;
+    await thumb;
     if (autosave) await this.autosaver.write(project).catch((e: unknown) => console.warn('autosave failed', e));
   }
 
@@ -814,7 +841,7 @@ export class EditorSession {
   async addAsLayer(info: ItemInfo): Promise<boolean> {
     const token = this.designToken;
     const surface = await this.loadIcon(info);
-    if (!surface || !this.hasDesign || token !== this.designToken) return false;
+    if (!surface || !this.hasDesign || !this.isOpenDesign(token)) return false;
     return this.engine.importImage(surface, info.name) !== null;
   }
 
@@ -980,6 +1007,7 @@ export class EditorSession {
   private async undoApplied(changes: AppliedChange[]): Promise<void> {
     const failed: string[] = [];
     let needsAdmin = 0;
+    let reopened = false;
     for (const { entry, before, historyIds } of changes) {
       let undone = true;
       for (const id of historyIds) {
@@ -993,13 +1021,11 @@ export class EditorSession {
       entry.info = before;
       entry.outcome = null;
       // Its design is on the desktop no more: unsaved work again.
-      if (entry === this.current) {
-        this.baseUnsaved = true;
-        this.autosaver.schedule();
-      } else {
-        entry.unsaved = true;
-      }
+      if (entry === this.current) this.baseUnsaved = true;
+      else entry.unsaved = true;
+      reopened = true;
     }
+    if (reopened) await this.settleAutosave();
     if (failed.length > 0 || needsAdmin > 0) {
       const why = [...failed.slice(0, 2), ...(needsAdmin > 0 ? [`${plural(needsAdmin, 'icon')} need administrator rights`] : [])];
       throw new Error(`Could not undo everything: ${why.join('; ')}`);
@@ -1088,6 +1114,7 @@ export class EditorSession {
         if (outcome.type === 'cancelled') break;
       }
       const n = changes.length;
+      if (n > 0) await this.settleAutosave();
       if (n === requests.length) this.report(`Applied to ${plural(n, 'more icon')}.`, 'success', changes);
       else this.report(`Applied to ${n} of ${plural(requests.length, 'icon')}.`, n > 0 ? 'warning' : 'error', changes);
     } finally {
@@ -1126,17 +1153,19 @@ export class EditorSession {
         try {
           const layer = designFromIcon(scratch, entry.info, await this.loadIcon(entry.info));
           await recipe.apply(scratch, layer);
-          const job: ApplyJob = {
-            mode: preferredMode(entry.info)!,
-            images: await scratch.exportPngs(settings().icoSizes),
-            designName: recipe.label,
-            flourish: false,
-          };
+          // The item's design is kept with it whatever the outcome: made
+          // before the apply, so a failure here never hides an applied icon.
+          const [images, project, thumb] = await Promise.all([
+            scratch.exportPngs(settings().icoSizes),
+            this.encodeProject(scratch.doc),
+            this.deps.encode(scratch.thumbnail(THUMB_SIZE)),
+          ]);
+          const job: ApplyJob = { mode: preferredMode(entry.info)!, images, designName: recipe.label, flourish: false };
           const outcome = await this.send(entry, job);
-          entry.project = await this.encodeProject(scratch.doc);
+          entry.project = project;
           entry.recipe = recipe;
           entry.libraryId = null;
-          entry.thumb = await this.deps.encode(scratch.thumbnail(THUMB_SIZE));
+          entry.thumb = thumb;
           if (outcome.type === 'applied') {
             changes.push(this.markApplied(entry, outcome, job));
             result.applied++;
@@ -1160,6 +1189,8 @@ export class EditorSession {
       scratch.dispose();
       this.busy = null;
     }
+    // Applied designs are safe now: the autosave keeps what is still unsaved.
+    if (result.applied > 0) await this.settleAutosave();
     if (result.failed === 0 && waiting.length === 0) {
       this.report(`Applied "${recipe.label}" to ${plural(result.applied, 'more icon')}.`, 'success', changes);
     } else {
@@ -1280,6 +1311,7 @@ export class EditorSession {
     return this.autosaver.flush();
   }
 
+  /** The live autosave follows what is unsaved now (see above). */
   private async settleAutosave(): Promise<void> {
     if (this.unsaved) {
       this.autosaver.schedule();
