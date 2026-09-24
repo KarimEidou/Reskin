@@ -4,6 +4,11 @@
   renderSizes, in the panels worker) ~250 ms after the design changes,
   drawn 1:1 in device pixels; the icon on the user's desktop; and on light
   and dark taskbars.
+
+  The renders are background work: the panels worker holds them until the
+  editor is open (EditorSession.interactive), and a canvas — a composited
+  layer of its own, which every frame of a morph would have to commit —
+  exists only once there is something to draw on it.
 -->
 <script lang="ts">
   import { onMount, untrack } from 'svelte';
@@ -121,15 +126,17 @@
         {#each sizes as size (size)}
           <li class="size" data-size={size} class:ready={rendered.has(size)}>
             <span class="slot" role="img" aria-label="{size} × {size} px" style:width="{Math.max(16, size / dpr)}px" style:height="{size / dpr}px">
-              <canvas
-                width={size}
-                height={size}
-                aria-hidden="true"
-                data-testid="preview-size"
-                data-size={size}
-                {@attach sizeCanvas(size)}
-                {@attach snapToDevicePixels()}
-              ></canvas>
+              {#if rendered.has(size)}
+                <canvas
+                  width={size}
+                  height={size}
+                  aria-hidden="true"
+                  data-testid="preview-size"
+                  data-size={size}
+                  {@attach sizeCanvas(size)}
+                  {@attach snapToDevicePixels()}
+                ></canvas>
+              {/if}
             </span>
             <span class="px">{size}</span>
           </li>
@@ -237,11 +244,12 @@
   canvas {
     display: block;
     image-rendering: pixelated;
-    opacity: 0;
     transition: opacity var(--fade-2) linear;
   }
-  .ready canvas {
-    opacity: 1;
+  @starting-style {
+    canvas {
+      opacity: 0;
+    }
   }
   .px {
     padding: 0 4px;

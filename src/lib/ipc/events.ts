@@ -1,5 +1,7 @@
 // Rust -> box events. (The editor gets its commands through the mailbox in
 // ./mailbox.ts instead: events to a window created hidden can be dropped.)
+// `system:changed` goes to both pages; the editor re-reads the same state
+// whenever its window shows anyway (src/lib/boot.ts).
 
 import { listen, type UnlistenFn } from '@tauri-apps/api/event';
 import type { BoxCollapse, BoxFlight, BoxHandoff, BoxProgress, Settings } from './types';
@@ -25,6 +27,12 @@ export const EVENTS = {
   settings: 'settings:changed',
   /** An apply succeeded: show the Undo chip; payload is the history entry id. */
   undo: 'box:undo',
+  /**
+   * Windows state a page shows changed behind its back (Rust's start-up
+   * check found the saved hotkey taken after the pages booted): read it
+   * again (`refreshSystem`).
+   */
+  system: 'system:changed',
 } as const;
 
 export interface EventPayloads {
@@ -35,6 +43,7 @@ export interface EventPayloads {
   'box:shown': null;
   'settings:changed': Settings;
   'box:undo': string;
+  'system:changed': null;
 }
 
 export function on<K extends keyof EventPayloads>(

@@ -1170,6 +1170,34 @@ test.describe('batch queue', () => {
     await expect.poll(() => page.evaluate(() => window.__e2e!.callsOf('apply_icon').length)).toBe(1);
     await expect(page.getByTestId('queue-item').nth(1)).toHaveAccessibleName('Notes, applied');
   });
+
+  test('"Apply style to all" follows undo and redo: a look the design no longer has is never replayed', async ({ page }) => {
+    await openWorkspace(page, [SAMPLE_PATHS.steam, SAMPLE_PATHS.notes], { applyCollapses: false });
+    const applyAll = page.getByTestId('apply-style-all');
+    const recipe = () => withSession(page, (s) => s.recipe?.label ?? null);
+    // A look from the Adjust panel: Invert, applied.
+    await page.locator('[role="tab"][data-tab="adjust"]').click();
+    await page.locator('[data-filter="invert"]').click();
+    await page.getByTestId('adjust-apply').click();
+    await expect(applyAll).toHaveAttribute('aria-disabled', 'false');
+    expect(await recipe()).toBe('Invert');
+    await page.locator('body').click({ position: { x: 5, y: 5 } });
+    await page.keyboard.press('Control+z');
+    await expect(applyAll).toHaveAttribute('aria-disabled', 'true');
+    expect(await recipe()).toBeNull();
+    await page.keyboard.press('Control+y');
+    await expect(applyAll).toHaveAttribute('aria-disabled', 'false');
+    expect(await recipe()).toBe('Invert');
+    // Undone and replaced by another change, it is gone for good.
+    await page.keyboard.press('Control+z');
+    await withSession(page, (s) => {
+      s.engine.editLayerPixels(s.engine.activeLayer!.id, 'Paint', (surface) => surface.data.fill(255, 0, 4));
+    });
+    await page.keyboard.press('Control+y');
+    await expect(applyAll).toHaveAttribute('aria-disabled', 'true');
+    expect(await recipe()).toBeNull();
+    expect(await page.evaluate(() => window.__e2e!.callsOf('apply_icon').length)).toBe(0);
+  });
 });
 
 test.describe('robustness', () => {

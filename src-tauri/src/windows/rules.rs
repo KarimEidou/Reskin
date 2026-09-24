@@ -2,6 +2,8 @@
 //! apart from the windows they drive (so they are unit tested). `morph.rs`
 //! and `actions.rs` act on them.
 
+use reskin_core::model::CollapseThen;
+
 /// Where the editor is in its life cycle.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Phase {
@@ -55,6 +57,36 @@ pub fn toggle(phase: Phase, hidden_for_fullscreen: bool, box_visible: bool) -> T
     }
 }
 
+/// What becomes of the editor window once a close put it at rest.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AfterClose {
+    /// It stays, hidden, ready for the next open.
+    Keep,
+    /// Compatibility mode changed while it was open: the windows are rebuilt.
+    Rebuild,
+    /// Low-memory mode: it goes now.
+    Destroy,
+    /// Low-memory mode, closed by an apply (`fly` / `celebrate`): its page
+    /// still settles that apply — its outcome, the design's autosave, which
+    /// still holds the design being applied — so the editor goes once the
+    /// page says it is done (`editor_close('applied')`).
+    DestroyWhenSettled,
+}
+
+/// What a close that ended with `then` does with the editor (`rebuild`:
+/// compatibility mode changed while it was open).
+pub fn after_close(then: CollapseThen, low_memory: bool, rebuild: bool) -> AfterClose {
+    if rebuild {
+        AfterClose::Rebuild
+    } else if !low_memory {
+        AfterClose::Keep
+    } else if then == CollapseThen::Hide {
+        AfterClose::Destroy
+    } else {
+        AfterClose::DestroyWhenSettled
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -99,5 +131,30 @@ mod tests {
         );
         // Hidden for a fullscreen app: showing it would do nothing.
         assert_eq!(toggle(Phase::Closed, true, false), Toggle::OpenEditor);
+    }
+
+    #[test]
+    fn low_memory_mode_destroys_the_editor_after_an_apply_only_once_its_page_is_done() {
+        for then in [
+            CollapseThen::Hide,
+            CollapseThen::Fly,
+            CollapseThen::Celebrate,
+        ] {
+            assert_eq!(after_close(then, false, false), AfterClose::Keep);
+            assert_eq!(after_close(then, true, true), AfterClose::Rebuild);
+            assert_eq!(after_close(then, false, true), AfterClose::Rebuild);
+        }
+        assert_eq!(
+            after_close(CollapseThen::Hide, true, false),
+            AfterClose::Destroy
+        );
+        assert_eq!(
+            after_close(CollapseThen::Fly, true, false),
+            AfterClose::DestroyWhenSettled
+        );
+        assert_eq!(
+            after_close(CollapseThen::Celebrate, true, false),
+            AfterClose::DestroyWhenSettled
+        );
     }
 }

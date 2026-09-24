@@ -64,6 +64,11 @@ pub fn close_editor<R: Runtime>(app: &AppHandle<R>, then: CollapseThen) {
     spawn(app, "close", move |app| close_blocking(&app, then));
 }
 
+/// The editor page settled the apply that closed it (see `morph::apply_settled`).
+pub fn apply_settled<R: Runtime>(app: &AppHandle<R>) {
+    spawn(app, "apply-settled", |app| morph::apply_settled(&app));
+}
+
 /// Inspects paths (Explorer verb / second instance) and opens them.
 pub fn open_paths<R: Runtime>(app: &AppHandle<R>, paths: Vec<PathBuf>) {
     spawn(app, "open-paths", move |app| {

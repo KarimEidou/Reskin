@@ -33,6 +33,7 @@ import { toast, type ToastKind } from '$lib/ui/toasts.svelte';
 import { play } from '$lib/sound/synth';
 import {
   Engine,
+  MASTER_SIZE,
   Surface,
   migrateProject,
   type Doc,
@@ -44,7 +45,7 @@ import {
 import { FilterClient } from '$engine/filters/client';
 import { Autosave } from '$engine/io/autosave';
 import { ProjectEncoder } from '$engine/io/encoder';
-import { PanelsClient } from '../panels/worker/client';
+import { isCancelled, PanelsClient } from '../panels/worker/client';
 import { orderedModes, preferredMode } from '../workspace/apply-modes';
 
 export type SidebarTab =
@@ -88,7 +89,9 @@ export interface QueueEntry {
  * A recipe belongs to one design: the panels chain their steps onto the
  * current design's recipe, each queued item keeps its own while another one
  * is edited, and a new design (a standalone image or project, New blank, a
- * Library design, a recovered autosave) starts without one.
+ * Library design, a recovered autosave) starts without one. It follows the
+ * design's history: undoing the change that added a step takes the step
+ * back out, redoing it brings it back (see `EditorSession.recipe`).
  */
 export interface StyleRecipe {
   label: string;
@@ -208,7 +211,11 @@ function sourceOf(info: ItemInfo): SourceInfo {
   return { kind: info.kind, name: info.name, path: info.path };
 }
 
-/** Starts `engine` on a fresh design of `info`'s icon (its only layer); returns that layer's id. */
+/**
+ * Starts `engine` on a fresh design of `info`'s icon (its only layer; best
+ * fitted to the document already, see `EditorSession.fitted`); returns that
+ * layer's id.
+ */
 function designFromIcon(engine: Engine, info: ItemInfo, icon: Surface | null): string {
   engine.newDocument({ name: info.name, source: sourceOf(info) });
   const blank = engine.doc.layers[0]!;
@@ -254,8 +261,6 @@ export class EditorSession {
   original = $state.raw<Surface | null>(null);
   /** A design is loaded (queued item, standalone image, project or blank). */
   hasDesign = $state(false);
-  /** The current design's style recipe (Styles/Backdrop/Adjust panels), replayed by "Apply style to all". */
-  recipe = $state.raw<StyleRecipe | null>(null);
   /** The Library design the open design came from or was last saved as: saving updates it. */
   libraryId = $state<string | null>(null);
   /** That Library design's name, as the Library has it (the open design goes by it too). */
@@ -268,8 +273,6 @@ export class EditorSession {
    * put away or not open any more.
    */
   designToken = $state(0);
-  /** The editor panel is open and takes input (the shell mirrors the morph state here). */
-  interactive = $state(false);
   /**
    * The design's recipe once the open layer preview is kept: set by the
    * Adjust panel for the adjustment being tuned, used by `keepPreview`.
@@ -278,6 +281,18 @@ export class EditorSession {
   /** Bumped on every engine event of that kind; read to re-derive. */
   rev = $state<Rev>(Object.fromEntries(REV_KINDS.map((k) => [k, 0])) as Rev);
 
+  /** See `interactive`. */
+  private panelOpen = $state(false);
+  /** Waiting for the panel to open (see `whenInteractive`). */
+  private openWaiters: Array<() => void> = [];
+  /** See `recipe`. */
+  private recipeNow = $state.raw<StyleRecipe | null>(null);
+  /** The recipe before the oldest history step the design still has. */
+  private recipeBase: StyleRecipe | null = null;
+  /** The recipe after each history step a panel set it at, by entry id. */
+  private readonly recipeSteps = new Map<number, StyleRecipe | null>();
+  /** The history steps that were applied when the recipe last followed the history. */
+  private appliedSteps = new Set<number>();
   /** History step the open design was loaded or last saved at (see `unsaved`). */
   private cleanEntry = $state<number | null>(null);
   /** The open design came with unsaved changes (a recovered draft, a stashed unsaved design). */
@@ -329,6 +344,7 @@ export class EditorSession {
   get panels(): PanelsClient {
     if (!this.panelsClient) {
       this.panelsClient = new PanelsClient(this.disposed ? false : undefined);
+      this.panelsClient.holdBackground(!this.panelOpen);
       if (this.disposed) this.panelsClient.dispose();
     }
     return this.panelsClient;
@@ -346,6 +362,35 @@ export class EditorSession {
   /** A design (the open one by default) as .reskin JSON, as it is now; encoded off the main thread. */
   encodeProject(doc: Doc = this.engine.doc): Promise<string> {
     return this.encoder.encode(doc);
+  }
+
+  // --- the panel ---------------------------------------------------------------
+
+  /**
+   * The editor panel is open and takes input (the shell mirrors the morph
+   * state here). Until it is — hidden, or morphing open — work nobody is
+   * waiting for waits: the panels worker holds its background renders
+   * (layer thumbnails, previews, preset thumbnails) and `whenInteractive`
+   * holds the rest, so none of it lands on the page mid-morph
+   * (docs/ARCHITECTURE.md, "Performance").
+   */
+  get interactive(): boolean {
+    return this.panelOpen;
+  }
+
+  set interactive(on: boolean) {
+    this.panelOpen = on;
+    this.panelsClient?.holdBackground(!on);
+    if (!on) return;
+    const waiting = this.openWaiters;
+    this.openWaiters = [];
+    for (const resolve of waiting) resolve();
+  }
+
+  /** Resolves once the panel is open and takes input (see `interactive`); at once when it is. */
+  whenInteractive(): Promise<void> {
+    if (this.panelOpen) return Promise.resolve();
+    return new Promise((resolve) => this.openWaiters.push(resolve));
   }
 
   // --- derived state ---------------------------------------------------------
@@ -390,6 +435,57 @@ export class EditorSession {
     return entry !== null && isTarget(entry.info);
   }
 
+  // --- the style recipe -----------------------------------------------------------
+
+  /**
+   * The current design's style recipe (Styles/Backdrop/Adjust/Effects
+   * panels), replayed by "Apply style to all". A panel sets it right after
+   * the change it made, so each value belongs to a history step: undoing
+   * that step brings back the recipe before it, redoing it brings the value
+   * back, and a step undone and then replaced by another change is gone for
+   * good — the recipe never holds a look the design does not have.
+   */
+  get recipe(): StyleRecipe | null {
+    return this.recipeNow;
+  }
+
+  set recipe(recipe: StyleRecipe | null) {
+    const step = this.engine.currentEntryId;
+    if (step === null) this.recipeBase = recipe;
+    else this.recipeSteps.set(step, recipe);
+    this.recipeNow = recipe;
+  }
+
+  /** A design comes with `recipe` and no history of its own yet (a load or reset). */
+  private startRecipe(recipe: StyleRecipe | null): void {
+    this.recipeBase = recipe;
+    this.recipeSteps.clear();
+    this.appliedSteps = new Set(this.engine.historyEntries.slice(0, this.engine.historyIndex).map((e) => e.id));
+    this.recipeNow = recipe;
+  }
+
+  /** The history moved: the recipe is the one of the newest step still applied. */
+  private followHistory(): void {
+    const entries = this.engine.historyEntries;
+    const applied = entries.slice(0, this.engine.historyIndex);
+    const listed = new Set(entries.map((e) => e.id));
+    let newestDropped = -1;
+    for (const [id, recipe] of [...this.recipeSteps]) {
+      if (listed.has(id)) continue;
+      // Gone from the history: a step it let go of (its memory cap, a
+      // clear) while applied stays part of the design — the newest such
+      // one is the base now; an undone one another change replaced is gone.
+      if (this.appliedSteps.has(id) && id > newestDropped) {
+        newestDropped = id;
+        this.recipeBase = recipe;
+      }
+      this.recipeSteps.delete(id);
+    }
+    this.appliedSteps = new Set(applied.map((e) => e.id));
+    const newest = applied.findLast((e) => this.recipeSteps.has(e.id));
+    this.recipeNow = newest ? this.recipeSteps.get(newest.id)! : this.recipeBase;
+  }
+
   // --- engine events -----------------------------------------------------------
 
   private onEngineEvent(e: EngineEvent): void {
@@ -397,8 +493,11 @@ export class EditorSession {
     if (e.kind === 'message') {
       toast({ message: e.text, kind: e.level });
     }
-    // Every change to a design is a history step (a load clears the history).
-    if (e.kind === 'history' && this.hasDesign) this.autosaver.schedule();
+    if (e.kind === 'history') {
+      this.followHistory();
+      // Every change to a design is a history step (a load clears the history).
+      if (this.hasDesign) this.autosaver.schedule();
+    }
   }
 
   // --- the open design -------------------------------------------------------
@@ -436,7 +535,7 @@ export class EditorSession {
       standalone?: ItemInfo | null;
     } = {},
   ): void {
-    this.recipe = opts.recipe ?? null;
+    this.startRecipe(opts.recipe ?? null);
     this.libraryId = opts.library?.id ?? null;
     this.libraryName = opts.library?.name ?? null;
     this.standalone = opts.standalone ?? null;
@@ -732,7 +831,7 @@ export class EditorSession {
     } else if (info.kind === 'project') {
       await this.engine.loadProject(await this.deps.commands.readProject(info.id));
     } else {
-      designFromIcon(this.engine, info, this.original);
+      designFromIcon(this.engine, info, this.original && (await this.fitted(this.original, MASTER_SIZE)));
       this.engine.clearHistory();
     }
     const library = entry.libraryId !== null && entry.libraryName !== null ? { id: entry.libraryId, name: entry.libraryName } : null;
@@ -755,7 +854,7 @@ export class EditorSession {
         this.designToken += 1;
         this.hasDesign = false;
         this.original = null;
-        this.recipe = null;
+        this.startRecipe(null);
         this.libraryId = null;
         this.libraryName = null;
       }
@@ -828,6 +927,29 @@ export class EditorSession {
     if (autosave) await this.autosaver.write(project).catch((e: unknown) => console.warn('autosave failed', e));
   }
 
+  /**
+   * `surface` fitted and centred into a `size` px document, in the panels
+   * worker: the engine's import only copies a picture of the document's
+   * size, so opening an item never resamples on the main thread (a 256 px
+   * icon takes a 512 px one's worth of float maths; docs/ARCHITECTURE.md,
+   * "Performance"). Should the worker fail, the surface comes back as it
+   * is and the engine fits it.
+   */
+  async fitted(surface: Surface, size: number): Promise<Surface> {
+    if (surface.width === size && surface.height === size) return surface;
+    try {
+      const { width, height, data } = await this.panels.request(
+        { op: 'fit', pixels: { width: surface.width, height: surface.height, data: surface.data }, size },
+        { priority: 'high' },
+      );
+      return Surface.fromRgba(width, height, data);
+    } catch (e) {
+      if (isCancelled(e)) throw e;
+      console.warn('fitting the picture in the panels worker failed; the engine fits it', e);
+      return surface;
+    }
+  }
+
   /** The item's current icon as a surface (largest frame), or null. */
   async loadIcon(info: ItemInfo): Promise<Surface | null> {
     try {
@@ -852,9 +974,10 @@ export class EditorSession {
       return;
     }
     const icon = await this.loadIcon(info);
+    const fitted = icon && (await this.fitted(icon, MASTER_SIZE));
     await this.replaceDesign(async () => {
       this.original = icon;
-      designFromIcon(this.engine, info, icon);
+      designFromIcon(this.engine, info, fitted);
       this.engine.clearHistory();
       this.loaded({ standalone: info });
     });
@@ -867,7 +990,8 @@ export class EditorSession {
    */
   async addAsLayer(info: ItemInfo): Promise<boolean> {
     const token = this.designToken;
-    const surface = await this.loadIcon(info);
+    const icon = await this.loadIcon(info);
+    const surface = icon && (await this.fitted(icon, this.engine.doc.width));
     if (!surface || !this.hasDesign || !this.isOpenDesign(token)) return false;
     return this.engine.importImage(surface, info.name) !== null;
   }
@@ -912,7 +1036,19 @@ export class EditorSession {
       return null;
     } finally {
       this.busy = null;
+      await this.applySettled();
     }
+  }
+
+  /**
+   * An apply is settled — its outcome handled, the autosave following it.
+   * When its flourish closed the editor, Rust hears so: in low-memory mode
+   * it destroys the editor only now, as the autosave written as the
+   * collapse started still held the design being applied.
+   */
+  private async applySettled(): Promise<void> {
+    if (this.interactive) return;
+    await this.deps.commands.editorClose('applied').catch((e: unknown) => console.warn('editor_close failed', e));
   }
 
   /**
@@ -1146,6 +1282,7 @@ export class EditorSession {
       else this.report(`Applied to ${n} of ${plural(requests.length, 'icon')}.`, n > 0 ? 'warning' : 'error', changes);
     } finally {
       this.busy = null;
+      await this.applySettled();
     }
   }
 
@@ -1176,7 +1313,8 @@ export class EditorSession {
         entry.status = 'applying';
         entry.problem = null;
         try {
-          const layer = designFromIcon(scratch, entry.info, await this.loadIcon(entry.info));
+          const icon = await this.loadIcon(entry.info);
+          const layer = designFromIcon(scratch, entry.info, icon && (await this.fitted(icon, MASTER_SIZE)));
           await recipe.apply(scratch, layer);
           // The item's design is kept with it whatever the outcome: made
           // before the apply, so a failure here never hides an applied icon.
@@ -1460,7 +1598,7 @@ export class EditorSession {
     this.elevation = null;
     this.busy = null;
     this.original = null;
-    this.recipe = null;
+    this.startRecipe(null);
     this.previewRecipe = null;
     this.libraryId = null;
     this.libraryName = null;

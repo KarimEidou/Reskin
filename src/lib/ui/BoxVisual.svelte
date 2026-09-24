@@ -50,7 +50,7 @@
     /** Compatibility mode: fully opaque rendering. */
     compat?: boolean;
     reducedMotion?: boolean;
-    /** Short hint under the mark, e.g. "Drag a shortcut onto me". */
+    /** Short hint under the mark, e.g. "Drag a shortcut onto me" (up to three lines). */
     hint?: string | null;
     /**
      * Why the box shook (error state): shown under the mark in place of the
@@ -378,11 +378,19 @@
     width: 28%;
     height: 28%;
   }
+  /* Three lines at most, breaking long words, whatever it says (a hotkey
+     note can run long): the caption always stays inside the box. */
   .hint {
     position: absolute;
     left: 8%;
     right: 8%;
     top: 52%;
+    display: -webkit-box;
+    -webkit-box-orient: vertical;
+    -webkit-line-clamp: 3;
+    line-clamp: 3;
+    overflow: hidden;
+    overflow-wrap: anywhere;
     font-size: calc(var(--bv-vis) * 0.084);
     font-weight: 600;
     line-height: 1.2;
@@ -392,16 +400,10 @@
     text-shadow: 0 1px 2px rgb(0 0 0 / 0.35);
     text-wrap: balance;
   }
-  /* An error message may run longer than the hint: smaller, three lines. */
+  /* An error message may run longer than the hint: smaller, from higher up. */
   .hint.message {
     top: 47%;
     font-size: max(9px, calc(var(--bv-vis) * 0.074));
-    display: -webkit-box;
-    -webkit-box-orient: vertical;
-    -webkit-line-clamp: 3;
-    line-clamp: 3;
-    overflow: hidden;
-    overflow-wrap: anywhere;
   }
 
   /* ------------------------------------------------------------------ */

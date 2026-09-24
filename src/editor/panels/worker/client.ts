@@ -9,7 +9,9 @@
 // time and picks the next by priority: what the user just asked for (apply
 // a preset, add a sticker, an icon-helper preview) goes before background
 // renders (layer thumbnails, the Previews block, the Styles grid), and a
-// request cancelled while waiting is never computed.
+// request cancelled while waiting is never computed. Background renders can
+// be held back altogether (`holdBackground`): the editor holds them while
+// its panel is not open, so none of them lands on the page mid-morph.
 
 import type { PanelMessage, PanelOp, PanelResponse, PanelResults, RequestOf } from './protocol';
 
@@ -70,6 +72,8 @@ export class PanelsClient {
   /** Requests ready to run, 'high' ones first (FIFO within a priority). */
   private readonly ready: Job[] = [];
   private readonly channels = new Map<string, { active: Job | null; queued: Job | null }>();
+  /** Background ('low') requests wait (see `holdBackground`). */
+  private held = false;
   private _disposed = false;
 
   constructor(worker: WorkerLike | null | false = spawn()) {
@@ -136,6 +140,16 @@ export class PanelsClient {
     });
   }
 
+  /**
+   * Holds background ('low') requests back, or lets them go: while held
+   * they wait in order — none is computed, so no result lands on the page
+   * — and user requests ('high') still run.
+   */
+  holdBackground(hold: boolean): void {
+    this.held = hold;
+    if (!hold) this.pump();
+  }
+
   /** Cancels the running and waiting requests of a channel. */
   cancel(channel: string): void {
     const ch = this.channels.get(channel);
@@ -189,9 +203,11 @@ export class PanelsClient {
     this.pump();
   }
 
-  /** Starts the next ready request when nothing is running. */
+  /** Starts the next ready request when nothing is running (and it is not held back). */
   private pump(): void {
     while (!this.running && this.ready.length > 0) {
+      // 'high' requests come first: the first one held back ends the turn.
+      if (this.held && this.ready[0]!.low && !this.ready[0]!.settled) return;
       const job = this.ready.shift()!;
       if (job.settled) {
         // Cancelled while waiting: never computed.

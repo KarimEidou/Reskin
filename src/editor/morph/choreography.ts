@@ -11,7 +11,10 @@
 // repainted every frame (its radius changes), so it carries no blurred
 // shadow — the panel's drop shadow is a layer of its own that only fades,
 // once the shell is in place. The content's clip is animated only while the
-// content shows.
+// content shows. The regions enter by fading only: a region that moved
+// would make every layer painted above it a layer of its own for its whole
+// entrance (the compositor assumes they overlap), and each frame would
+// commit them all.
 
 import type { Rect } from '$lib/ipc/types';
 import { clamp, EASE, lerp } from '$lib/motion/easing';
@@ -58,9 +61,10 @@ const FRAME_MS = 1000 / 60;
 /**
  * The shell animates border-radius and the content clip-path, which run on
  * the main thread. Pure transform/opacity animations would run on the
- * compositor and drift ahead of them whenever the main thread is busy
- * (the item is still loading during the morph). A constant, invisible
- * non-compositable property keeps every part of the morph on one clock.
+ * compositor and drift ahead of them whenever the main thread is busy (a
+ * slow machine; an item that took longer than the open waits for it). A
+ * constant, invisible non-compositable property keeps every part of the
+ * morph on one clock.
  */
 const MAIN_THREAD: Keyframe = { outlineOffset: '0px' };
 
@@ -150,26 +154,19 @@ function flyerFrame(from: Rect, to: Rect, p: number): Keyframe {
   return { transform: flipCss(mixFlip(flipTransform(from, to), p)), ...MAIN_THREAD };
 }
 
-
 function animate(el: Element, keyframes: Keyframe[], options: KeyframeAnimationOptions): Animation {
   return el.animate(keyframes, { easing: 'linear', fill: 'both', ...options });
 }
 
-/** Staggered entrance of the panel regions, starting at `delay` ms. */
+/** Staggered entrance of the panel regions (a fade each), starting at `delay` ms. */
 function enterRegions(regions: readonly HTMLElement[], delay: number): Animation[] {
   return regions.map((el, i) =>
-    el.animate(
-      [
-        { opacity: 0, transform: 'translateY(8px)' },
-        { opacity: 1, transform: 'none' },
-      ],
-      {
-        duration: dur(REGION_MS),
-        delay: delay + dur(STAGGER_MS) * i,
-        easing: EASE.decelerate,
-        fill: 'backwards',
-      },
-    ),
+    el.animate([{ opacity: 0 }, { opacity: 1 }], {
+      duration: dur(REGION_MS),
+      delay: delay + dur(STAGGER_MS) * i,
+      easing: EASE.decelerate,
+      fill: 'backwards',
+    }),
   );
 }
 

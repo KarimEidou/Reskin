@@ -39,6 +39,7 @@ type SessionView = {
   };
   saveToLibrary(name?: string, opts?: { asNew?: boolean }): Promise<unknown>;
   flushAutosave(): Promise<void>;
+  apply(opts?: { flourish?: boolean }): Promise<unknown>;
 };
 type Win = { __reskinSession: SessionView };
 
@@ -656,6 +657,22 @@ test.describe('autosave', () => {
     ]);
     expect(cleared).toBeGreaterThanOrEqual(releasedAt);
     expect(JSON.parse((await liveDraft(page))!).meta.source.path).toBe(SAMPLE_PATHS.steam);
+  });
+
+  test('low-memory mode: an apply that closes the editor leaves no draft of the applied design', async ({ openEditor, page }) => {
+    await openEditor({ settings: { lowMemory: true } });
+    await simulateOpen(page, [SAMPLE_PATHS.steam], 'edit');
+    await hasDesign(page);
+    await paint(page);
+    // Save & Apply with its flourish: Rust collapses the editor while the
+    // apply runs — the close's autosave keeps the design, applied or not
+    // yet — and low-memory mode destroys the editor once the page is done
+    // with the apply (its autosave settled).
+    await page.evaluate(() => (window as unknown as Win).__reskinSession.apply({ flourish: true }));
+    await expect.poll(async () => (await editorState(page)).destroyed).toBe(true);
+    const [kept] = await calls(page, 'autosave');
+    expect(JSON.parse(kept!.args.data as string).meta.source.path).toBe(SAMPLE_PATHS.steam);
+    expect(await liveDraft(page)).toBeNull();
   });
 
   test('serializes off the main thread', async ({ openEditor, page }) => {

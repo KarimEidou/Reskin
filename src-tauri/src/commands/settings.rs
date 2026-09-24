@@ -10,7 +10,7 @@ use reskin_core::model::{BoxMetrics, Settings};
 use reskin_core::settings::autostart::{self, ENTRY_NAME, StartupEntry};
 use reskin_core::settings::{SystemSettings, apply_system_change, reconcile_system_settings};
 use reskin_core::win::contextmenu;
-use tauri::{AppHandle, LogicalSize, Manager, Runtime, State};
+use tauri::{AppHandle, Emitter, LogicalSize, Manager, Runtime, State};
 
 use super::CmdResult;
 use crate::state::AppState;
@@ -57,9 +57,15 @@ pub async fn settings_set(app: AppHandle, settings: Settings) -> CmdResult<Setti
     .map_err(|e| e.to_string())?
 }
 
+/// Tells both pages that Windows state they show changed behind their
+/// back; they read it again (`app_boot`, `src/lib/boot.ts`).
+pub const SYSTEM_CHANGED: &str = "system:changed";
+
 /// Startup: makes the OS state and the saved settings agree (see
 /// `reconcile_system_settings`). Runs off the main thread: registering the
-/// hotkey waits for the event loop.
+/// hotkey waits for the event loop, so the pages may have booted already —
+/// a saved hotkey another app holds is announced (`SYSTEM_CHANGED`), so that
+/// the box says so.
 pub fn reconcile_at_startup<R: Runtime>(app: &AppHandle<R>) {
     let state = app.state::<AppState>();
     let _one_at_a_time = state.lock_settings_changes();
@@ -74,6 +80,9 @@ pub fn reconcile_at_startup<R: Runtime>(app: &AppHandle<R>) {
     let (settings, errors) = reconcile_system_settings(&mut Os { app }, saved.clone());
     for e in &errors {
         log::line(&format!("settings at startup: {e}"));
+    }
+    if hotkey::problem(&saved.hotkey).is_some() {
+        let _ = app.emit(SYSTEM_CHANGED, ());
     }
     if (settings.autostart, settings.context_menu) != (saved.autostart, saved.context_menu) {
         state.update_settings(app, |s| {

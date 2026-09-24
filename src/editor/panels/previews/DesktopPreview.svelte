@@ -2,12 +2,16 @@
   "On your desktop": a crop of the user's real wallpaper (laid out with its
   Windows fit mode) with the icon at the desktop icon size and its label in
   Windows style (white text with a shadow), between two neutral placeholder
-  icons. Pixel-exact: the canvas backing store is in device pixels.
+  icons. Pixel-exact: the canvas backing store is in device pixels. The
+  wallpaper is read once the editor is open and decoded off the main
+  thread, and the canvas (a composited layer) exists from then on
+  (docs/ARCHITECTURE.md, "Performance").
 -->
 <script lang="ts">
   import { onMount } from 'svelte';
   import { commands } from '$lib/ipc/commands';
   import type { WallpaperInfo } from '$lib/ipc/types';
+  import { getSession } from '../../state/context';
   import { snapToDevicePixels, watchDpr } from '../common/canvas';
   import { desktopLabel, vignetteOrigin, wallpaperLayout } from './desktop';
   import { drawIcon, type Rendered } from './draw';
@@ -20,43 +24,50 @@
 
   let { rendered, label }: Props = $props();
 
+  const session = getSession();
   const HEIGHT = 124; // CSS px
   let info = $state.raw<WallpaperInfo | null>(null);
-  let image = $state.raw<HTMLImageElement | null>(null);
+  let image = $state.raw<ImageBitmap | null>(null);
   let problem = $state<string | null>(null);
   let width = $state(260);
   let dpr = $state(typeof devicePixelRatio === 'number' ? devicePixelRatio : 1);
   let canvas: HTMLCanvasElement | undefined = $state();
   let host: HTMLDivElement | undefined = $state();
-  let url: string | null = null;
+  /** The wallpaper was read (or could not be): the preview is drawn from then on. */
+  let ready = $state(false);
+
+  /** Reads the wallpaper's settings and image (`alive`: the preview is still mounted). */
+  async function readWallpaper(alive: () => boolean): Promise<void> {
+    try {
+      info = await commands.wallpaperInfo();
+    } catch (e) {
+      problem = `Wallpaper settings unavailable (${e instanceof Error ? e.message : String(e)}).`;
+    }
+    if (!alive() || (info && !info.hasImage)) return;
+    try {
+      const bytes = await commands.wallpaper();
+      if (!alive()) return;
+      // Decoded once, off the main thread; drawing it never decodes again.
+      const bitmap = await createImageBitmap(new Blob([bytes]));
+      if (!alive()) {
+        bitmap.close();
+        return;
+      }
+      image = bitmap;
+    } catch {
+      // No readable wallpaper: the desktop colour stands in.
+      if (alive() && !problem) problem = 'Your wallpaper could not be read, so the desktop colour is shown.';
+    }
+  }
 
   onMount(() => {
     let alive = true;
     void (async () => {
-      try {
-        info = await commands.wallpaperInfo();
-      } catch (e) {
-        problem = `Wallpaper settings unavailable (${e instanceof Error ? e.message : String(e)}).`;
-      }
-      if (!alive || (info && !info.hasImage)) return;
-      try {
-        const bytes = await commands.wallpaper();
-        if (!alive) return;
-        const next = URL.createObjectURL(new Blob([bytes]));
-        const img = new Image();
-        img.src = next;
-        await img.decode();
-        if (!alive) {
-          URL.revokeObjectURL(next);
-          return;
-        }
-        if (url) URL.revokeObjectURL(url);
-        url = next;
-        image = img;
-      } catch {
-        // No readable wallpaper: the desktop colour stands in.
-        if (alive && !problem) problem = 'Your wallpaper could not be read, so the desktop colour is shown.';
-      }
+      // Nothing of this may land on the page while it morphs open.
+      await session.whenInteractive();
+      if (!alive) return;
+      await readWallpaper(() => alive);
+      if (alive) ready = true;
     })();
     const stop = watchDpr((d) => (dpr = d));
     const ro = new ResizeObserver(([e]) => {
@@ -67,8 +78,7 @@
       alive = false;
       stop();
       ro.disconnect();
-      if (url) URL.revokeObjectURL(url);
-      url = null;
+      image?.close();
     };
   });
 
@@ -92,7 +102,7 @@
     ctx.fillRect(0, 0, W, H);
     if (image) {
       const o = vignetteOrigin(monW, monH, W, H);
-      const lay = wallpaperLayout(info?.fit ?? 'fill', image.naturalWidth, image.naturalHeight, monW, monH);
+      const lay = wallpaperLayout(info?.fit ?? 'fill', image.width, image.height, monW, monH);
       ctx.save();
       ctx.translate(-o.x, -o.y);
       ctx.imageSmoothingQuality = 'high';
@@ -151,8 +161,10 @@
 </script>
 
 <div class="desktop" bind:this={host}>
-  <span class="img" role="img" aria-label="{label} on your desktop at {iconSize} px">
-    <canvas bind:this={canvas} aria-hidden="true" data-testid="desktop-preview" {@attach snapToDevicePixels()}></canvas>
+  <span class="img" role="img" aria-label="{label} on your desktop at {iconSize} px" style:height="{HEIGHT}px">
+    {#if ready}
+      <canvas bind:this={canvas} aria-hidden="true" data-testid="desktop-preview" {@attach snapToDevicePixels()}></canvas>
+    {/if}
   </span>
   {#if problem}<p class="note">{problem}</p>{/if}
 </div>

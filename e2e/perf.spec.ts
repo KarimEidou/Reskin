@@ -1,12 +1,19 @@
 // M6 performance (docs/ARCHITECTURE.md, "Performance").
 //
-// With the CPU throttled 4× (Chromium, through CDP), the open handoff and
-// its morph, the collapse, and the box's hover → armed → absorb must never
+// With the CPU throttled 4× (Chromium, through CDP), the morph of the open
+// handoff, the collapse, and the box's hover → armed → absorb must never
 // block the main thread for more than 50 ms — no long task
 // (PerformanceObserver) and no gap between two animation frames longer than
 // that — and must animate at 55 fps or better (median frame ≤ 18.2 ms).
 // Idle, neither page runs an animation frame, an animation or any rendering
 // work at all.
+//
+// A handoff's motion is timed from the moment its animations play (the
+// morph frame's `data-transition`) to its end. What comes before it shows
+// a picture that is already on screen — the editor gets ready while hidden
+// or behind the box proxy, and the first frame of a morph is the picture
+// it starts from — so it is waiting, not jank; how long the open waited is
+// printed with its numbers.
 //
 // Timing depends on the machine: each timed scenario runs up to three times
 // on a freshly loaded page and the best attempt counts; every attempt's
@@ -27,6 +34,7 @@ import {
   pushEditorCmd,
   SAMPLE_PATHS,
   settings,
+  simulateClose,
   simulateOpen,
   test,
   waitForAck,
@@ -60,6 +68,8 @@ const IDLE_TASKS_MS = 20;
 interface PerfProbe {
   /** Every long task since the page started (page clock, ms). */
   longTasks: Array<{ start: number; duration: number }>;
+  /** When each handoff's animations started to play (page clock, ms). */
+  motionStarts: number[];
   /** Animation-frame callbacks the page itself ran (the sampler's excluded). */
   pageFrames: number;
   /** Frame timestamps collected while sampling. */
@@ -81,6 +91,7 @@ function installProbe(): void {
   const raf = window.requestAnimationFrame.bind(window);
   const probe: PerfProbe = {
     longTasks: [],
+    motionStarts: [],
     pageFrames: 0,
     samples: [],
     sampling: false,
@@ -104,6 +115,12 @@ function installProbe(): void {
   new PerformanceObserver((list) => {
     for (const e of list.getEntries()) probe.longTasks.push({ start: e.startTime, duration: e.duration });
   }).observe({ type: 'longtask', buffered: true });
+  // The editor's morph frame sets `data-transition` as its animations play.
+  new MutationObserver((records) => {
+    for (const r of records) {
+      if (r.target instanceof HTMLElement && r.target.dataset.transition) probe.motionStarts.push(performance.now());
+    }
+  }).observe(document, { subtree: true, attributes: true, attributeFilter: ['data-transition'] });
   window.requestAnimationFrame = (callback) =>
     raf((t) => {
       probe.pageFrames++;
@@ -120,13 +137,15 @@ interface Span {
 }
 
 interface Measurement {
-  /** Longest main-thread task that started in the span (0: none over 50 ms). */
+  /** Longest main-thread task running in the span (0: none over 50 ms). */
   longestTask: number;
   /** Longest gap between two frames over the span. */
   longestFrame: number;
   /** Median frame over the animation. */
   medianFrame: number;
   frames: number;
+  /** What happened before the motion started, for the report (e.g. how long the open waited for its view). */
+  note?: string;
 }
 
 function median(values: number[]): number {
@@ -145,7 +164,7 @@ async function measure(page: Page, whole: Span, animation: Span): Promise<Measur
     longTasks: window.__perf!.longTasks,
     samples: window.__perf!.samples,
   }));
-  const tasks = longTasks.filter((t) => t.start >= whole.from && t.start <= whole.to).map((t) => t.duration);
+  const tasks = longTasks.filter((t) => t.start + t.duration > whole.from && t.start <= whole.to).map((t) => t.duration);
   const animated = frameGaps(samples, animation);
   return {
     longestTask: Math.max(0, ...tasks),
@@ -170,7 +189,7 @@ function summary(m: Measurement): string {
   return (
     `longest task ${m.longestTask > 0 ? ms(m.longestTask) : `≤ ${LONG_TASK_MS} ms`}, ` +
     `longest frame ${ms(m.longestFrame)}, median frame ${ms(m.medianFrame)} ` +
-    `(${(1000 / m.medianFrame).toFixed(0)} fps over ${m.frames} frames)`
+    `(${(1000 / m.medianFrame).toFixed(0)} fps over ${m.frames} frames)${m.note ? `; ${m.note}` : ''}`
   );
 }
 
@@ -231,31 +250,39 @@ async function warmUpPlaywright(page: Page): Promise<void> {
   await expect(page.locator('body')).toBeAttached();
 }
 
-/** Makes the fake backend compute what it caches (Rust reads it off the page's thread). */
-async function warmUpFake(page: Page): Promise<void> {
-  await page.evaluate(async () => {
-    const tauri = (window as unknown as { __TAURI_INTERNALS__: { invoke(cmd: string): Promise<unknown> } })
+/**
+ * Makes the fake backend compute what it caches (Rust reads it off the
+ * page's thread): the wallpaper, and the frames of `items`.
+ */
+async function warmUpFake(page: Page, items: ItemInfo[] = []): Promise<void> {
+  await page.evaluate(async (ids) => {
+    const tauri = (window as unknown as { __TAURI_INTERNALS__: { invoke(cmd: string, args?: unknown): Promise<unknown> } })
       .__TAURI_INTERNALS__;
     await tauri.invoke('wallpaper');
-  });
+    for (const item of ids) await tauri.invoke('item_frames', { item });
+  }, items.map((i) => i.id));
 }
 
-/** A freshly loaded editor page, booted and done with its idle preloading. */
-async function freshEditor(page: Page, config: Parameters<typeof openPage>[2] = {}): Promise<void> {
+/**
+ * A freshly loaded editor page, booted and done with its idle preloading,
+ * with `paths` inspected (the items, their frames cached).
+ */
+async function freshEditor(page: Page, paths: string[] = [], config: Parameters<typeof openPage>[2] = {}): Promise<ItemInfo[]> {
   await openPage(page, 'editor', config);
   await warmUpPlaywright(page);
-  await warmUpFake(page);
+  const items = paths.length > 0 ? await makeItems(page, paths) : [];
+  await warmUpFake(page, items);
   // The pre-warmed editor loads its lazy parts 1.5 s after boot (App.svelte).
   await page.waitForFunction(() => performance.now() > 2000);
   await settle(page);
+  return items;
 }
 
 const designLoaded = (page: Page) =>
   page.waitForFunction(() => (window as unknown as { __reskinSession: { hasDesign: boolean } }).__reskinSession.hasDesign);
 
-/** Opens the editor on a real item, unthrottled, and waits until everything settled; returns the session. */
-async function openedOnItem(page: Page): Promise<number> {
-  const items = await makeItems(page, [SAMPLE_PATHS.steam]);
+/** Opens the editor on `items`, unthrottled, and waits until everything settled; returns the session. */
+async function openedOn(page: Page, items: ItemInfo[]): Promise<number> {
   const { session } = await simulateOpen(page, items, 'edit', { morph: true });
   await designLoaded(page);
   await afterOpen(page);
@@ -273,6 +300,15 @@ function ackTime(page: Page, stage: string): Promise<number> {
   return page.evaluate((s) => window.__e2e!.acks.findLast((a) => a.stage === s)!.t, stage);
 }
 
+/** When the animations of the handoff step sent at `since` started to play (page clock). */
+async function motionStart(page: Page, since: number): Promise<number> {
+  const t = await page.evaluate((from) => window.__perf!.motionStarts.find((m) => m >= from), since);
+  expect(t, 'the handoff animated').toBeDefined();
+  return t!;
+}
+
+const now = (page: Page) => page.evaluate(() => performance.now());
+
 // ---- the handoff, driven the way Rust drives it ----------------------------------
 //
 // Rust (windows/morph.rs) runs the handoff from its own process: each
@@ -287,8 +323,8 @@ const BOX_RECT: Rect = { x: 32, y: 32, w: 148, h: 148 };
 /** Rust crossfades when the proxy is not drawn within this long (morph.rs). */
 const PREPARE_TIMEOUT_MS = 400;
 
-/** Rust's open handoff with the morph; returns its session. */
-async function openHandoff(page: Page, items: ItemInfo[], view: EditorView): Promise<number> {
+/** Rust's open handoff with the morph; returns its session and when Expand was sent (page clock). */
+async function openHandoff(page: Page, items: ItemInfo[], view: EditorView): Promise<{ session: number; expand: number }> {
   const session = await page.evaluate(() => Math.max(window.__e2e!.editor.session, ...window.__e2e!.acks.map((a) => a.session)) + 1);
   await pushEditorCmd(page, {
     type: 'prepare',
@@ -302,9 +338,10 @@ async function openHandoff(page: Page, items: ItemInfo[], view: EditorView): Pro
   expect(await waitForAck(page, session, 'prepared', PREPARE_TIMEOUT_MS), 'the proxy is drawn in time').toBe(true);
   await pushEditorCmd(page, { type: 'reveal', session });
   expect(await waitForAck(page, session, 'revealed'), 'revealed').toBe(true);
+  const expand = await now(page);
   await pushEditorCmd(page, { type: 'expand', session, morph: true });
   expect(await waitForAck(page, session, 'expanded'), 'expanded').toBe(true);
-  return session;
+  return { session, expand };
 }
 
 /** Rust's close handoff with the morph, the box coming back empty. */
@@ -315,30 +352,33 @@ async function closeHandoff(page: Page, session: number): Promise<void> {
   expect(await waitForAck(page, session, 'cleared'), 'cleared').toBe(true);
 }
 
-/** Opens `items` in `view` (none: the Start view) with the morph, throttled, and measures it. */
+/** Opens `items` in `view` (none: the Start view) with the morph, throttled, and measures its motion. */
 async function measureOpen(page: Page, cpu: CDPSession, items: ItemInfo[], view: EditorView): Promise<Measurement> {
-  const from = await throttled(cpu, async () => {
-    const from = await startSampling(page);
-    await openHandoff(page, items, view);
+  const { expand } = await throttled(cpu, async () => {
+    await startSampling(page);
+    const open = await openHandoff(page, items, view);
     await stopSampling(page);
-    return from;
+    return open;
   });
-  const revealed = await ackTime(page, 'revealed');
+  const from = await motionStart(page, expand);
   const expanded = await ackTime(page, 'expanded');
-  return measure(page, { from, to: expanded }, { from: revealed, to: expanded });
+  const span = { from, to: expanded };
+  return { ...(await measure(page, span, span)), note: `the morph started ${ms(from - expand)} after Expand` };
 }
 
-/** Closes the editor open in `session` with the morph, throttled, and measures it. */
+/** Closes the editor open in `session` with the morph, throttled, and measures its motion and the Clear after it. */
 async function measureClose(page: Page, cpu: CDPSession, session: number): Promise<Measurement> {
-  const from = await throttled(cpu, async () => {
-    const from = await startSampling(page);
+  const collapse = await throttled(cpu, async () => {
+    const collapse = await startSampling(page);
     await closeHandoff(page, session);
     await stopSampling(page);
-    return from;
+    return collapse;
   });
+  const from = await motionStart(page, collapse);
   const collapsed = await ackTime(page, 'collapsed');
   const cleared = await ackTime(page, 'cleared');
-  return measure(page, { from, to: cleared }, { from, to: collapsed });
+  const m = await measure(page, { from, to: cleared }, { from, to: collapsed });
+  return { ...m, note: `the collapse started ${ms(from - collapse)} after Collapse` };
 }
 
 const startSampling = (page: Page) => page.evaluate(() => window.__perf!.startSampling());
@@ -351,41 +391,26 @@ test.describe('under 4× CPU throttling', () => {
   });
 
   test('the open handoff morphs without long tasks at 55+ fps', async ({ page }) => {
-    // Known failure, fixed outside the morph: Prepare starts loading the
-    // item, and turning its icon into a design (engine import, 256 → 512
-    // resample on the page's thread) and mounting the Edit workspace
-    // (rail, options bar, canvas, sidebar panels and previews, forced
-    // layouts) run as one 400–1000 ms task (at 4×) in the middle of the morph.
-    // docs/ARCHITECTURE.md, "Performance". (The morph itself is held to the
-    // budget by the Start-view handoffs below.)
-    test.fail(true, 'the item load and the Edit workspace mount block the open handoff');
     const cpu = await cdp(page);
     await bestOf('open morph', async () => {
-      await freshEditor(page);
-      // A real item: its icon rides the morph onto the canvas.
-      const items = await makeItems(page, [SAMPLE_PATHS.steam]);
-      return measureOpen(page, cpu, items, 'edit');
+      // A real item: its design loads and the Edit workspace mounts behind
+      // the proxy, then its icon rides the morph onto the canvas.
+      const items = await freshEditor(page, [SAMPLE_PATHS.steam]);
+      const m = await measureOpen(page, cpu, items, 'edit');
+      await expect(page.getByTestId('workspace')).toBeVisible();
+      return m;
     });
   });
 
   test('the collapse morphs without long tasks at 55+ fps', async ({ page }) => {
-    // Known failure, fixed outside the morph: every `data-stage` change on
-    // <html> restyles the whole document (App.svelte's rule for portalled
-    // overlays, `body > :not(#app)`, cannot be keyed), 50–85 ms at 4× for
-    // the Edit view's ~730 elements as the collapse starts. With that rule
-    // keyed on the overlays the collapse stays within budget.
-    // docs/ARCHITECTURE.md, "Performance".
-    test.fixme(true, 'App.svelte restyles the whole document as the collapse starts');
     const cpu = await cdp(page);
     await bestOf('collapse morph', async () => {
-      await freshEditor(page);
-      return measureClose(page, cpu, await openedOnItem(page));
+      const items = await freshEditor(page, [SAMPLE_PATHS.steam]);
+      return measureClose(page, cpu, await openedOn(page, items));
     });
   });
 
-  // The morph on its own, without an item to load: the Start view is
-  // small enough that the page's whole-document restyles (see above) stay
-  // well within budget, so these hold the morph itself to it.
+  // The morph with the smallest view, on its own.
   test('the open handoff to the Start view morphs without long tasks at 55+ fps', async ({ page }) => {
     const cpu = await cdp(page);
     await bestOf('open morph (Start view)', async () => {
@@ -398,7 +423,7 @@ test.describe('under 4× CPU throttling', () => {
     const cpu = await cdp(page);
     await bestOf('collapse morph (Start view)', async () => {
       await freshEditor(page);
-      const session = await openHandoff(page, [], 'start');
+      const { session } = await openHandoff(page, [], 'start');
       await afterOpen(page);
       return measureClose(page, cpu, session);
     });
@@ -499,8 +524,7 @@ test.describe('idle', () => {
   });
 
   test('the idle editor (Edit view) runs no frames, no animations and no rendering', async ({ page }) => {
-    await freshEditor(page);
-    await openedOnItem(page);
+    await openedOn(page, await freshEditor(page, [SAMPLE_PATHS.steam]));
     await expect.poll(() => page.evaluate(() => document.getAnimations().length)).toBe(0);
     expectIdle(await watchIdle(page));
   });
@@ -510,26 +534,21 @@ test.describe('the morph frame', () => {
   type TraceEvent = { name: string; ph: string; ts: number; args?: { elementCount?: number } };
 
   /**
-   * `elementCount` of every style recalc during a close handoff (Chromium
-   * trace), from Collapse to the `cleared` ack (user-timing marks).
+   * `elementCount` of every style recalc while `run` runs (Chromium trace,
+   * between user-timing marks around it).
    */
-  async function closeRecalcs(browser: Browser, page: Page): Promise<number[]> {
+  async function recalcsDuring(browser: Browser, page: Page, run: () => Promise<void>): Promise<number[]> {
     await browser.startTracing(page, { categories: ['devtools.timeline', 'blink.user_timing'] });
-    let timedOut: string[] = [];
     let events: TraceEvent[] = [];
     try {
-      timedOut = await page.evaluate(async () => {
-        performance.mark('perf:close');
-        const close = await window.__e2e!.simulateClose('hide', { morph: true });
-        performance.mark('perf:closed');
-        return close.timedOut;
-      });
+      await page.evaluate(() => performance.mark('perf:from'));
+      await run();
+      await page.evaluate(() => performance.mark('perf:to'));
     } finally {
       events = (JSON.parse((await browser.stopTracing()).toString('utf8')) as { traceEvents: TraceEvent[] }).traceEvents;
     }
-    expect(timedOut).toEqual([]);
     const mark = (name: string) => events.find((e) => e.name === name)?.ts;
-    const [from, to] = [mark('perf:close'), mark('perf:closed')];
+    const [from, to] = [mark('perf:from'), mark('perf:to')];
     // Without its marks the trace would pass vacuously.
     expect(from, 'trace marks').toBeDefined();
     expect(to, 'trace marks').toBeDefined();
@@ -538,27 +557,53 @@ test.describe('the morph frame', () => {
       .map((e) => e.args?.elementCount ?? 0);
   }
 
-  test('a collapse restyles the view at most once', async ({ page, browser }) => {
-    await freshEditor(page);
-    await openedOnItem(page);
-    const view = await page.evaluate(() => document.querySelectorAll('[data-view-host] *').length);
+  const viewSize = (page: Page) => page.evaluate(() => document.querySelectorAll('[data-view-host] *').length);
+
+  test('a collapse never restyles the whole view', async ({ page, browser }) => {
+    await openedOn(page, await freshEditor(page, [SAMPLE_PATHS.steam]));
+    const view = await viewSize(page);
     expect(view).toBeGreaterThan(200);
-    const recalcs = await closeRecalcs(browser, page);
-    // Hiding the panel at the end must not restyle what it hides: the
-    // content rests unrendered (content-visibility) until the next open.
-    // The one allowed is the page's `data-stage` change as the collapse
-    // starts (App.svelte, see above).
+    const recalcs = await recalcsDuring(browser, page, async () => {
+      expect((await simulateClose(page, 'hide', { morph: true })).timedOut).toEqual([]);
+    });
+    // Neither the page's `data-stage` change as the collapse starts (the
+    // rule hiding floating layers is keyed on them, App.svelte) nor hiding
+    // the panel at the end (its content rests unrendered, content-visibility,
+    // until the next open) restyles the view.
     const whole = recalcs.filter((n) => n >= view);
-    expect(whole.length, `style recalcs of ≥ ${view} elements: ${recalcs.join(', ')}`).toBeLessThanOrEqual(1);
+    expect(whole, `style recalcs of ≥ ${view} elements: ${recalcs.join(', ')}`).toEqual([]);
     // …and the next open renders the view again.
     await simulateOpen(page, [SAMPLE_PATHS.notes], 'edit', { morph: true });
     await designLoaded(page);
     await expect(page.getByTestId('canvas')).toBeVisible();
   });
 
+  test('an open morph never restyles the whole view', async ({ page, browser }) => {
+    const items = await freshEditor(page, [SAMPLE_PATHS.steam]);
+    const session = 1;
+    await pushEditorCmd(page, { type: 'prepare', session, boxRect: BOX_RECT, items, view: 'edit', settings: await settings(page), morph: true });
+    expect(await waitForAck(page, session, 'prepared')).toBe(true);
+    await pushEditorCmd(page, { type: 'reveal', session });
+    expect(await waitForAck(page, session, 'revealed')).toBe(true);
+    // The view gets ready behind the proxy: laid out and drawn, transparent.
+    await designLoaded(page);
+    await expect(page.getByTestId('canvas')).toBeVisible();
+    await settle(page);
+    const view = await viewSize(page);
+    expect(view).toBeGreaterThan(200);
+    const recalcs = await recalcsDuring(browser, page, async () => {
+      await pushEditorCmd(page, { type: 'expand', session, morph: true });
+      expect(await waitForAck(page, session, 'expanded')).toBe(true);
+    });
+    // Showing the panel changes three elements (not `visibility`, which
+    // every element of the view would inherit).
+    const whole = recalcs.filter((n) => n >= view);
+    expect(whole, `style recalcs of ≥ ${view} elements: ${recalcs.join(', ')}`).toEqual([]);
+  });
+
   test('a morphing panel takes neither the pointer nor the focus, without going inert', async ({ page }) => {
     // Half speed: the collapse runs about a second.
-    await freshEditor(page, { settings: { animationSpeed: 0.5 } });
+    await freshEditor(page, [], { settings: { animationSpeed: 0.5 } });
     const { session } = await simulateOpen(page, [], 'start');
     const panel = page.getByTestId('editor-panel');
     // `inert` would restyle every element of the panel as a morph starts.

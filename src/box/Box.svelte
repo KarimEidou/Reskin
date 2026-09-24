@@ -2,12 +2,13 @@
   The floating box page. Renders BoxVisual from the box state machine
   (./box-state.ts) and wires it to the pointer, OS drag-and-drop and the
   Rust events. A saved hotkey Windows won't register is said once at
-  start-up (the hint bubble) and in the box's tooltip and description for
-  as long as it doesn't work. The root exposes `data-state` (logical state)
+  start-up (the hint bubble; also when Rust's start-up check finds it taken
+  after the page booted) and in the box's tooltip and description for as
+  long as it doesn't work. The root exposes `data-state` (logical state)
   and `data-ready` (booted and listening) for tests.
 -->
 <script lang="ts">
-  import { onMount, tick } from 'svelte';
+  import { onMount, tick, untrack } from 'svelte';
   import { getCurrentWebview } from '@tauri-apps/api/webview';
   import { boot } from '$lib/boot';
   import { commands } from '$lib/ipc/commands';
@@ -65,6 +66,8 @@
   let hotkeyNote = $state<string | null>(null);
   /** The hotkey note has been on screen: its lifetime runs. */
   let hotkeyNoteShown = $state(false);
+  /** The hotkey note was given (it is said once). */
+  let hotkeyNoteSaid = false;
   let undoId = $state<string | null>(null);
   let flyLayer: HTMLDivElement | undefined = $state();
   let hitEl: HTMLDivElement | undefined = $state();
@@ -302,6 +305,19 @@
     if (hotkeyNote !== null) hotkeyNoteShown = true;
   }
 
+  // The note comes as soon as the box learns that the saved hotkey doesn't
+  // work: at boot, or later from Rust's start-up check (`system:changed`,
+  // src/lib/boot.ts), which can finish after the page booted.
+  $effect(() => {
+    const error = system.hotkeyError;
+    if (!error || hotkeyNoteSaid) return;
+    hotkeyNoteSaid = true;
+    untrack(() => {
+      hotkeyNote = hotkeyHint(error);
+      if (document.visibilityState === 'visible') hotkeyNoteOnScreen();
+    });
+  });
+
   // Its few seconds run while it is on screen in the hint bubble: not
   // behind the first-run hint, a handoff or a drag (it waits for them).
   $effect(() => {
@@ -331,8 +347,6 @@
       const b = await boot();
       info = b;
       showHint = b.firstRun;
-      if (system.hotkeyError) hotkeyNote = hotkeyHint(system.hotkeyError);
-      if (document.visibilityState === 'visible') hotkeyNoteOnScreen();
       const subscriptions = await Promise.all([
         on('box:flight', (f) => {
           send({ type: 'flight', phase: f.phase, icon: f.icon, message: f.message });

@@ -6,7 +6,7 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type { Page } from '@playwright/test';
 import { PNG } from 'pngjs';
-import type { BoxSkin } from '../src/lib/ipc/types';
+import type { BoxSkin, ItemInfo } from '../src/lib/ipc/types';
 import { ERROR_HOLD_MS, errorLifetime, FIRST_RUN_HINT, iconRect, metricsFor, visualRect } from '../src/lib/ui/box-geometry';
 import {
   calls,
@@ -569,6 +569,34 @@ test.describe('events from Rust', () => {
     await expect(box.hit).not.toHaveAttribute('title');
   });
 
+  test("Rust's start-up check finding the hotkey taken after the box booted: the note comes then", async ({ openBox, page }) => {
+    const box = await openBox();
+    const hint = box.visual.locator('.hint');
+    await expect(hint).toHaveCount(0);
+    // The check runs on a thread of its own and can finish after the pages
+    // read Windows' state; Rust then announces it.
+    await page.evaluate(() => window.__e2e!.setHotkeyError('Ctrl+Alt+Shift+R is already in use by another app'));
+    await emit(page, 'system:changed');
+    await expect(hint).toHaveText('Ctrl+Alt+Shift+R is taken — change it in Settings');
+    await expect(box.hit).toHaveAccessibleDescription(
+      "The global shortcut doesn't work: Ctrl+Alt+Shift+R is already in use by another app. Change it in Settings.",
+    );
+  });
+
+  test('a long hotkey note stays inside the small box', async ({ openBox }) => {
+    const box = await openBox({
+      settings: { boxSize: 'small' },
+      hotkeyError: 'Windows refused to register Ctrl+Alt+Shift+Win+PrintScreen for a reason it did not give (error 0x80070578)',
+    });
+    const hint = box.visual.locator('.hint');
+    await expect(hint).toContainText('change it in Settings');
+    await box.expectStatic();
+    const [note, visual] = await Promise.all([hint.boundingBox(), box.visual.locator('.box').boundingBox()]);
+    expect(note!.x).toBeGreaterThanOrEqual(visual!.x);
+    expect(note!.x + note!.width).toBeLessThanOrEqual(visual!.x + visual!.width);
+    expect(note!.y + note!.height).toBeLessThanOrEqual(visual!.y + visual!.height);
+  });
+
   test('a hotkey that works leaves the box quiet', async ({ openBox }) => {
     const box = await openBox();
     await expect(box.visual.locator('.hint')).toHaveCount(0);
@@ -801,7 +829,7 @@ test.describe('fake backend', () => {
     const handoffs = await page.evaluate(() => window.__e2e!.emitted.filter((e) => e.event === 'box:handoff').map((e) => e.payload));
     expect(handoffs).toEqual([{ session: 1, icon: steam!.icon, count: 1 }]);
     await waitForCall(page, 'box_painted', { session: 1 });
-    expect(await editorState(page)).toEqual({ session: 1, phase: 'open', visible: true, morph: true });
+    expect(await editorState(page)).toEqual({ session: 1, phase: 'open', visible: true, morph: true, destroyed: false });
     const close = await simulateClose(page, 'fly', { icon: 'data:image/png;base64,AAAA' });
     expect(close).toEqual({ session: 1, timedOut: [] });
     expect(await seenByEditor(page)).toEqual(['prepare', 'reveal', 'expand', 'collapse', 'clear']);
@@ -912,6 +940,56 @@ test.describe('fake backend', () => {
       jpeg: [0xff, 0xd8],
       unknown: 'unknown item nope',
     });
+  });
+
+  test('item_frames are made once per item and icon, and handed out as copies', async ({ openBox, page }) => {
+    await openBox();
+    const out = await page.evaluate(async (paths) => {
+      const api = window.__e2e!;
+      const invoke = (window as unknown as { __TAURI_INTERNALS__: { invoke: (c: string, a?: unknown) => Promise<unknown> } })
+        .__TAURI_INTERNALS__.invoke;
+      type Frame = { width: number; png: string };
+      const [item] = (await invoke('inspect_paths', { paths })) as Array<{ id: string; icon: string }>;
+      // Every rescaled frame is drawn on a canvas of its own.
+      let drawn = 0;
+      const Native = OffscreenCanvas;
+      globalThis.OffscreenCanvas = class extends Native {
+        constructor(width: number, height: number) {
+          super(width, height);
+          drawn++;
+        }
+      };
+      try {
+        const frames = async (): Promise<{ list: Frame[]; drawn: number }> => {
+          const before = drawn;
+          const list = (await invoke('item_frames', { item: item!.id })) as Frame[];
+          return { list, drawn: drawn - before };
+        };
+        const first = await frames();
+        const firstPng = first.list.at(-1)!.png;
+        first.list.at(-1)!.png = 'changed by the page';
+        const second = await frames();
+        // The item's icon changes (Rust would read the new one): its 16 px frame.
+        const icon = `data:image/png;base64,${first.list[0]!.png}`;
+        api.setInspectOverride(() => [{ ...(item as unknown as ItemInfo), icon }]);
+        await invoke('inspect_paths', { paths });
+        api.setInspectOverride(null);
+        const third = await frames();
+        return {
+          drawn: [first.drawn, second.drawn, third.drawn],
+          sizes: second.list.map((f) => f.width),
+          secondIsTheFirst: second.list.at(-1)!.png === firstPng,
+          thirdIsTheFirst: third.list.at(-1)!.png === firstPng,
+        };
+      } finally {
+        globalThis.OffscreenCanvas = Native;
+      }
+    }, [SAMPLE_PATHS.steam]);
+    expect(out.drawn[0]).toBeGreaterThanOrEqual(6);
+    expect(out.drawn.slice(1)).toEqual([0, out.drawn[0]]);
+    expect(out.sizes).toEqual([16, 24, 32, 48, 64, 256]);
+    expect(out.secondIsTheFirst).toBe(true);
+    expect(out.thirdIsTheFirst).toBe(false);
   });
 
   test('item kinds, locations and the elevation outcome', async ({ openBox, page }) => {

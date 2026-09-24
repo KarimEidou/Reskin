@@ -22,7 +22,9 @@
  *   containing "::unreadable" are left out. `setInspectOverride(fn)`
  *   replaces the mapping (e.g. `() => []` for the error path).
  * - inspect_system_icon / item_frames / pick_files / read_project: sample
- *   system items, rescaled frames (16…256), `setPickFiles`, `setProject`.
+ *   system items, rescaled frames (16…256; made once per item and icon —
+ *   Rust reads them off the page's thread, the fake would re-encode them on
+ *   it at every call), `setPickFiles`, `setProject`.
  *   Apply modes and notes follow Rust's (a shortcut whose path mentions
  *   "AppsFolder" or "Store App" is a Store app's: in place, or a classic
  *   new shortcut).
@@ -55,7 +57,13 @@
  *   heartbeat after `heartbeatMs` (25 s).
  * - editor_ack: recorded in `acks`; drives the handoff simulator.
  * - editor_close(reason): runs `simulateClose('hide')` when the editor is
- *   open (reason 'applied' is a no-op, the apply flow drives the close).
+ *   open; 'applied' (the page settled an apply that closed the editor)
+ *   lets a low-memory destroy happen (see below).
+ * - low-memory mode (`settings.lowMemory`): Rust destroys the editor after
+ *   a close — a plain close at once, an apply's close once its page said
+ *   `editor_close('applied')`. The e2e page cannot go away, so from then on
+ *   it counts as gone: nothing it asks reaches the fake or is answered, and
+ *   simulateOpen refuses (reload the page to go on).
  * - everything else (box_menu, refresh_icons, open_external, set_box_visible,
  *   quit_app, smoke_ready): recorded, resolves null.
  * Errors reject with a plain string, like Tauri commands.
@@ -292,7 +300,11 @@ export function install(kind: 'box' | 'editor'): E2EApi {
   const emitted: E2EEmitted[] = [];
   const acks: E2EAck[] = [];
   const failures = new Map<string, string>();
+  /** Low-memory mode destroys the editor once its page settled an apply. */
+  let destroyWhenSettled = false;
   const itemsById = new Map<string, ItemInfo>();
+  /** `item_frames` per item id, with the icon they were made from. */
+  const framesById = new Map<string, { icon: string; frames: Promise<IconFrame[]> }>();
   const idByPath = new Map<string, string>();
   const projects = new Map<string, string>();
   const history: HistoryEntry[] = [];
@@ -365,7 +377,7 @@ export function install(kind: 'box' | 'editor'): E2EApi {
   }
 
   // ---- handoff FSM (mirrors src-tauri windows/morph.rs) ---------------------
-  const fsm: E2EEditorState = { session: 0, phase: 'closed', visible: false, morph: false };
+  const fsm: E2EEditorState = { session: 0, phase: 'closed', visible: false, morph: false, destroyed: false };
   /** Pictures handed to the box (`box:handoff`, `box:collapse`), numbered apart from the editor's sessions. */
   let boxSession = 0;
 
@@ -388,6 +400,8 @@ export function install(kind: 'box' | 'editor'): E2EApi {
     opts: SimulateOpenOptions = {},
   ): Promise<SimulateOpenResult> {
     if (fsm.phase !== 'closed') throw new Error(`simulateOpen: editor is ${fsm.phase}`);
+    if (fsm.destroyed) throw new Error('simulateOpen: low-memory mode destroyed the editor page');
+    destroyWhenSettled = false;
     const items =
       itemsOrPaths.length > 0 && typeof itemsOrPaths[0] === 'string'
         ? await makeItems(itemsOrPaths as string[])
@@ -472,6 +486,10 @@ export function install(kind: 'box' | 'editor'): E2EApi {
 
     fsm.phase = 'closed';
     fsm.visible = false;
+    if (kind === 'editor' && settings.lowMemory) {
+      if (then === 'hide') fsm.destroyed = true;
+      else destroyWhenSettled = true;
+    }
     return { session, timedOut };
   }
 
@@ -509,6 +527,21 @@ export function install(kind: 'box' | 'editor'): E2EApi {
   function itemOrFail(id: unknown): ItemInfo {
     const item = typeof id === 'string' ? itemsById.get(id) : undefined;
     return item ?? fail(`unknown item ${String(id)}`);
+  }
+
+  /** The frames of an item's icon, made once (again when the item's icon changed). */
+  function framesOf(item: ItemInfo & { icon: string }): Promise<IconFrame[]> {
+    const cached = framesById.get(item.id);
+    if (cached?.icon === item.icon) return cached.frames;
+    const frames = Promise.all(
+      FRAME_SIZES.map(async (size) => ({ width: size, height: size, png: await scaledPngBase64(item.icon, size) })),
+    );
+    framesById.set(item.id, { icon: item.icon, frames });
+    // A failure is not kept: the next call tries again.
+    frames.catch(() => {
+      if (framesById.get(item.id)?.frames === frames) framesById.delete(item.id);
+    });
+    return frames;
   }
 
   // ---- apply / history ------------------------------------------------------
@@ -626,7 +659,10 @@ export function install(kind: 'box' | 'editor'): E2EApi {
     },
     editor_close: (args) => {
       const reason = args.reason as CloseReason;
-      if (reason !== 'applied' && fsm.phase === 'open') {
+      if (reason === 'applied') {
+        if (destroyWhenSettled && fsm.phase === 'closed') fsm.destroyed = true;
+        destroyWhenSettled = false;
+      } else if (fsm.phase === 'open') {
         void simulateClose('hide').catch((e: unknown) => console.error('[e2e] close failed', e));
       }
       return null;
@@ -654,9 +690,7 @@ export function install(kind: 'box' | 'editor'): E2EApi {
     item_frames: async (args): Promise<IconFrame[]> => {
       const item = itemOrFail(args.item);
       if (!item.icon) return [];
-      return Promise.all(
-        FRAME_SIZES.map(async (size) => ({ width: size, height: size, png: await scaledPngBase64(item.icon!, size) })),
-      );
+      return (await framesOf({ ...item, icon: item.icon })).map((f) => ({ ...f }));
     },
     pick_files: async (args): Promise<ItemInfo[]> => {
       const purpose = args.purpose as PickPurpose;
@@ -803,6 +837,8 @@ export function install(kind: 'box' | 'editor'): E2EApi {
   }
 
   async function handle(cmd: string, rawArgs?: Args): Promise<unknown> {
+    // A destroyed page's requests never arrive.
+    if (fsm.destroyed) return new Promise<never>(() => {});
     const args = rawArgs ?? {};
     // Window/webview plugin traffic (the event plugin is mocked by mockIPC).
     if (cmd.startsWith('plugin:')) return null;

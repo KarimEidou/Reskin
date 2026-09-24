@@ -12,13 +12,17 @@
     clear()                 paint nothing
   Between animations the frame rests in one of the modes: hidden, proxy,
   open. `data-mode` / `data-transition` on `[data-testid="morph-frame"]`
-  expose them to tests.
+  expose them to tests (`data-transition` is set while the animations play).
 
   Staying cheap (docs/ARCHITECTURE.md, "Performance"): the panel never goes
   `inert` (that restyles every element in it as a morph starts); while it
-  animates a shield takes the pointer and focus is kept out. After a
-  collapse its content rests unrendered (`content-visibility: hidden`) until
-  the next open, so hiding the panel does not restyle the view either.
+  animates a shield takes the pointer and focus is kept out. Behind the
+  proxy it is laid out and drawn, only transparent. A morph or fade first
+  shows its first frame — the picture on screen already — and only then
+  plays, so the frame that sets it up (new layers, their styles and paint)
+  is never a step of the motion. After a collapse its content rests
+  unrendered (`content-visibility: hidden`) until the next open, so hiding
+  the panel does not restyle the view either.
 -->
 <script module lang="ts">
   export type FrameMode = 'hidden' | 'proxy' | 'animating' | 'open';
@@ -27,6 +31,7 @@
 <script lang="ts">
   import { tick, type Snippet } from 'svelte';
   import type { Rect } from '$lib/ipc/types';
+  import { doubleRaf } from '$lib/motion/raf';
   import BoxVisual from '$lib/ui/BoxVisual.svelte';
   import { iconRect, visualRect, visualRadius, type BoxVisualProps } from '$lib/ui/box-geometry';
   import {
@@ -55,6 +60,8 @@
   /** Panel radius (UI.md) and its margin for the shadow. */
   const PANEL_RADIUS = 16;
   const PANEL_INSET = 12;
+  /** How long the first frame may take before the animations play anyway. */
+  const FIRST_FRAME_WAIT_MS = 100;
 
   let mode = $state<FrameMode>('hidden');
   let transition = $state<'morph' | 'crossfade' | null>(null);
@@ -142,6 +149,20 @@
     running = [];
   }
 
+  /**
+   * Plays the morph or fade just created (`running`, of run `my`) once its
+   * first frame — the picture on screen already — has been drawn; false
+   * when a newer call took over meanwhile.
+   */
+  async function play(my: number, kind: 'morph' | 'crossfade'): Promise<boolean> {
+    for (const animation of running) animation.pause();
+    await doubleRaf({ timeoutMs: FIRST_FRAME_WAIT_MS });
+    if (my !== run) return false;
+    transition = kind;
+    for (const animation of running) animation.play();
+    return true;
+  }
+
   /** Draws the box proxy (panel hidden) and waits until its icon is decoded. */
   export async function showProxy(rect: Rect, props: BoxVisualProps): Promise<void> {
     run++;
@@ -159,6 +180,7 @@
   export async function expand(morph: boolean, landing: Rect | null = null): Promise<void> {
     const my = ++run;
     stopAll();
+    transition = null;
     resting = false;
     // Every layout read comes first, while the page is laid out already:
     // once the mode changes, a read would force the restyle that change
@@ -167,7 +189,6 @@
     const useMorph = morph && g !== null;
     const geo = g ?? fallbackGeometry();
     const regions = useMorph && contentEl ? staggerTargets(contentEl, viewEl()) : [];
-    transition = useMorph ? 'morph' : 'crossfade';
     // Icon that settles onto the canvas (only when the box carried one).
     if (useMorph && proxy?.props.icon && contentEl) {
       flyer = { src: proxy.props.icon, rect: iconTarget(landing, viewEl() ?? contentEl, 48) };
@@ -188,6 +209,7 @@
       geo,
       useMorph,
     );
+    if (!(await play(my, useMorph ? 'morph' : 'crossfade'))) return;
     await settled(running);
     if (my !== run) return;
     proxy = null;
@@ -211,6 +233,7 @@
   export async function collapse(rect: Rect, props: BoxVisualProps | null, morph: boolean): Promise<void> {
     const my = ++run;
     stopAll();
+    transition = null;
     flyer = null;
     proxy = props ? { rect, props } : null;
     const wasOpen = mode === 'open' || mode === 'animating';
@@ -218,7 +241,6 @@
     const g = geometry();
     const useMorph = morph && wasOpen && g !== null;
     const geo = g ?? fallbackGeometry();
-    transition = useMorph ? 'morph' : 'crossfade';
     setMode('animating');
     await tick();
     if (my !== run || !shellEl || !shadowEl || !contentEl) return;
@@ -228,6 +250,7 @@
         geo,
         useMorph,
       );
+      if (!(await play(my, useMorph ? 'morph' : 'crossfade'))) return;
       await settled(running);
       if (my !== run) return;
     }
@@ -327,9 +350,13 @@
     border-radius: var(--panel-radius);
     pointer-events: auto;
   }
-  .frame[data-mode='hidden'] .panel,
-  .frame[data-mode='proxy'] .panel {
-    visibility: hidden;
+  /* Behind the proxy the panel is laid out and drawn, only transparent:
+     its view gets ready there before the morph (App's viewReady), and
+     showing it restyles three elements — `visibility`, which every element
+     inherits, would restyle the whole view as the morph starts. The shield
+     keeps the pointer off it. */
+  .frame[data-mode='proxy'] :is(.shadow, .shell, .content) {
+    opacity: 0;
   }
 
   /* The panel's material: layered translucency (no backdrop blur — the
@@ -378,12 +405,13 @@
     content-visibility: hidden;
   }
 
-  /* Takes the pointer while the panel animates. */
+  /* Takes the pointer while the panel is behind the proxy or animates. */
   .shield {
     position: absolute;
     inset: 0;
     display: none;
   }
+  .frame[data-mode='proxy'] .shield,
   .frame[data-mode='animating'] .shield {
     display: block;
   }
@@ -396,6 +424,7 @@
     overflow: hidden;
     border-radius: var(--panel-radius);
     outline: none;
+    will-change: opacity;
   }
 
   .proxy {

@@ -8,13 +8,27 @@
 <script lang="ts">
   import { onMount } from 'svelte';
   import Sidebar from '../panels/Sidebar.svelte';
+  import { getSession } from '../state/context';
   import BottomBar from './BottomBar.svelte';
   import CanvasStage from './CanvasStage.svelte';
   import ToolOptions from './ToolOptions.svelte';
   import ToolRail from './ToolRail.svelte';
   import { preloadWhenIdle } from './lazy.svelte';
 
-  onMount(preloadWhenIdle);
+  const session = getSession();
+
+  // The lazy pieces load once the editor is open (not while it morphs open).
+  onMount(() => {
+    let cancel: (() => void) | null = null;
+    let mounted = true;
+    void session.whenInteractive().then(() => {
+      if (mounted) cancel = preloadWhenIdle();
+    });
+    return () => {
+      mounted = false;
+      cancel?.();
+    };
+  });
 </script>
 
 <div class="workspace" data-testid="workspace">

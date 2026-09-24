@@ -11,7 +11,7 @@ function reason(error: string): string {
   return error.trim().replace(/\.$/, '');
 }
 
-/** The hint bubble the box shows once, at start-up. */
+/** The hint bubble the box shows once, when it learns the hotkey doesn't work. */
 export function hotkeyHint(error: string): string {
   const why = TAKEN.test(error.trim()) ? error.trim().replace(TAKEN, ' is taken') : reason(error);
   return `${why} — change it in Settings`;

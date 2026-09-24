@@ -1,6 +1,7 @@
 <!--
   A Windows 11 taskbar strip (light or dark) with the icon at 24 px as a
-  running app among neutral placeholder icons.
+  running app among neutral placeholder icons. The icon's canvas exists
+  once there is a render to draw (see PreviewsPanel).
 -->
 <script lang="ts">
   import { onMount } from 'svelte';
@@ -43,7 +44,9 @@
   <span class="slot" aria-hidden="true"><span class="ph round"></span></span>
   <span class="slot" aria-hidden="true"><span class="ph a"></span></span>
   <span class="slot running" aria-hidden="true">
-    <canvas bind:this={canvas} {@attach snapToDevicePixels()}></canvas>
+    {#if rendered.size > 0}
+      <canvas bind:this={canvas} {@attach snapToDevicePixels()}></canvas>
+    {/if}
     <span class="pip"></span>
   </span>
   <span class="slot" aria-hidden="true"><span class="ph b"></span></span>

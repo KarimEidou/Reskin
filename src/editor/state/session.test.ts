@@ -782,6 +782,81 @@ describe('EditorSession style recipes', () => {
     s.dispose();
   });
 
+  it('follows the history: an undone step leaves the recipe, redo brings it back, a change after an undo drops it', async () => {
+    const { s } = await queued();
+    const look = recipe('Look');
+    paint(s);
+    s.recipe = look;
+    paint(s, [0, 0, 255, 255]);
+    s.recipe = chainRecipes(s.recipe, filterRecipe('invert', 'Invert', {}, 512));
+    const both = s.recipe;
+    expect(both?.label).toBe('Look + Invert');
+    // A step that set no recipe keeps the one before it.
+    paint(s, [9, 9, 9, 255]);
+    expect(s.recipe).toBe(both);
+    s.engine.undo();
+    expect(s.recipe).toBe(both);
+    s.engine.undo();
+    expect(s.recipe).toBe(look);
+    s.engine.undo();
+    expect(s.recipe).toBeNull();
+    s.engine.redo();
+    expect(s.recipe).toBe(look);
+    s.engine.jumpTo(2);
+    expect(s.recipe).toBe(both);
+    s.engine.jumpTo(0);
+    expect(s.recipe).toBeNull();
+    // Undone, then replaced by another change: gone for good.
+    s.engine.jumpTo(1);
+    paint(s, [1, 2, 3, 255]);
+    expect(s.recipe).toBe(look);
+    s.engine.undo();
+    s.engine.redo();
+    expect(s.recipe).toBe(look);
+    expect(s.engine.canRedo).toBe(false);
+    s.dispose();
+  });
+
+  it('keeps the steps the history lets go of (its memory cap, Clear history)', async () => {
+    const { s } = await queued();
+    const look = recipe('Look');
+    paint(s);
+    s.recipe = look;
+    const bytes = s.engine.historyEntries[0]!.bytes;
+    // Room for about one step: each new one pushes the oldest out.
+    s.engine.history.maxBytes = Math.round(bytes * 1.5);
+    paint(s, [0, 0, 255, 255]);
+    paint(s, [0, 0, 128, 255]);
+    expect(s.engine.historyEntries).toHaveLength(1);
+    expect(s.recipe).toBe(look);
+    s.engine.undo();
+    expect(s.engine.canUndo).toBe(false);
+    expect(s.recipe).toBe(look);
+    s.engine.redo();
+    s.engine.history.maxBytes = bytes * 100;
+    const invert = chainRecipes(s.recipe, filterRecipe('invert', 'Invert', {}, 512));
+    paint(s, [5, 5, 5, 255]);
+    s.recipe = invert;
+    s.engine.clearHistory();
+    expect(s.recipe).toBe(invert);
+    paint(s, [6, 6, 6, 255]);
+    s.engine.undo();
+    expect(s.recipe).toBe(invert);
+    s.dispose();
+  });
+
+  it('"Apply style to all" does not replay a look that was undone', async () => {
+    const { s, deps } = await queued();
+    paint(s);
+    const look = recipe('Look');
+    s.recipe = look;
+    s.engine.undo();
+    expect(await s.applyStyleToAll()).toEqual({ applied: 0, failed: 0, needsElevation: 0 });
+    expect(look.apply).not.toHaveBeenCalled();
+    expect(deps.applied).toEqual([]);
+    s.dispose();
+  });
+
   it('adding an image to the current design keeps its recipe', async () => {
     const red = await frameOf([255, 0, 0, 255]);
     const deps = makeDeps({ a: red, img: red }, applied);
@@ -1280,10 +1355,13 @@ describe('EditorSession workers', () => {
     onmessage: ((ev: MessageEvent) => void) | null = null;
     onerror: ((ev: ErrorEvent) => void) | null = null;
     terminated = false;
+    readonly posted: Array<{ reqId: number; id: string }> = [];
     constructor() {
       FakeWorker.spawned.push(this);
     }
-    postMessage(): void {}
+    postMessage(message: unknown): void {
+      this.posted.push(message as { reqId: number; id: string });
+    }
     terminate(): void {
       this.terminated = true;
     }
@@ -1318,6 +1396,36 @@ describe('EditorSession workers', () => {
     await expect(s.panels.request({ op: 'sticker', id: 'star', size: 16, box: 12, color: null, outline: null })).rejects.toSatisfy(isCancelled);
     await expect(s.filters.backdrop(null, 16)).rejects.toSatisfy(isFilterCancelled);
     expect(FakeWorker.spawned).toHaveLength(3);
+  });
+
+  it('holds background work until the panel is open', async () => {
+    const s = new EditorSession(makeDeps({}, applied), new Engine());
+    const sticker = (id: string) => ({ op: 'sticker' as const, id, size: 16, box: 12, color: null, outline: null });
+    const panels = s.panels;
+    const worker = FakeWorker.spawned[0]!;
+    const posted = worker.posted;
+    const reply = (i: number) => worker.onmessage!({ data: { reqId: posted[i]!.reqId, result: null } } as MessageEvent);
+    const opened = vi.fn();
+    void s.whenInteractive().then(opened);
+    void panels.request(sticker('thumb'), { priority: 'low' }).catch(() => {});
+    void panels.request(sticker('user'));
+    // What the user asked for runs; background work waits for the open panel.
+    expect(posted.map((m) => m.id)).toEqual(['user']);
+    reply(0);
+    await Promise.resolve();
+    expect(posted.map((m) => m.id)).toEqual(['user']);
+    expect(opened).not.toHaveBeenCalled();
+    s.interactive = true;
+    expect(posted.map((m) => m.id)).toEqual(['user', 'thumb']);
+    await Promise.resolve();
+    expect(opened).toHaveBeenCalledTimes(1);
+    await expect(s.whenInteractive()).resolves.toBeUndefined();
+    // Closed again, it waits again.
+    s.interactive = false;
+    void panels.request(sticker('later'), { priority: 'low' }).catch(() => {});
+    reply(1);
+    expect(posted.map((m) => m.id)).toEqual(['user', 'thumb']);
+    s.dispose();
   });
 
   it('never starts a worker for a session disposed before using one', async () => {

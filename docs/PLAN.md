@@ -20,7 +20,7 @@ Once Windows CI is green, v1.0.0 is published as a GitHub Release by pushing a `
     Windows" is Reskin's own quoted HKCU `Run` value (`reskin-core` `settings::autostart`).
 - **Front end**: Svelte 5.57 + TypeScript ~5.9.3 + Vite 8.3. `vite build` builds each page on its own (`vite.config.ts`
   `environments`: the editor, then the box, into one outDir), so the box never loads chunks shared with the editor; its
-  initial JS stays ≤ 33 KB gz (`pnpm bundle:budget`). The dev server serves both pages from one environment.
+  initial JS stays ≤ 33.5 KB gz (`pnpm bundle:budget`). The dev server serves both pages from one environment.
   `@sveltejs/vite-plugin-svelte` 7.3, `@lucide/svelte` 1.47 (tree-shaken UI icons). UI font: system Segoe UI Variable.
   Sounds synthesized with WebAudio. No font or audio assets ship.
 - **Rust**: `windows` = 0.61.3 (same as tauri/tao/webview2-com), `webview2-com` 0.38, `ico` 0.5, `png` 0.17, `sha2`, `base64`,

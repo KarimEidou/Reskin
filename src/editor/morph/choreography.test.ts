@@ -131,9 +131,11 @@ describe('play', () => {
     // Everything that moves shares the main thread (see MAIN_THREAD).
     expect(flyer.calls[0]!.frames[0]).toHaveProperty('outlineOffset');
     expect(proxy.calls[0]!.frames[0]).toHaveProperty('outlineOffset');
-    // Regions stagger 30 ms apart.
+    // Regions stagger 30 ms apart, fading in without moving (a moving
+    // region would pull the layers above it into layers of their own).
     const [a, b] = region.calls.map((c) => c.options.delay as number);
     expect(b! - a!).toBeCloseTo(30, 6);
+    for (const c of region.calls) expect(animated(c.frames)).toEqual(new Set(['opacity']));
     // The proxy fades out, the shell fades in.
     expect(proxy.calls[0]!.frames.at(-1)!.opacity).toBe(0);
     expect(shell.calls[0]!.frames.at(-1)!.opacity).toBe(1);

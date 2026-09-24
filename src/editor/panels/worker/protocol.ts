@@ -8,11 +8,17 @@
 //   helper       → Pixels              icon helper on a layer image
 //   sticker      → Pixels              vector sticker rasterized
 //   stickerStamp → Pixels | null       sticker cropped to its art (stamp tool)
+//   fit          → Pixels              an imported picture fitted and centred
+//                                      into a size px document (engine
+//                                      fitAndCenter: the engine's import
+//                                      then only copies it)
 
 import { layerThumbnail } from '$engine/doc/thumbnails';
 import { renderSizes } from '$engine/export/export';
 import type { Pixels } from '$engine/filters/types';
 import { createCanvasTextRasterizer } from '$engine/helpers';
+import { fitAndCenter } from '$engine/io/import';
+import { Surface } from '$engine/raster/surface';
 import { analyzeIcon, buildFromAnalysis, compositePreset, type IconAnalysis, type PresetId, type PresetOptions, type PresetResult } from '$engine/presets';
 import { getSticker, renderSticker, renderStickerStamp, type StickerDef, type StickerOutline } from '$engine/stickers';
 import { runHelper, type HelperId } from '../adjust/helper-defs';
@@ -25,7 +31,8 @@ export type PanelRequest =
   | { op: 'presetBuild'; iconKey: string; icon: Pixels; id: PresetId; size: number; options: Partial<PresetOptions> }
   | { op: 'helper'; id: HelperId; pixels: Pixels; values: Record<string, unknown>; mask: Uint8Array | null }
   | { op: 'sticker'; id: string; size: number; box: number; color: string | null; outline: StickerOutline | null }
-  | { op: 'stickerStamp'; id: string; box: number; color: string | null; outline: StickerOutline | null };
+  | { op: 'stickerStamp'; id: string; box: number; color: string | null; outline: StickerOutline | null }
+  | { op: 'fit'; pixels: Pixels; size: number };
 
 export interface PanelResults {
   layerThumbs: (Pixels | null)[];
@@ -35,6 +42,7 @@ export interface PanelResults {
   helper: Pixels;
   sticker: Pixels;
   stickerStamp: Pixels | null;
+  fit: Pixels;
 }
 
 export type PanelOp = PanelRequest['op'];
@@ -114,6 +122,11 @@ export function handlePanelRequest(req: PanelRequest): { result: unknown; transf
     }
     case 'stickerStamp': {
       const px = renderStickerStamp(sticker(req.id), { box: req.box, color: req.color ?? undefined, outline: req.outline });
+      return { result: px, transfer: buffers([px]) };
+    }
+    case 'fit': {
+      const { width, height, data } = req.pixels;
+      const px = plain(fitAndCenter(Surface.fromRgba(width, height, data), { size: req.size }));
       return { result: px, transfer: buffers([px]) };
     }
   }
