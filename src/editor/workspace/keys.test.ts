@@ -4,6 +4,7 @@ import {
   isInOverlay,
   isSpaceControl,
   isTypingTarget,
+  STAGE_KEYS,
   stageKeyAction,
   type KeyContext,
   type KeyLike,
@@ -84,36 +85,24 @@ describe('stageKeyAction — holds', () => {
   });
 });
 
-describe('stageKeyAction — view and colours', () => {
-  it('maps Ctrl+0 / Ctrl+1 / Ctrl +/- to the view', () => {
-    expect(stageKeyAction(key('0', { code: 'Digit0', ctrlKey: true }), ctx())).toEqual({ type: 'fit' });
-    expect(stageKeyAction(key('1', { code: 'Digit1', ctrlKey: true }), ctx())).toEqual({ type: 'actualSize' });
-    expect(stageKeyAction(key('=', { code: 'Equal', ctrlKey: true }), ctx())).toEqual({ type: 'zoom', direction: 1 });
-    expect(stageKeyAction(key('+', { code: 'NumpadAdd', ctrlKey: true }), ctx())).toEqual({ type: 'zoom', direction: 1 });
-    expect(stageKeyAction(key('-', { code: 'Minus', ctrlKey: true }), ctx())).toEqual({ type: 'zoom', direction: -1 });
+describe('stageKeyAction — keys owned by the command registry', () => {
+  it('leaves view and colour keys to the registry', () => {
+    // Ctrl+0 / Ctrl+1 / Ctrl +/- and K / X / D run through palette/commands.ts.
+    expect(stageKeyAction(key('0', { code: 'Digit0', ctrlKey: true }), ctx())).toBeNull();
+    expect(stageKeyAction(key('1', { code: 'Digit1', ctrlKey: true }), ctx())).toBeNull();
+    expect(stageKeyAction(key('=', { code: 'Equal', ctrlKey: true }), ctx())).toBeNull();
+    expect(stageKeyAction(key('-', { code: 'Minus', ctrlKey: true }), ctx())).toBeNull();
+    for (const k of ['k', 'x', 'd', 'b']) expect(stageKeyAction(key(k), ctx())).toBeNull();
   });
 
-  it('view shortcuts work from buttons but not from text fields or overlays', () => {
-    const fit = key('0', { code: 'Digit0', ctrlKey: true });
-    expect(stageKeyAction(fit, ctx({ canvasFocus: false }))).toEqual({ type: 'fit' });
-    expect(stageKeyAction(fit, ctx({ typing: true }))).toBeNull();
-    expect(stageKeyAction(fit, ctx({ inOverlay: true }))).toBeNull();
-  });
-
-  it('K toggles keylines, X swaps and D resets colours', () => {
-    expect(stageKeyAction(key('k'), ctx())).toEqual({ type: 'keylines' });
-    expect(stageKeyAction(key('K', { code: 'KeyK' }), ctx({ canvasFocus: false }))).toEqual({ type: 'keylines' });
-    expect(stageKeyAction(key('x'), ctx())).toEqual({ type: 'swapColors' });
-    expect(stageKeyAction(key('d'), ctx())).toEqual({ type: 'resetColors' });
-  });
-
-  it('leaves letters with modifiers, repeats and typing alone', () => {
-    expect(stageKeyAction(key('x', { ctrlKey: true }), ctx())).toBeNull();
-    expect(stageKeyAction(key('x', { shiftKey: true }), ctx())).toBeNull();
-    expect(stageKeyAction(key('x', { repeat: true }), ctx())).toBeNull();
-    expect(stageKeyAction(key('x'), ctx({ typing: true }))).toBeNull();
-    expect(stageKeyAction(key('x'), ctx({ inOverlay: true }))).toBeNull();
-    expect(stageKeyAction(key('b'), ctx())).toBeNull();
+  it('owns only its holds and tool keys, alone or with Shift', () => {
+    expect(STAGE_KEYS).toEqual(
+      expect.arrayContaining(['Space', '\\', 'Enter', 'Escape', 'Up', 'Down', 'Left', 'Right', 'Delete', 'Backspace', 'Shift+Up']),
+    );
+    expect(STAGE_KEYS.every((k) => !/Ctrl|Alt|Win/.test(k))).toBe(true);
+    // Ctrl / Alt chords of its keys are not the stage's either.
+    expect(stageKeyAction(key('Enter', { ctrlKey: true }), ctx())).toBeNull();
+    expect(stageKeyAction(key('ArrowLeft', { altKey: true }), ctx())).toBeNull();
   });
 });
 

@@ -1,10 +1,11 @@
 <!--
   The canvas stage: the engine's CanvasView on a DPR-correct canvas with
-  zoom/pan (wheel at cursor, Space / middle-drag, Ctrl+0 / Ctrl+1 / Ctrl ±),
-  coalesced pointer input with capture, the tool overlay, marching ants,
-  keyline guides (K), before/after (hold \ or the split view), the inline
-  text editor, image paste and a drop highlight. Redraws are coalesced to
-  one per animation frame; the view state is shared through `stage`.
+  zoom/pan (wheel at cursor, Space / middle-drag), coalesced pointer input
+  with capture, the tool overlay, marching ants, keyline guides,
+  before/after (hold \ or the split view), the inline text editor, image
+  paste and a drop highlight. Redraws are coalesced to one per animation
+  frame; the view state and controls are shared through `stage` (the
+  command registry's view keys — Ctrl+0 / Ctrl+1 / Ctrl ±, K — use them).
 -->
 <script lang="ts">
   import { onMount } from 'svelte';
@@ -435,24 +436,6 @@
       case 'compare':
         setCompareHold(action.on);
         break;
-      case 'fit':
-        controller.fit();
-        break;
-      case 'actualSize':
-        controller.actualSize();
-        break;
-      case 'zoom':
-        controller.zoomStep(action.direction);
-        break;
-      case 'keylines':
-        stage.toggleKeylines();
-        break;
-      case 'swapColors':
-        engine.swapColors();
-        break;
-      case 'resetColors':
-        engine.resetColors();
-        break;
       case 'modifiers':
         engine.updateModifiers(modifiersOf(e));
         return; // never swallow modifier keys
@@ -825,6 +808,7 @@
   class:empty={!session.hasDesign}
   bind:this={host}
   data-testid="canvas-stage"
+  data-morph-target
 >
   <div class="doc-shadow" bind:this={shadowEl} aria-hidden="true"></div>
   <canvas

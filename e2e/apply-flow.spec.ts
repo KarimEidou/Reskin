@@ -161,7 +161,9 @@ test.describe('failures', () => {
     await page.keyboard.press('Control+k');
     await expect(page.getByRole('combobox', { name: 'Search commands' })).toBeFocused();
     await page.keyboard.type('save apply');
-    await expect(page.getByRole('option').first()).toContainText('Save & Apply');
+    // The palette's own options: the page behind it has native <option>s
+    // too (the Layers panel's blend mode), which the modal makes inert.
+    await expect(page.getByTestId('command-palette').getByRole('option').first()).toContainText('Save & Apply');
     await page.keyboard.press('Enter');
     await expect.poll(async () => (await applyRequests(page)).length).toBe(1);
     const [req] = await applyRequests(page);

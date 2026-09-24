@@ -1,15 +1,17 @@
 <!--
   One slot of the tool rail. A single tool is a toggle button; a group
   shows its current tool plus a corner triangle, and opens a flyout with
-  the others on right-click, a long press, → or Alt+↓.
+  the others on right-click, a long press, → or Alt+↓. Icons follow the
+  tools' options (dodge ↔ burn, blur ↔ sharpen, freehand ↔ polygonal
+  lasso); tooltips name the tool and its shortcut.
 -->
 <script lang="ts">
-  import type { ToolId } from '$engine/index';
+  import { TOOL_META, type ToolId } from '$engine/index';
   import Menu, { type MenuEntry } from '$lib/ui/Menu.svelte';
   import Tooltip from '$lib/ui/Tooltip.svelte';
   import { getSession } from '../state/context';
   import type { RailGroup } from './tool-groups';
-  import { TOOL_ICONS } from './tool-icons';
+  import { toolIconOf } from './tool-icons';
 
   interface Props {
     group: RailGroup;
@@ -35,8 +37,14 @@
   );
   const active = $derived(group.tools.includes(selected));
   const multi = $derived(group.tools.length > 1);
-  const tool = $derived(engine.tools[shown]);
-  const Icon = $derived(TOOL_ICONS[shown]);
+  const tool = $derived(TOOL_META[shown]);
+  /** Each tool's icon with its current options. */
+  const icons = $derived.by(() => {
+    void session.rev.tool;
+    return new Map(group.tools.map((id) => [id, toolIconOf(id, engine.getToolOptions(id))]));
+  });
+  const shownIcon = $derived(icons.get(shown)!);
+  const Icon = $derived(shownIcon.icon);
 
   $effect(() => {
     if (group.tools.includes(selected)) remembered = selected;
@@ -52,9 +60,9 @@
   const items: MenuEntry[] = $derived(
     group.tools.map((id) => ({
       id,
-      label: engine.tools[id].label,
-      icon: TOOL_ICONS[id],
-      shortcut: engine.tools[id].shortcut,
+      label: TOOL_META[id].label,
+      icon: icons.get(id)!.icon,
+      shortcut: TOOL_META[id].shortcut,
       checked: id === selected,
     })),
   );
@@ -130,6 +138,7 @@
       aria-keyshortcuts={tool.shortcut}
       tabindex={tabStop ? 0 : -1}
       data-rail-tool={shown}
+      data-icon={shownIcon.name}
       data-testid="tool-{shown}"
       onclick={onClick}
       onpointerdown={onPointerDown}
@@ -165,16 +174,17 @@
   .slot {
     position: relative;
     display: grid;
+    flex: none;
     place-items: center;
     width: 40px;
-    height: 36px;
+    height: var(--rail-slot, 36px);
   }
 
   .tool {
     display: grid;
     place-items: center;
     width: 36px;
-    height: 34px;
+    height: calc(var(--rail-slot, 36px) - 2px);
     padding: 0;
     border: 1px solid transparent;
     border-radius: var(--radius-md);

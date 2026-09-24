@@ -106,6 +106,46 @@ test.describe('command palette', () => {
     expect(await sidebarTab(page)).toBe('effects');
   });
 
+  test('selection commands: select layer pixels, then Grow selection… asks for the amount with any tool', async ({ openEditor, page }) => {
+    await openEditor();
+    await openWithDesign(page);
+    const selected = (x: number, y: number) =>
+      page.evaluate(
+        ([px, py]) => {
+          const m = (window as unknown as { __reskinSession: { engine: { doc: { selection: { width: number; data: Uint8Array } | null } } } })
+            .__reskinSession.engine.doc.selection;
+          return m ? m.data[py! * m.width + px!] : null;
+        },
+        [x, y] as const,
+      );
+    // Refining needs a selection: not offered yet.
+    await page.keyboard.press('Control+k');
+    await expect(input(page)).toBeFocused();
+    await page.keyboard.type('grow selection');
+    await expect(palette(page).getByRole('option', { name: /Grow selection/ })).toHaveCount(0);
+    await input(page).fill('layer pixels');
+    await expect(palette(page).getByRole('option').first()).toContainText('Select layer pixels');
+    await page.keyboard.press('Enter');
+    // The tile of the icon is selected, its transparent margin is not (its soft shadow barely).
+    expect([await selected(256, 256), await selected(5, 250)]).toEqual([255, 0]);
+    expect(await selected(34, 250)).toBeLessThan(128);
+
+    await page.keyboard.press('Control+k');
+    await expect(input(page)).toBeFocused();
+    await page.keyboard.type('grow');
+    await expect(palette(page).getByRole('option').first()).toContainText('Grow selection…');
+    await page.keyboard.press('Enter');
+    const prompt = page.getByRole('dialog', { name: 'Grow selection' });
+    await expect(prompt).toBeVisible();
+    expect(await toolId(page)).toBe('brush');
+    await prompt.getByRole('slider', { name: 'Grow by' }).fill('10');
+    await prompt.getByRole('button', { name: 'Grow' }).click();
+    await expect(prompt).toHaveCount(0);
+    expect(await selected(34, 250)).toBe(255);
+    // No Selection menu with the brush: the keyboard continues on the canvas.
+    await expect(page.getByTestId('canvas')).toBeFocused();
+  });
+
   test('only commands that apply right now are listed', async ({ openEditor, page }) => {
     await openEditor();
     await simulateOpen(page, [], 'start');
@@ -209,7 +249,11 @@ test.describe('shortcuts overlay', () => {
     const overlay = page.getByRole('dialog', { name: 'Keyboard shortcuts' });
     await expect(overlay).toBeVisible();
     await expect(overlay.getByRole('region', { name: 'Tools' })).toContainText('Brush tool');
+    await expect(overlay.getByRole('region', { name: 'Tools' })).toContainText('Next tool of the group');
+    await expect(overlay.getByRole('region', { name: 'Canvas' })).toContainText('Toggle keyline guides');
+    await expect(overlay.getByRole('region', { name: 'Edit' })).toContainText('Swap primary and secondary colours');
     await expect(overlay).toContainText('Pan the canvas');
+    await expect(overlay).toContainText('Remove the last lasso corner');
     await shot(page, 'editor-shell-shortcuts.png');
     await page.keyboard.press('Escape');
     await expect(overlay).toBeHidden();

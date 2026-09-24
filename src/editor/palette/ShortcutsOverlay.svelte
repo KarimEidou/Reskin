@@ -1,8 +1,10 @@
 <!-- Keyboard map ("?"): every command shortcut, grouped, plus canvas gestures. -->
 <script lang="ts">
+  import { TOOL_META, TOOL_ORDER } from '$engine/index';
   import Dialog from '$lib/ui/Dialog.svelte';
   import Kbd from '$lib/ui/Kbd.svelte';
-  import { GROUP_ORDER, type Command, type CommandGroup } from './commands';
+  import { STAGE_SHORTCUTS } from '../workspace/keys';
+  import { GROUP_ORDER, keyCycle, type Command, type CommandGroup } from './commands';
   import { comboKeys } from './keys';
 
   interface Props {
@@ -14,12 +16,15 @@
 
   type Entry = { label: string; keys: string[][]; note?: string };
 
-  /** Canvas gestures handled by the workspace (docs/UI.md). */
-  const CANVAS_EXTRA: Entry[] = [
-    { label: 'Pan the canvas', keys: [['Space']], note: 'hold + drag' },
-    { label: 'Compare with the original', keys: [['\\']], note: 'hold' },
-    { label: 'Commit a transform or text', keys: [['Enter']] },
-    { label: 'Cancel the current operation', keys: [['Esc']] },
+  /** Canvas gestures and keys handled by the workspace (docs/UI.md). */
+  const CANVAS_EXTRA: Entry[] = STAGE_SHORTCUTS.map((s) => ({ ...s, keys: s.keys.map(comboKeys) }));
+  /** Group keys pressed again move on to the group's next tool. */
+  const TOOLS_EXTRA: Entry[] = [
+    {
+      label: 'Next tool of the group',
+      keys: TOOL_ORDER.filter((id) => keyCycle(id) !== null).map((id) => comboKeys(TOOL_META[id].shortcut)),
+      note: 'press again',
+    },
   ];
   const APP_EXTRA: Entry[] = [{ label: 'Close the editor (nothing else open)', keys: [['Esc']] }];
 
@@ -29,6 +34,7 @@
       const entries: Entry[] = commands
         .filter((c) => c.group === group && c.keys)
         .map((c) => ({ label: c.label, keys: [c.keys!, ...(c.altKeys ?? [])].map(comboKeys) }));
+      if (group === 'Tools') entries.push(...TOOLS_EXTRA);
       if (group === 'Canvas') entries.push(...CANVAS_EXTRA);
       if (group === 'App') entries.push(...APP_EXTRA);
       if (entries.length > 0) out.push({ group, entries });

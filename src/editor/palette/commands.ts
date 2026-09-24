@@ -6,8 +6,10 @@
 import type { EditorView, Settings } from '$lib/ipc/types';
 import type { PixelGrid } from '$engine/doc/types';
 import type { ToolId } from '$engine/tools/types';
-import { TOOL_ORDER } from '$engine/tools/registry';
+import { TOOL_META, TOOL_ORDER } from '$engine/tools/registry';
 import type { EditorSession, SidebarTab } from '../state/session.svelte';
+import { refinePrompt, type RefineKind } from '../workspace/refine.svelte';
+import { stage } from '../workspace/stage.svelte';
 import { isBareKey, isTypingTarget, isWidgetTarget, matchesCombo, parseCombo, type KeyCombo, type KeyLike } from './keys';
 
 export type CommandGroup =
@@ -76,6 +78,11 @@ export interface Command {
   /** Available right now? (palette lists it / shortcut fires). */
   when?(ctx: CommandContext): boolean;
   run(ctx: CommandContext): unknown;
+  /**
+   * What the shortcut does when it differs from choosing the command in the
+   * palette (a repeated tool key cycles through its group).
+   */
+  runKey?(ctx: CommandContext): unknown;
 }
 
 /** The label and shortcut of each tool, as the engine defines them. */
@@ -106,11 +113,68 @@ const VIEWS: ReadonlyArray<readonly [EditorView, string, string | undefined, rea
 const editing = (c: CommandContext) => c.session.hasDesign;
 const inEditView = (c: CommandContext) => c.session.hasDesign && c.session.view === 'edit';
 const idle = (c: CommandContext) => c.session.busy === null;
-const canvas = (c: CommandContext) => inEditView(c) && c.session.engine.viewport !== null;
+const canvas = (c: CommandContext) => inEditView(c) && stage.ready;
+const hasSelection = (c: CommandContext) => editing(c) && c.session.engine.doc.selection !== null;
 
 function toEdit(c: CommandContext): void {
   if (c.session.view !== 'edit') c.session.navigate('edit');
 }
+
+/** Synonyms for the tools (their id and label always match). */
+const TOOL_KEYWORDS: Partial<Record<ToolId, readonly string[]>> = {
+  move: ['transform', 'rotate', 'scale', 'nudge'],
+  selectRect: ['marquee', 'selection'],
+  selectEllipse: ['marquee', 'circle', 'selection'],
+  lasso: ['freehand', 'polygonal', 'selection'],
+  magicWand: ['select colour', 'color', 'selection'],
+  brush: ['paint'],
+  spray: ['airbrush', 'paint'],
+  eraser: ['rubber'],
+  fill: ['paint bucket', 'flood'],
+  shape: ['rectangle', 'ellipse', 'star', 'polygon', 'arrow'],
+  eyedropper: ['pick colour', 'color picker', 'sample'],
+  stamp: ['sticker', 'emoji'],
+  smudge: ['finger', 'retouch'],
+  blurSharpen: ['soften', 'retouch'],
+  dodgeBurn: ['lighten', 'darken', 'exposure', 'retouch'],
+  hand: ['pan'],
+  zoom: ['magnify'],
+};
+
+/**
+ * The tools a key cycles through: tools of one engine group share the key
+ * of the group's first tool (M the marquees, B brush and spray, R the
+ * retouch tools; docs/UI.md "Tool rail"). Null for a key of one tool.
+ */
+export function keyCycle(id: ToolId): readonly ToolId[] | null {
+  const group = TOOL_META[id].group;
+  if (!group) return null;
+  const members = TOOL_ORDER.filter((t) => TOOL_META[t].group === group);
+  return members.length > 1 && members[0] === id ? members : null;
+}
+
+/**
+ * The tool a press of `pressed`'s shortcut selects: that tool, or, when the
+ * same key selected the current tool (`repeated`) and it is a group's key,
+ * the next tool of the group — repeated presses cycle: R Smudge, R Blur /
+ * Sharpen, R Dodge / Burn, R Smudge… A first press never cycles, so B on
+ * a brush picked from the rail keeps the brush.
+ */
+export function toolForKey(pressed: ToolId, selected: ToolId, repeated: boolean): ToolId {
+  const cycle = repeated ? keyCycle(pressed) : null;
+  const at = cycle ? cycle.indexOf(selected) : -1;
+  return cycle && at >= 0 ? cycle[(at + 1) % cycle.length]! : pressed;
+}
+
+/** Shortcuts of the selection commands (the options bar's Selection menu shows them too). */
+export const SELECTION_KEYS = { selectAll: 'Ctrl+A', deselect: 'Ctrl+D', invert: 'Ctrl+Shift+I' } as const;
+
+const REFINE_COMMANDS: ReadonlyArray<readonly [RefineKind, string, readonly string[]]> = [
+  ['feather', 'Feather selection…', ['soften', 'blur edge']],
+  ['grow', 'Grow selection…', ['expand', 'enlarge']],
+  ['shrink', 'Shrink selection…', ['contract', 'reduce']],
+  ['border', 'Border selection…', ['edge', 'outline', 'ring']],
+];
 
 const MODE_LABEL = {
   inPlace: 'Save & Apply (change in place)',
@@ -202,6 +266,12 @@ export function createCommands(tools: ToolInfo): Command[] {
   );
 
   // ---- tools --------------------------------------------------------------------
+  /**
+   * The tool the last tool key selected (and which key), so pressing it
+   * again cycles; `left` once another tool was selected since (the rail,
+   * the palette), which ends the cycle even if that tool comes back.
+   */
+  let lastKey: { pressed: ToolId; selected: ToolId; left: boolean; stop: () => void } | null = null;
   for (const id of TOOL_ORDER) {
     const tool = tools[id];
     list.push({
@@ -210,11 +280,26 @@ export function createCommands(tools: ToolInfo): Command[] {
       group: 'Tools',
       keys: tool.shortcut || undefined,
       editOnly: true,
-      keywords: [id],
+      keywords: [id, ...(TOOL_KEYWORDS[id] ?? [])],
       when: editing,
       run: (c) => {
         toEdit(c);
         c.session.engine.setTool(id);
+      },
+      runKey: (c) => {
+        const engine = c.session.engine;
+        const current = engine.selectedToolId;
+        const repeated = lastKey !== null && !lastKey.left && lastKey.pressed === id && lastKey.selected === current;
+        lastKey?.stop();
+        const tool = toolForKey(id, current, repeated);
+        engine.setTool(tool);
+        const key = { pressed: id, selected: tool, left: false, stop: () => {} };
+        key.stop = engine.subscribe((e) => {
+          if (e.kind !== 'tool' || engine.selectedToolId === tool) return;
+          key.left = true;
+          key.stop();
+        });
+        lastKey = key;
       },
     });
   }
@@ -246,7 +331,7 @@ export function createCommands(tools: ToolInfo): Command[] {
       id: 'edit.selectAll',
       label: 'Select all',
       group: 'Edit',
-      keys: 'Ctrl+A',
+      keys: SELECTION_KEYS.selectAll,
       keywords: ['selection'],
       when: inEditView,
       run: (c) => c.session.engine.selectAll(),
@@ -255,7 +340,7 @@ export function createCommands(tools: ToolInfo): Command[] {
       id: 'edit.deselect',
       label: 'Deselect',
       group: 'Edit',
-      keys: 'Ctrl+D',
+      keys: SELECTION_KEYS.deselect,
       keywords: ['selection', 'clear selection'],
       when: (c) => inEditView(c) && c.session.engine.doc.selection !== null,
       run: (c) => c.session.engine.deselect(),
@@ -264,11 +349,35 @@ export function createCommands(tools: ToolInfo): Command[] {
       id: 'edit.invertSelection',
       label: 'Invert selection',
       group: 'Edit',
-      keys: 'Ctrl+Shift+I',
+      keys: SELECTION_KEYS.invert,
       keywords: ['selection', 'inverse'],
-      when: inEditView,
+      when: (c) => inEditView(c) && c.session.engine.doc.selection !== null,
       run: (c) => c.session.engine.invertSelection(),
     },
+    {
+      id: 'edit.selectLayerPixels',
+      label: 'Select layer pixels',
+      group: 'Edit',
+      keywords: ['selection', 'alpha', 'opacity', 'transparency'],
+      when: (c) => editing(c) && c.session.engine.activeLayer !== null,
+      run: (c) => {
+        toEdit(c);
+        c.session.engine.selectByAlpha();
+      },
+    },
+    ...REFINE_COMMANDS.map(
+      ([kind, label, keywords]): Command => ({
+        id: `edit.${kind}Selection`,
+        label,
+        group: 'Edit',
+        keywords: ['selection', ...keywords],
+        when: hasSelection,
+        run: (c) => {
+          toEdit(c);
+          refinePrompt.open(kind);
+        },
+      }),
+    ),
     {
       id: 'layer.new',
       label: 'New layer',
@@ -314,6 +423,8 @@ export function createCommands(tools: ToolInfo): Command[] {
       id: 'color.swap',
       label: 'Swap primary and secondary colours',
       group: 'Edit',
+      keys: 'X',
+      editOnly: true,
       keywords: ['color', 'foreground', 'background'],
       when: editing,
       run: (c) => c.session.engine.swapColors(),
@@ -322,6 +433,8 @@ export function createCommands(tools: ToolInfo): Command[] {
       id: 'color.reset',
       label: 'Reset colours to black and white',
       group: 'Edit',
+      keys: 'D',
+      editOnly: true,
       keywords: ['color', 'default colors'],
       when: editing,
       run: (c) => c.session.engine.resetColors(),
@@ -337,7 +450,7 @@ export function createCommands(tools: ToolInfo): Command[] {
       keys: 'Ctrl+0',
       keywords: ['fit to screen', 'zoom'],
       when: canvas,
-      run: (c) => c.session.engine.viewport?.fit(),
+      run: () => stage.fit(),
     },
     {
       id: 'view.actual',
@@ -346,7 +459,7 @@ export function createCommands(tools: ToolInfo): Command[] {
       keys: 'Ctrl+1',
       keywords: ['zoom 100', 'one to one'],
       when: canvas,
-      run: (c) => c.session.engine.viewport?.actualSize(),
+      run: () => stage.actualSize(),
     },
     {
       id: 'view.zoomIn',
@@ -354,8 +467,9 @@ export function createCommands(tools: ToolInfo): Command[] {
       group: 'Canvas',
       keys: 'Ctrl++',
       repeatable: true,
+      keywords: ['magnify', 'enlarge'],
       when: canvas,
-      run: (c) => zoomStep(c, 1),
+      run: () => stage.zoomIn(),
     },
     {
       id: 'view.zoomOut',
@@ -363,8 +477,27 @@ export function createCommands(tools: ToolInfo): Command[] {
       group: 'Canvas',
       keys: 'Ctrl+-',
       repeatable: true,
+      keywords: ['reduce'],
       when: canvas,
-      run: (c) => zoomStep(c, -1),
+      run: () => stage.zoomOut(),
+    },
+    {
+      id: 'view.keylines',
+      label: 'Toggle keyline guides',
+      group: 'Canvas',
+      keys: 'K',
+      editOnly: true,
+      keywords: ['guides', 'windows icon grid', 'safe area'],
+      when: canvas,
+      run: () => stage.toggleKeylines(),
+    },
+    {
+      id: 'view.grid',
+      label: 'Toggle pixel grid',
+      group: 'Canvas',
+      keywords: ['grid lines', 'pixels'],
+      when: canvas,
+      run: () => stage.toggleGrid(),
     },
     {
       id: 'view.compare',
@@ -573,11 +706,6 @@ export function createCommands(tools: ToolInfo): Command[] {
   return list;
 }
 
-function zoomStep(c: CommandContext, dir: 1 | -1): void {
-  const vp = c.session.engine.viewport;
-  if (vp) vp.zoomStep(dir, vp.viewWidth / 2, vp.viewHeight / 2);
-}
-
 /** Commands available now (palette list), in registry order. */
 export function availableCommands(commands: readonly Command[], ctx: CommandContext): Command[] {
   return commands.filter((c) => {
@@ -612,21 +740,24 @@ export function compileBindings(commands: readonly Command[]): CompiledBinding[]
 
 export interface KeyEventInfo extends KeyLike {
   repeat?: boolean;
+  /** Something already handled the key (`KeyboardEvent.defaultPrevented`). */
+  defaultPrevented?: boolean;
   /** The focused element (event target). */
   target?: unknown;
 }
 
 /**
- * The command a keydown should run, or null. Shortcuts without Ctrl/Alt
- * never fire while typing or inside widgets with their own letter keys
- * (menus, listboxes); `global` commands always may. `editOnly` shortcuts
- * need the Edit view.
+ * The command a keydown should run, or null. Keys something else already
+ * handled are left alone. Shortcuts without Ctrl/Alt never fire while
+ * typing or inside widgets with their own letter keys (menus, listboxes);
+ * `global` commands always may. `editOnly` shortcuts need the Edit view.
  */
 export function commandForKey(
   bindings: readonly CompiledBinding[],
   e: KeyEventInfo,
   ctx: CommandContext,
 ): Command | null {
+  if (e.defaultPrevented) return null;
   const target = e.target as Parameters<typeof isTypingTarget>[0];
   const typing = isTypingTarget(target);
   const widget = isWidgetTarget(target);

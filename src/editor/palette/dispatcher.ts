@@ -2,7 +2,8 @@
 //
 // * Shortcuts: a window *capture* listener finds the command for a keydown
 //   (see commandForKey) and runs it; a handled key is `preventDefault`ed and
-//   stops propagating, so a component can never act on the same key twice.
+//   stops propagating, so a component can never act on the same key twice
+//   (the canvas stage owns a disjoint set of keys, see workspace/keys.ts).
 //   Keys typed into text fields, keys inside widgets with their own letter
 //   keys, keys while a modal dialog is open and keys recorded by
 //   `[data-capture-keys]` elements (the hotkey recorder) are left alone.
@@ -52,15 +53,15 @@ export function installKeyboard(opts: KeyboardOptions): () => void {
         engine.textEditLayerId !== null;
       return;
     }
-    if (e.defaultPrevented || e.isComposing || !opts.active() || modalOpen() || captured(e.target)) return;
+    if (e.isComposing || !opts.active() || modalOpen() || captured(e.target)) return;
     const ctx = opts.ctx();
-    const cmd = commandForKey(bindings, { ...pick(e), target: e.target }, ctx);
+    const cmd = commandForKey(bindings, { ...pick(e), defaultPrevented: e.defaultPrevented, target: e.target }, ctx);
     if (!cmd) return;
     e.preventDefault();
     e.stopPropagation();
     if (e.repeat && !cmd.repeatable) return;
     try {
-      const result = cmd.run(ctx);
+      const result = cmd.runKey ? cmd.runKey(ctx) : cmd.run(ctx);
       if (result instanceof Promise) result.catch((err: unknown) => opts.onError?.(cmd, err));
     } catch (err) {
       opts.onError?.(cmd, err);

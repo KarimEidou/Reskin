@@ -1,18 +1,25 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { Engine, TOOL_ORDER, Viewport } from '$engine/index';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { Engine, TOOL_META, TOOL_ORDER, type ToolId } from '$engine/index';
 import type { Settings } from '$lib/ipc/types';
 import { defaultSettings } from '$lib/settings/defaults';
 import type { EditorSession } from '../state/session.svelte';
+import { STAGE_KEYS } from '../workspace/keys';
+import { refinePrompt } from '../workspace/refine.svelte';
+import { stage, type StageController } from '../workspace/stage.svelte';
 import {
   availableCommands,
   commandForKey,
+  commandKeys,
   compileBindings,
   createCommands,
   GROUP_ORDER,
+  keyCycle,
+  toolForKey,
   type Command,
   type CommandContext,
   type KeyEventInfo,
 } from './commands';
+import { parseCombo } from './keys';
 
 interface FakeSession {
   engine: Engine;
@@ -40,6 +47,13 @@ let session: FakeSession;
 let current: Settings;
 let ctx: CommandContext;
 let commands: Command[];
+/** Detaches a fake canvas stage a test attached. */
+let detachStage: (() => void) | null = null;
+
+afterEach(() => {
+  detachStage?.();
+  detachStage = null;
+});
 
 function fakeSession(): FakeSession {
   const s: FakeSession = {
@@ -113,14 +127,22 @@ describe('registry', () => {
     }
   });
 
-  it('does not bind one shortcut twice', () => {
+  it('binds every key chord once, across the registry and the canvas stage', () => {
+    // Chords compare parsed ("Ctrl++" and "Ctrl+=" are the same keys).
+    const chord = (k: string) => JSON.stringify(parseCombo(k));
     const seen = new Map<string, string>();
+    for (const k of STAGE_KEYS) {
+      expect(seen.get(chord(k)), `${k} listed twice by the stage`).toBeUndefined();
+      seen.set(chord(k), `the stage (${k})`);
+    }
     for (const c of commands) {
-      for (const k of [c.keys, ...(c.altKeys ?? [])].filter(Boolean) as string[]) {
-        expect(seen.get(k), `${k} bound by ${seen.get(k)} and ${c.id}`).toBeUndefined();
-        seen.set(k, c.id);
+      for (const k of commandKeys(c)) {
+        expect(seen.get(chord(k)), `${k} bound by ${seen.get(chord(k))} and ${c.id}`).toBeUndefined();
+        seen.set(chord(k), c.id);
       }
     }
+    // The view and colour keys are the registry's.
+    for (const k of ['Ctrl+0', 'Ctrl+1', 'Ctrl+=', 'Ctrl+-', 'K', 'X', 'D']) expect(seen.get(chord(k))).toMatch(/^(view|color)\./);
   });
 
   it('switches tools and returns to the editor', () => {
@@ -162,17 +184,68 @@ describe('registry', () => {
     expect(e.canRedo).toBe(false);
   });
 
-  it('zooms only with an attached viewport', () => {
+  it('drives the canvas stage, only while one is mounted', () => {
     expect(byId('view.fit').when!(ctx)).toBe(false);
-    const vp = new Viewport({ viewWidth: 400, viewHeight: 300 });
-    session.engine.attachViewport(vp);
-    expect(byId('view.fit').when!(ctx)).toBe(true);
+    const calls: string[] = [];
+    const controller: StageController = {
+      fit: () => calls.push('fit'),
+      actualSize: () => calls.push('actual'),
+      zoomStep: (d) => calls.push(d > 0 ? 'in' : 'out'),
+      setZoom: () => {},
+      docRect: () => null,
+      focus: () => {},
+    };
+    detachStage = stage.attach(controller);
+    for (const id of ['view.fit', 'view.actual', 'view.zoomIn', 'view.zoomOut', 'view.keylines', 'view.grid']) {
+      expect(byId(id).when!(ctx), id).toBe(true);
+    }
     byId('view.actual').run(ctx);
-    expect(vp.zoom).toBe(1);
     byId('view.zoomIn').run(ctx);
-    expect(vp.zoom).toBeGreaterThan(1);
+    byId('view.zoomOut').run(ctx);
     byId('view.fit').run(ctx);
-    expect(vp.zoom).toBeLessThan(1);
+    expect(calls).toEqual(['actual', 'in', 'out', 'fit']);
+    const { keylines, grid } = stage;
+    byId('view.keylines').run(ctx);
+    byId('view.grid').run(ctx);
+    expect([stage.keylines, stage.grid]).toEqual([!keylines, !grid]);
+    // Not while another page shows.
+    session.view = 'library';
+    expect(byId('view.fit').when!(ctx)).toBe(false);
+  });
+
+  it('swaps and resets the colours', () => {
+    const e = session.engine;
+    e.setColor('primary', { r: 255, g: 0, b: 0, a: 1 });
+    byId('color.swap').run(ctx);
+    expect(e.secondary).toEqual({ r: 255, g: 0, b: 0, a: 1 });
+    byId('color.reset').run(ctx);
+    expect([e.primary, e.secondary]).toEqual([
+      { r: 0, g: 0, b: 0, a: 1 },
+      { r: 255, g: 255, b: 255, a: 1 },
+    ]);
+  });
+
+  it('selects the layer pixels and asks how far to refine the selection', () => {
+    const e = session.engine;
+    const layer = e.activeLayer!;
+    e.editLayerPixels(layer.id, 'Paint', (surface) => {
+      for (let y = 10; y < 20; y++) for (let x = 30; x < 50; x++) surface.data[(y * surface.width + x) * 4 + 3] = 255;
+    });
+    // Refining needs a selection.
+    for (const kind of ['feather', 'grow', 'shrink', 'border']) expect(byId(`edit.${kind}Selection`).when!(ctx)).toBe(false);
+    session.view = 'library';
+    byId('edit.selectLayerPixels').run(ctx);
+    expect(session.view).toBe('edit');
+    const m = e.doc.selection!;
+    expect([m.data[15 * m.width + 40], m.data[15 * m.width + 60]]).toEqual([255, 0]);
+    expect(e.historyEntries.at(-1)?.label).toBe('Select layer pixels');
+
+    for (const kind of ['feather', 'grow', 'shrink', 'border'] as const) {
+      expect(byId(`edit.${kind}Selection`).when!(ctx)).toBe(true);
+      byId(`edit.${kind}Selection`).run(ctx);
+      expect(refinePrompt.kind).toBe(kind);
+    }
+    refinePrompt.close();
   });
 
   it('toggles settings through updateSettings', async () => {
@@ -210,10 +283,128 @@ describe('registry', () => {
   });
 });
 
+describe('tool keys', () => {
+  it('share a key within the engine groups of several tools', () => {
+    expect(keyCycle('selectRect')).toEqual(['selectRect', 'selectEllipse']);
+    expect(keyCycle('brush')).toEqual(['brush', 'spray']);
+    expect(keyCycle('smudge')).toEqual(['smudge', 'blurSharpen', 'dodgeBurn']);
+    // Keys of other group members, and tools of no group, pick just their tool.
+    for (const id of ['selectEllipse', 'spray', 'blurSharpen', 'dodgeBurn', 'lasso', 'fill', 'hand'] as const) {
+      expect(keyCycle(id)).toBeNull();
+    }
+    expect(TOOL_META.smudge.shortcut).toBe('R');
+  });
+
+  it('pressed again, a group key moves on to the next tool of its group', () => {
+    const again = (pressed: ToolId, from: ToolId) => toolForKey(pressed, from, true);
+    expect(again('smudge', 'smudge')).toBe('blurSharpen');
+    expect(again('smudge', 'blurSharpen')).toBe('dodgeBurn');
+    expect(again('smudge', 'dodgeBurn')).toBe('smudge');
+    expect(again('selectRect', 'selectRect')).toBe('selectEllipse');
+    expect(again('brush', 'brush')).toBe('spray');
+    // Keys of one tool, and tools outside the key's group, never cycle.
+    expect(again('selectRect', 'lasso')).toBe('selectRect');
+    expect(again('blurSharpen', 'smudge')).toBe('blurSharpen');
+    expect(again('lasso', 'lasso')).toBe('lasso');
+    // A first press selects the key's own tool.
+    expect(toolForKey('smudge', 'brush', false)).toBe('smudge');
+    expect(toolForKey('brush', 'brush', false)).toBe('brush');
+    expect(toolForKey('smudge', 'blurSharpen', false)).toBe('smudge');
+  });
+
+  it('the shortcut cycles on repeated presses, the palette entry selects exactly its tool', () => {
+    const e = session.engine;
+    const r = byId('tool.smudge');
+    const b = byId('tool.brush');
+    // The brush is selected, but not by B: B keeps it.
+    expect(e.selectedToolId).toBe('brush');
+    b.runKey!(ctx);
+    expect(e.selectedToolId).toBe('brush');
+    b.runKey!(ctx);
+    expect(e.selectedToolId).toBe('spray');
+    r.runKey!(ctx);
+    expect(e.selectedToolId).toBe('smudge');
+    r.runKey!(ctx);
+    expect(e.selectedToolId).toBe('blurSharpen');
+    r.runKey!(ctx);
+    expect(e.selectedToolId).toBe('dodgeBurn');
+    r.runKey!(ctx);
+    expect(e.selectedToolId).toBe('smudge');
+    // Another way of choosing a tool in between ends the cycle.
+    e.setTool('blurSharpen');
+    r.runKey!(ctx);
+    expect(e.selectedToolId).toBe('smudge');
+    r.run(ctx);
+    expect(e.selectedToolId).toBe('smudge');
+    r.run(ctx);
+    expect(e.selectedToolId).toBe('smudge');
+  });
+
+  it('a tool chosen another way in between ends the cycle, even when it is the same tool again', () => {
+    const e = session.engine;
+    const r = byId('tool.smudge');
+    r.runKey!(ctx);
+    expect(e.selectedToolId).toBe('smudge');
+    // Away on the rail and back to the smudge tool: R is a first press again.
+    e.setTool('brush');
+    e.setTool('smudge');
+    r.runKey!(ctx);
+    expect(e.selectedToolId).toBe('smudge');
+    r.runKey!(ctx);
+    expect(e.selectedToolId).toBe('blurSharpen');
+    // Holding Space (a temporary hand) and changing options keep the cycle going.
+    e.setToolOverride('hand');
+    e.setToolOverride(null);
+    e.setToolOptions('blurSharpen', { strength: 0.3 });
+    r.runKey!(ctx);
+    expect(e.selectedToolId).toBe('dodgeBurn');
+  });
+
+  it('offers the new tools with their engine shortcuts', () => {
+    const bindings = compileBindings(commands);
+    const shortcuts: Array<[string, Partial<KeyEventInfo>, string]> = [
+      ['l', {}, 'tool.lasso'],
+      ['w', {}, 'tool.magicWand'],
+      ['a', {}, 'tool.spray'],
+      ['s', {}, 'tool.stamp'],
+      ['r', {}, 'tool.smudge'],
+      ['R', { shiftKey: true }, 'tool.blurSharpen'],
+      ['o', {}, 'tool.dodgeBurn'],
+    ];
+    for (const [k, mods, id] of shortcuts) expect(commandForKey(bindings, press(k, mods), ctx)?.id, k).toBe(id);
+  });
+});
+
 describe('commandForKey', () => {
   let bindings: ReturnType<typeof compileBindings>;
   beforeEach(() => {
     bindings = compileBindings(commands);
+  });
+
+  it('leaves keys something else already handled', () => {
+    expect(commandForKey(bindings, press('b'), ctx)?.id).toBe('tool.brush');
+    expect(commandForKey(bindings, press('b', { defaultPrevented: true }), ctx)).toBeNull();
+    expect(commandForKey(bindings, press('k', { ctrlKey: true, defaultPrevented: true }), ctx)).toBeNull();
+  });
+
+  it('maps K, X and D to keylines and the colour chips', () => {
+    detachStage = stage.attach({
+      fit: () => {},
+      actualSize: () => {},
+      zoomStep: () => {},
+      setZoom: () => {},
+      docRect: () => null,
+      focus: () => {},
+    });
+    expect(commandForKey(bindings, press('k'), ctx)?.id).toBe('view.keylines');
+    expect(commandForKey(bindings, press('x'), ctx)?.id).toBe('color.swap');
+    expect(commandForKey(bindings, press('d'), ctx)?.id).toBe('color.reset');
+    expect(commandForKey(bindings, press('0', { ctrlKey: true }), ctx)?.id).toBe('view.fit');
+    expect(commandForKey(bindings, { ...press('=', { ctrlKey: true }), code: 'Equal' }, ctx)?.id).toBe('view.zoomIn');
+    // Out of sight on another page, they do nothing.
+    session.view = 'library';
+    expect(commandForKey(bindings, press('x'), ctx)).toBeNull();
+    expect(commandForKey(bindings, press('k'), ctx)).toBeNull();
   });
 
   it('finds tools, undo/redo and the palette', () => {

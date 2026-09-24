@@ -1,17 +1,22 @@
 <!--
   Tool options bar (top of the canvas): context options of the active tool
   through engine.getToolOptions / setToolOptions, symmetry for the painting
-  tools, selection commands for the selection tools, transform apply /
-  cancel for Move. Controls the bar has no room for are in "More options".
+  tools, the Selection menu for the selection tools, the sticker of the
+  stamp, a new spray pattern, transform apply / cancel for Move. Controls
+  the bar has no room for are in "More options". It also hosts the refine
+  prompt (Feather… / Grow… / Shrink… / Border…), which the command
+  palette can open with any tool.
 -->
 <script lang="ts">
   import Check from '@lucide/svelte/icons/check';
   import ChevronDown from '@lucide/svelte/icons/chevron-down';
   import Maximize from '@lucide/svelte/icons/maximize';
+  import Shuffle from '@lucide/svelte/icons/shuffle';
   import X from '@lucide/svelte/icons/x';
-  import type { GradientStop, ShapeKind, TextProps, ToolId } from '$engine/index';
-  import { toHex } from '$engine/index';
+  import type { GradientStop, ShapeKind, Surface, TextProps, ToolId } from '$engine/index';
+  import { TOOL_META, toHex } from '$engine/index';
   import Button from '$lib/ui/Button.svelte';
+  import IconButton from '$lib/ui/IconButton.svelte';
   import Menu from '$lib/ui/Menu.svelte';
   import Popover from '$lib/ui/Popover.svelte';
   import SegmentedControl from '$lib/ui/SegmentedControl.svelte';
@@ -22,12 +27,14 @@
   import { colorPicker, fontPicker, gradientStops as stopsEditor } from './lazy.svelte';
   import MoreOptions from './MoreOptions.svelte';
   import OptionControl from './OptionControl.svelte';
-  import { SHAPE_CHOICES, TOOL_OPTION_SPECS, visibleSpecs, type OptionSpec, type SliderSpec } from './options-schema';
-  import PillSlider from './PillSlider.svelte';
+  import { SHAPE_CHOICES, TOOL_OPTION_SPECS, visibleSpecs, type OptionSpec } from './options-schema';
+  import RefinePopover from './RefinePopover.svelte';
+  import SelectionMenu from './SelectionMenu.svelte';
+  import StampSource from './StampSource.svelte';
   import SymmetryControl from './SymmetryControl.svelte';
   import { stage } from './stage.svelte';
   import { SELECTION_TOOLS, SYMMETRY_TOOLS } from './tool-groups';
-  import { CHOICE_ICONS, TOOL_ICONS } from './tool-icons';
+  import { CHOICE_ICONS, toolIconOf } from './tool-icons';
 
   const session = getSession();
   const engine = session.engine;
@@ -37,7 +44,6 @@
   /** Width assumed for a control that has never been measured. */
   const DEFAULT_SLOT_WIDTH = 140;
   const TEXT_KEYS = new Set(['fontFamily', 'fontSize', 'weight', 'italic', 'align']);
-  const FEATHER: SliderSpec = { kind: 'slider', key: 'radius', label: 'Radius', min: 1, max: 64, step: 1, unit: 'px', priority: 1 };
 
   const toolId = $derived.by((): ToolId => {
     void session.rev.tool;
@@ -47,8 +53,8 @@
     void session.rev.tool;
     return engine.getToolOptions(toolId) as unknown as Record<string, unknown>;
   });
-  const label = $derived(engine.tools[toolId].label);
-  const Icon = $derived(TOOL_ICONS[toolId]);
+  const label = $derived(TOOL_META[toolId].label);
+  const Icon = $derived(toolIconOf(toolId, options).icon);
   const allSpecs = $derived(TOOL_OPTION_SPECS[toolId] as readonly OptionSpec[]);
   const specs = $derived(visibleSpecs(allSpecs, options));
   const inline = $derived(specs.filter((s) => s.priority === 1));
@@ -102,18 +108,32 @@
     queueMicrotask(fit);
   });
 
+  // A new bar width re-measures everything; a control of the strip changing
+  // size (the stamp's sticker appearing, a hint, the Move buttons) re-fits
+  // from the widths already known.
   $effect(() => {
     const el = controlsEl;
     if (!el) return;
     let width = el.clientWidth;
     const ro = new ResizeObserver(() => {
-      if (el.clientWidth === width) return;
-      width = el.clientWidth;
-      visibleCount = Number.POSITIVE_INFINITY;
+      if (el.clientWidth !== width) {
+        width = el.clientWidth;
+        visibleCount = Number.POSITIVE_INFINITY;
+      }
       queueMicrotask(fit);
     });
-    ro.observe(el);
-    return () => ro.disconnect();
+    const observeStrip = () => {
+      ro.disconnect();
+      ro.observe(el);
+      for (const child of el.children) ro.observe(child);
+    };
+    observeStrip();
+    const mo = new MutationObserver(observeStrip);
+    mo.observe(el, { childList: true });
+    return () => {
+      ro.disconnect();
+      mo.disconnect();
+    };
   });
 
   const pending = $derived.by(() => {
@@ -214,12 +234,17 @@
     engine.setToolOptions('gradient', { source: 'custom', stops });
   }
 
-  // ---- popovers (text colour, feather) ----
+  // ---- spray: a new dot pattern ----
+  function reshuffle(): void {
+    const seed = engine.getToolOptions('spray').seed;
+    engine.setToolOptions('spray', { seed: (Math.trunc(seed) + 1) | 0 });
+  }
+
+  // ---- popovers (text colour, refine prompt) ----
   let colorOpen = $state(false);
   let colorAnchor: HTMLButtonElement | undefined = $state();
-  let featherOpen = $state(false);
-  let featherAnchor: HTMLElement | undefined = $state();
-  let featherRadius = $state(4);
+  let nameEl: HTMLDivElement | undefined = $state();
+  let selectionAnchor: HTMLElement | null = $state(null);
 </script>
 
 <div
@@ -230,7 +255,7 @@
   data-tool={toolId}
   data-keeps-text-edit
 >
-  <div class="tool-name" aria-hidden="true">
+  <div class="tool-name" aria-hidden="true" bind:this={nameEl}>
     <Icon size={16} strokeWidth={1.75} />
     <span>{label}</span>
   </div>
@@ -254,6 +279,8 @@
           </button>
         {/snippet}
       </Menu>
+    {:else if toolId === 'stamp'}
+      <StampSource stamp={options.stamp as Surface | null} />
     {:else if toolId === 'gradient'}
       <div class="slot">
         <SegmentedControl
@@ -305,6 +332,10 @@
       </Popover>
     {/if}
 
+    {#if toolId === 'spray'}
+      <IconButton icon={Shuffle} label="Reshuffle" tooltip="Reshuffle the spray pattern" size="sm" placement="bottom" onclick={reshuffle} />
+    {/if}
+
     {#if SYMMETRY_TOOLS.includes(toolId)}
       <span class="divider" aria-hidden="true"></span>
       <SymmetryControl />
@@ -312,45 +343,7 @@
 
     {#if SELECTION_TOOLS.includes(toolId)}
       <span class="divider" aria-hidden="true"></span>
-      <div class="group" role="group" aria-label="Selection">
-        <Button size="sm" variant="ghost" onclick={() => engine.selectAll()}>Select all</Button>
-        <Button size="sm" variant="ghost" disabled={!hasSelection} onclick={() => engine.deselect()}>Deselect</Button>
-        <Button size="sm" variant="ghost" disabled={!hasSelection} onclick={() => engine.invertSelection()}>Invert</Button>
-        <span bind:this={featherAnchor} class="anchor">
-          <Button
-            size="sm"
-            variant="ghost"
-            disabled={!hasSelection}
-            aria-haspopup="dialog"
-            aria-expanded={featherOpen}
-            onclick={() => (featherOpen = !featherOpen)}
-          >
-            Feather…
-          </Button>
-        </span>
-      </div>
-      <Popover
-        bind:open={featherOpen}
-        anchor={featherAnchor?.querySelector('button')}
-        label="Feather selection"
-        placement="bottom-start"
-        initialFocus="first"
-      >
-        <div class="feather">
-          <PillSlider spec={FEATHER} value={featherRadius} width="180px" onchange={(v) => (featherRadius = v)} />
-          <Button
-            size="sm"
-            variant="primary"
-            onclick={() => {
-              engine.featherSelection(featherRadius);
-              featherOpen = false;
-              featherAnchor?.querySelector('button')?.focus({ preventScroll: true });
-            }}
-          >
-            Feather
-          </Button>
-        </div>
-      </Popover>
+      <SelectionMenu bind:anchor={selectionAnchor} />
     {/if}
 
     {#if toolId === 'move'}
@@ -367,6 +360,8 @@
       <Button size="sm" variant="ghost" onclick={() => stage.actualSize()}>100%</Button>
     {:else if toolId === 'eyedropper'}
       <span class="hint">Right-click or Alt picks the secondary colour</span>
+    {:else if toolId === 'lasso' && options.kind === 'polygon'}
+      <span class="hint">Click to add corners · double-click or Enter closes · Esc cancels</span>
     {/if}
   </div>
 
@@ -374,6 +369,8 @@
     <MoreOptions toolLabel={label} {specs} {options} onchange={set} hideTrigger={!hasMore && !overflowing} />
   {/if}
 </div>
+
+<RefinePopover anchor={selectionAnchor ?? nameEl} />
 
 <style>
   .options {
@@ -418,15 +415,10 @@
     /* Room for focus rings inside the clipped strip. */
     padding: 4px 3px;
   }
-  .slot,
-  .group,
-  .anchor {
+  .slot {
     display: inline-flex;
     flex: none;
     align-items: center;
-  }
-  .group {
-    gap: 2px;
   }
 
   .hint {
@@ -506,12 +498,6 @@
     height: 16px;
     margin: 0 7px;
     border-radius: var(--radius-full);
-  }
-
-  .feather {
-    display: flex;
-    align-items: center;
-    gap: var(--space-2);
   }
 
   /* Controls that do not fit live in "More options" only. */

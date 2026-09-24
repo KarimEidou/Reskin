@@ -9,9 +9,19 @@
 // pixels). Layers below the active one are pre-composited into one canvas,
 // and so are the layers above it when they all use the normal blend mode
 // (source-over is associative). Painting on the active layer therefore
-// costs one dirty-rect upload plus three drawImage calls per frame. Layers
-// with effects are styled by the pure-JS effect renderer, throttled while a
-// gesture is in progress.
+// costs one dirty-rect upload plus three drawImage calls per frame.
+//
+// Layers with effects get a second, styled canvas, cached until their
+// pixels or effects change. Changed pixels restyle only around the changed
+// rect (./effects.ts `renderStyledRect`), on this thread, when that area is
+// small (painting). A changed look (effect sliders, presets, adjustment
+// previews) restyles the whole layer in a worker (./styled-worker.ts), one
+// request per layer at a time, latest wins: the canvas keeps the previous
+// look until the new one lands (a layer getting its first effects shows
+// its plain pixels meanwhile), and the page never waits for it. Only the
+// first frame after the caches were dropped styles here, so a design never
+// opens without its effects. All of this runs inside `render()`, which the
+// host calls at most once per animation frame.
 //
 // Never imported by the pure core; importing it in Node is harmless, but
 // constructing it needs OffscreenCanvas or a document.
@@ -21,16 +31,16 @@ import type { Layer } from '../doc/types';
 import { layerPixels } from '../doc/document';
 import { hasActiveEffects } from '../doc/effects';
 import type { Surface } from '../raster/surface';
-import { floatToSurface } from '../raster/float-image';
 import type { Viewport } from '../viewport/viewport';
 import type { OverlayPainter, OverlayStyle, HandleShape } from './overlay';
 import { CANVAS_COMPOSITE_OP } from './blend';
-import { renderStyledLayer } from './effects';
+import { effectsReach, renderStyledPixels, renderStyledRect, type StyledPixels } from './effects';
 import { keylines } from './keylines';
+import { styledWorker } from './styled-worker';
 import type { SelectionMask } from '../selection/mask';
 import { selectionOutline } from '../selection/outline';
 import type { Rect } from '../util/rect';
-import { fullRect, unionRect } from '../util/rect';
+import { clipRect, fullRect, inflateRect, rectArea, unionRect } from '../util/rect';
 
 type AnyCanvas = OffscreenCanvas | HTMLCanvasElement;
 type AnyContext = OffscreenCanvasRenderingContext2D | CanvasRenderingContext2D;
@@ -115,11 +125,35 @@ interface LayerEntry {
   surface: Surface | null;
   image: ImageData | null;
   dirty: Rect | null;
+  /** Bumped whenever the layer's pixels change. */
   version: number;
-  /** Styled (effects) rendering. */
-  styled: AnyCanvas | null;
-  styledKey: string;
-  styledAt: number;
+  /** The layer with its effects; null while it has none. */
+  styled: StyledLayer | null;
+}
+
+/** A whole-layer restyle running in the worker. */
+interface StyleJob {
+  /** Effects (JSON) and pixel version it renders. */
+  key: string;
+  version: number;
+  /** Pixel changes made since it started. */
+  dirty: Rect | null;
+}
+
+interface StyledLayer {
+  canvas: AnyCanvas;
+  ctx: AnyContext;
+  /** Effects (JSON) the canvas shows; null before the first render. */
+  key: string | null;
+  /** Pixel version the canvas shows. */
+  version: number;
+  /** Pixel changes since `version`. */
+  dirty: Rect | null;
+  /** Where the canvas may have pixels. */
+  extent: Rect | null;
+  job: StyleJob | null;
+  /** Bumped whenever the canvas changes (cached groups key on it). */
+  rev: number;
 }
 
 interface GroupCache {
@@ -128,8 +162,12 @@ interface GroupCache {
   key: string;
 }
 
-/** Re-style a layer with effects at most this often during a gesture, ms. */
-const RESTYLE_INTERVAL_MS = 120;
+/**
+ * Changed pixels restyle in place while the area to re-render (the change
+ * plus the effects' reach around it) is at most this share of the layer;
+ * larger changes restyle the whole layer in the worker.
+ */
+const RESTYLE_IN_PLACE_SHARE = 0.25;
 
 export class CanvasView {
   private readonly theme: CanvasViewTheme;
@@ -143,6 +181,13 @@ export class CanvasView {
   private outline: { mask: SelectionMask; segments: number[] } | null = null;
   private size = { w: 0, h: 0 };
   private readonly unsubscribe: () => void;
+  private readonly onInvalidate: (() => void) | undefined;
+  /** Reusable pixel buffer of restyles rendered on this thread. */
+  private styleBuffer = new Uint8ClampedArray(0);
+  /** Bumped by `invalidate()`: worker results of an older generation are dropped. */
+  private generation = 0;
+  /** A frame was composed since the caches were dropped (restyles may go to the worker). */
+  private primed = false;
   private disposed = false;
 
   constructor(
@@ -152,6 +197,7 @@ export class CanvasView {
     if (!hasCanvasSupport()) throw new Error('CanvasView needs a browser environment');
     this.theme = { ...DEFAULT_VIEW_THEME, ...opts.theme };
     const onInvalidate = opts.onInvalidate;
+    this.onInvalidate = onInvalidate;
     this.unsubscribe = engine.subscribe((e) => {
       this.onEvent(e);
       if (onInvalidate && e.kind !== 'message' && e.kind !== 'textEdit') onInvalidate();
@@ -167,6 +213,8 @@ export class CanvasView {
 
   /** Drops every cache (e.g. after a theme change). */
   invalidate(): void {
+    this.generation++;
+    this.primed = false;
     this.layers.clear();
     this.below = this.above = this.frame = null;
     this.compareCanvas = null;
@@ -182,6 +230,7 @@ export class CanvasView {
         if (entry) {
           entry.dirty = unionRect(entry.dirty, e.rect);
           entry.version++;
+          CanvasView.pixelsChanged(entry, e.rect);
         }
         break;
       }
@@ -211,17 +260,7 @@ export class CanvasView {
     let e = this.layers.get(layer.id);
     if (!e) {
       const canvas = createCanvas(px.width, px.height);
-      e = {
-        canvas,
-        ctx: context2d(canvas),
-        surface: null,
-        image: null,
-        dirty: null,
-        version: 0,
-        styled: null,
-        styledKey: '',
-        styledAt: 0,
-      };
+      e = { canvas, ctx: context2d(canvas), surface: null, image: null, dirty: null, version: 0, styled: null };
       this.layers.set(layer.id, e);
     }
     if (e.surface !== px) {
@@ -230,6 +269,7 @@ export class CanvasView {
       e.image = surfaceToImageData(px);
       e.dirty = fullRect(px.width, px.height);
       e.version++;
+      CanvasView.pixelsChanged(e, e.dirty);
     }
     if (e.dirty && e.image) {
       const r = e.dirty;
@@ -239,22 +279,105 @@ export class CanvasView {
     return e;
   }
 
+  /** Records changed pixels for the layer's styled canvas (and its restyle in flight). */
+  private static pixelsChanged(e: LayerEntry, r: Rect): void {
+    const s = e.styled;
+    if (!s) return;
+    s.dirty = unionRect(s.dirty, r);
+    if (s.job) s.job.dirty = unionRect(s.job.dirty, r);
+  }
+
   /** The canvas to draw for a layer: styled when it has effects. */
-  private layerCanvas(layer: Layer, now: number): AnyCanvas | null {
+  private layerCanvas(layer: Layer): AnyCanvas | null {
     const e = this.entryFor(layer);
     if (!e) return null;
-    if (!hasActiveEffects(layer.effects)) return e.canvas;
-    const key = `${e.version}|${JSON.stringify(layer.effects)}`;
-    const stale = e.styledKey !== key;
-    const throttled = this.engine.isInteracting && e.styled && now - e.styledAt < RESTYLE_INTERVAL_MS;
-    if (stale && !throttled && e.surface) {
-      const styled = floatToSurface(renderStyledLayer(e.surface, layer.effects));
-      if (!e.styled) e.styled = createCanvas(styled.width, styled.height);
-      context2d(e.styled).putImageData(surfaceToImageData(styled), 0, 0);
-      e.styledKey = key;
-      e.styledAt = now;
+    if (!hasActiveEffects(layer.effects)) {
+      e.styled = null;
+      return e.canvas;
     }
-    return e.styled ?? e.canvas;
+    return this.styledCanvas(layer, e);
+  }
+
+  /** Brings a layer's styled canvas up to date as far as it can this frame (see the file comment). */
+  private styledCanvas(layer: Layer, e: LayerEntry): AnyCanvas {
+    const src = e.surface!;
+    const s = (e.styled ??= CanvasView.createStyled(src));
+    const key = JSON.stringify(layer.effects);
+    if (s.key === key && s.version === e.version) return s.canvas;
+    if (s.key === key && s.dirty && !s.job) {
+      const area = clipRect(inflateRect(s.dirty, effectsReach(layer.effects)), src.width, src.height);
+      const around = area ? clipRect(inflateRect(area, effectsReach(layer.effects)), src.width, src.height) : null;
+      if (rectArea(around) <= RESTYLE_IN_PLACE_SHARE * src.width * src.height) {
+        if (area) this.putStyled(s, renderStyledRect(src, layer.effects, area, this.buffer(rectArea(area))), false);
+        s.version = e.version;
+        s.dirty = null;
+        return s.canvas;
+      }
+    }
+    // Until a restyle lands the layer keeps its look: the plain pixels before its first.
+    const shown = s.key === null ? e.canvas : s.canvas;
+    if (s.job) return shown;
+    const worker = this.primed ? styledWorker() : null;
+    if (worker) {
+      this.restyleInWorker(layer.id, e, s, worker.render(src, key), key);
+      return shown;
+    }
+    this.putStyled(s, renderStyledPixels(src, layer.effects, this.buffer(src.width * src.height)), true);
+    s.key = key;
+    s.version = e.version;
+    s.dirty = null;
+    return s.canvas;
+  }
+
+  private static createStyled(src: Surface): StyledLayer {
+    const canvas = createCanvas(src.width, src.height);
+    return { canvas, ctx: context2d(canvas), key: null, version: -1, dirty: null, extent: null, job: null, rev: 0 };
+  }
+
+  private restyleInWorker(layerId: string, e: LayerEntry, s: StyledLayer, pending: Promise<StyledPixels | null>, key: string): void {
+    const job: StyleJob = { key, version: e.version, dirty: null };
+    s.job = job;
+    const generation = this.generation;
+    const current = () =>
+      !this.disposed && generation === this.generation && this.layers.get(layerId)?.styled === s && s.job === job;
+    pending.then(
+      (styled) => {
+        if (!current()) return;
+        s.job = null;
+        this.putStyled(s, styled, true);
+        s.key = job.key;
+        s.version = job.version;
+        s.dirty = job.dirty;
+        this.onInvalidate?.();
+      },
+      (error: unknown) => {
+        if (!current()) return;
+        // The worker is gone (styledWorker() is null now): restyle here.
+        console.warn('styled layers render on the page from now on:', error);
+        s.job = null;
+        this.onInvalidate?.();
+      },
+    );
+  }
+
+  /** Puts restyled pixels on a styled canvas; `whole` replaces everything it showed. */
+  private putStyled(s: StyledLayer, styled: StyledPixels | null, whole: boolean): void {
+    if (whole) {
+      if (s.extent) s.ctx.clearRect(s.extent.x, s.extent.y, s.extent.w, s.extent.h);
+      s.extent = null;
+    }
+    if (styled) {
+      const { rect, data } = styled;
+      s.ctx.putImageData(new ImageData(data, rect.w, rect.h), rect.x, rect.y);
+      s.extent = unionRect(s.extent, rect);
+    }
+    s.rev++;
+  }
+
+  /** The reusable restyle buffer, at least `pixels` pixels long. */
+  private buffer(pixels: number): Uint8ClampedArray<ArrayBuffer> {
+    if (this.styleBuffer.length < pixels * 4) this.styleBuffer = new Uint8ClampedArray(pixels * 4);
+    return this.styleBuffer;
   }
 
   private group(prev: GroupCache | null): GroupCache {
@@ -271,16 +394,17 @@ export class CanvasView {
     ctx.globalCompositeOperation = 'source-over';
   }
 
+  /** What a cached group shows of a layer: the canvas drawn (and its revision), opacity, blend. */
   private layerKey(layer: Layer): string {
     const e = this.layers.get(layer.id);
-    // `styledKey` says which pixels the styled canvas currently shows: a
-    // restyle throttled during a gesture must still refresh cached groups
-    // once it happens.
-    return `${layer.id}:${e?.version ?? -1}:${layer.opacity}:${layer.blend}:${JSON.stringify(layer.effects)}:${e?.styledKey ?? ''}`;
+    const styled = e?.styled;
+    // A styled layer waiting for its first look still shows its plain pixels.
+    const shown = styled && styled.key !== null ? `s${styled.rev}` : `p${e?.version ?? -1}`;
+    return `${layer.id}:${shown}:${layer.opacity}:${layer.blend}`;
   }
 
   /** Composites the whole document into the frame canvas (document px). */
-  private composeFrame(now: number): AnyCanvas {
+  private composeFrame(): AnyCanvas {
     this.ensureSize();
     const doc = this.engine.doc;
     for (const id of this.layers.keys()) {
@@ -295,7 +419,7 @@ export class CanvasView {
 
     // Make sure uploads/styling happen before keys are computed.
     const canvases = new Map<string, AnyCanvas | null>();
-    for (const l of visible) canvases.set(l.id, this.layerCanvas(l, now));
+    for (const l of visible) canvases.set(l.id, this.layerCanvas(l));
 
     const belowKey = belowLayers.map((l) => this.layerKey(l)).join('|');
     this.below = this.group(this.below);
@@ -341,6 +465,7 @@ export class CanvasView {
         }
       }
     }
+    this.primed = true;
     return this.frame.canvas;
   }
 
@@ -357,7 +482,7 @@ export class CanvasView {
     const now = typeof performance !== 'undefined' ? performance.now() : Date.now();
     const dpr = opts.dpr ?? (typeof devicePixelRatio === 'number' ? devicePixelRatio : 1);
     const doc = this.engine.doc;
-    const frame = this.composeFrame(now);
+    const frame = this.composeFrame();
     const s = viewport.scale;
     const pixelArt = doc.pixelArt !== null;
 

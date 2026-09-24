@@ -46,6 +46,54 @@ describe('TOOL_OPTION_SPECS', () => {
     }
   });
 
+  it('gives every option of every tool a control', () => {
+    // Options set by bespoke controls of the bar, or not user-facing.
+    const elsewhere: Partial<Record<ToolId, readonly string[]>> = {
+      move: ['handleTolerance'], // hit-test slack, internal
+      spray: ['seed'], // the Reshuffle button
+      gradient: ['source', 'stops'], // colours / custom stops editor
+      shape: ['kind'], // the shape menu
+      text: ['fontFamily'], // the font picker
+      stamp: ['stamp'], // the sticker thumbnail and "Choose sticker…"
+    };
+    for (const id of TOOL_ORDER) {
+      const keys = Object.keys(engine.getToolOptions(id) as object);
+      const shown = new Set<string>([...TOOL_OPTION_SPECS[id as ToolId].map((spec) => spec.key), ...(elsewhere[id] ?? [])]);
+      expect(keys.filter((k) => !shown.has(k)), id).toEqual([]);
+    }
+  });
+
+  it('offers the new tools their options, the essentials in the bar', () => {
+    const inBar = (id: ToolId) =>
+      TOOL_OPTION_SPECS[id].filter((spec) => spec.priority === 1).map((spec) => spec.key as string);
+    expect(inBar('lasso')).toEqual(['kind', 'mode', 'feather']);
+    expect(inBar('magicWand')).toEqual(['mode', 'tolerance', 'contiguous', 'sampleMerged']);
+    expect(inBar('spray')).toEqual(['radius', 'density', 'dotSize', 'opacity']);
+    expect(inBar('smudge')).toEqual(['size', 'strength', 'hardness']);
+    expect(inBar('blurSharpen')).toEqual(['mode', 'size', 'strength']);
+    expect(inBar('dodgeBurn')).toEqual(['mode', 'range', 'exposure', 'size']);
+    expect(inBar('stamp')).toEqual(['scale', 'rotation', 'opacity']);
+    const choice = (id: ToolId, key: string) =>
+      (TOOL_OPTION_SPECS[id].find((spec) => spec.key === key) as ChoiceSpec).options.map((o) => o.value);
+    expect(choice('lasso', 'kind')).toEqual(['freehand', 'polygon']);
+    expect(choice('blurSharpen', 'mode')).toEqual(['blur', 'sharpen']);
+    expect(choice('dodgeBurn', 'mode')).toEqual(['dodge', 'burn']);
+    expect(choice('dodgeBurn', 'range')).toEqual(['shadows', 'midtones', 'highlights']);
+  });
+
+  it('keeps slider ranges inside what the engine accepts', () => {
+    const range = (id: ToolId, key: string) => {
+      const spec = TOOL_OPTION_SPECS[id].find((s) => s.key === key) as SliderSpec;
+      return [spec.min, spec.max];
+    };
+    expect(range('spray', 'radius')).toEqual([1, 256]);
+    expect(range('spray', 'dotSize')).toEqual([0.5, 32]);
+    expect(range('blurSharpen', 'blurRadius')).toEqual([0.3, 16]);
+    expect(range('smudge', 'spacing')).toEqual([0.02, 1]);
+    expect(range('stamp', 'scale')).toEqual([0.01, 16]);
+    expect(range('stamp', 'rotation')).toEqual([-180, 180]);
+  });
+
   it('lists every shape kind', () => {
     expect(SHAPE_CHOICES.map((c) => c.value).sort()).toEqual(
       ['arrow', 'ellipse', 'heart', 'line', 'polygon', 'rect', 'roundedRect', 'squircle', 'star'].sort(),
@@ -120,6 +168,10 @@ describe('slider maths', () => {
     expect(formatOption(size, 24)).toBe('24 px');
     expect(formatOption(pct, 0.8)).toBe('80%');
     expect(formatOption(tol, 32)).toBe('32');
+    const angle: SliderSpec = { kind: 'slider', key: 'rotation', label: 'Rotation', min: -180, max: 180, step: 1, unit: '°', priority: 1 };
+    expect(formatOption(angle, -45)).toBe('-45°');
+    const radius: SliderSpec = { kind: 'slider', key: 'blurRadius', label: 'Blur radius', min: 0.3, max: 16, step: 0.1, unit: 'px', priority: 2 };
+    expect(formatOption(radius, 1.5)).toBe('1.5 px');
   });
 });
 

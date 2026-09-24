@@ -62,6 +62,9 @@
 
 <style>
   .rail {
+    /* Slot height and the space around section hairlines (RailGroup). */
+    --rail-slot: 36px;
+    --rail-sep: 5px;
     display: flex;
     flex-direction: column;
     align-items: center;
@@ -80,8 +83,15 @@
     flex: none;
     width: 22px;
     height: 1px;
-    margin: 5px 0;
+    margin: var(--rail-sep) 0;
     background: var(--divider);
+  }
+  /* The small editor (S) keeps every tool and the colour chips in view. */
+  @media (max-height: 700px) {
+    .rail {
+      --rail-slot: 30px;
+      --rail-sep: 2px;
+    }
   }
   .spacer {
     flex: 1 0 8px;
