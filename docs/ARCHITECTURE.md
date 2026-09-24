@@ -96,71 +96,91 @@ maps `E_ACCESSDENIED`. Pixels: `pixels::Rgba` (straight alpha RGBA8).
 Pure (all hosts, unit tested on Linux):
 
 * `ico` — `build_ico(&[Rgba])`, `build_ico_from_pngs(&[SizedPng])`, `parse_ico`,
-  `validate_ico`, `MAX_ICO_BYTES` (1 MiB). <256 → 32-bpp BMP + AND mask; 256 → PNG.
+  `best_frame`, `validate_ico`, `MAX_ICO_BYTES` (1 MiB). <256 → 32-bpp BMP + AND
+  mask; 256 → PNG.
 * `geom` — `place_editor`, `snap_target`, `fling_projection`, `spring_step`,
   `arc_point`, `clamp_into`, `nearest_point_in`, `ease_in_out`.
 * `pixels` — `Rgba`, PNG/base64/data-URL helpers, `bgra_to_rgba`,
   `looks_premultiplied_bgra`, `normalize_corner_icon`.
-* `grpicon` — `rebuild_ico(group: &[u8], get_icon: impl Fn(u16) -> Option<Vec<u8>>) -> Result<Vec<u8>>`
-  (GRPICONDIR/GRPICONDIRENTRY → ICONDIR with file offsets).
-* `urlini` — pure INI reader/writer for `.url` files (`[InternetShortcut]` and
-  `[InternetShortcut.W]`, UTF-8/UTF-16LE/ANSI input): `UrlFile::parse(bytes)`,
-  `.url()`, `.icon_file()`, `.icon_index()`.
-* `paths` — `APP_ID`, `AppDirs { roaming, local, program_data }` (`from_env()`,
-  `at(root)` for tests) with `settings_file()`, `journal_file()`, `library_dir()`,
-  `autosave_file()`, `icons_dir()` (local), `jobs_dir()` (local),
-  `public_icons_dir()` (`%ProgramData%\Reskin\icons`); `slugify`,
+* `grpicon` — `GroupEntry`, `parse_group`, `rebuild_ico(group, get_icon)`
+  (byte-exact ICO from RT_GROUP_ICON + RT_ICON blobs).
+* `urlini` — `UrlFile::parse(bytes)` (infallible; UTF-16LE/BE, UTF-8, ANSI
+  1252; `[InternetShortcut.W]` UTF-7 values preferred) with `url()`,
+  `icon_file()`, `icon_index()`, `get`, `entries`, `shortcut_value`, writers
+  `set`, `remove`, `set_url`, `set_icon`, `set_shortcut_value`,
+  `to_ini_string()`, `to_bytes()` (original encoding); `utf7_encode/decode`.
+* `paths` — `APP_ID`, `AppDirs { roaming, local, program_data }`
+  (`from_env()` is infallible; `at(root)` for tests) with `settings_file()`,
+  `journal_file()`, `library_dir()`, `autosave_file()`, `icons_dir()`,
+  `jobs_dir()`, `public_icons_dir()`, `ensure()`; `slugify`, `sha256_hex`,
   `icon_file_name(name, ico) -> "<slug>-<sha256[..12]>.ico"`,
-  `is_valid_public_icon_name`, `sha256_hex`.
-* `store` — `write_atomic`, `read_json`, `write_json`, `store_icon(dir, name, ico) -> PathBuf`
-  (content-hashed, never overwrites), `Library` (`list/save/load/delete`),
+  `is_valid_public_icon_name`, and string-based Windows path helpers
+  (`normalize_for_compare`, `is_directly_under`, `has_parent_traversal`,
+  `is_unc`, …) that behave the same on every host.
+* `store` — `write_atomic`, `read_json`, `write_json`, `store_icon(dir, name,
+  ico)` (content-hashed, reuses identical files, never overwrites), `new_id()`,
+  `Library::new(dir)` with `list/save/load/delete` (files
+  `{format:"reskin-library", version, id, name, thumb, updatedAt, data}`),
   `autosave_write/autosave_read`.
-* `settings` — `load(path) -> (Settings, first_run)`, `save`, `normalize`,
-  `parse_hotkey`.
-* `history` — `Journal` (`load`, `entries`, `begin(NewEntry) -> id` (persists
-  *pending* before the target is touched), `commit`, `fail`, `mark_restored`,
-  `active_for(target)`, `original_for(target)`, `pending`, `reconcile(probe)`,
-  `referenced_icons`, `gc_icons(dir)`). Applying over an active entry: new
-  entry keeps the chain's first `original`, sets `supersedes`, old entry →
-  `superseded`.
-* `job` — elevated job file: `ElevatedJob { version, id, ops: Vec<JobOp> }`,
-  `JobOp::{SetShortcutIcon, SetUrlIcon, RestoreShortcutIcon, RestoreUrlIcon}`,
-  `validate_job(job, public_desktop, public_icons_dir)`, `trait JobExec`,
-  `execute_job(validated, &mut impl JobExec) -> JobResult`, `result_path(job_path)`.
-  Validation: target absolute, no `..`, not UNC, directly under the Public
-  Desktop (case-insensitive), extension matches op; icon name matches
-  `^[a-z0-9-]{1,64}\.ico$`; ICO parses and ≤1 MiB.
+* `settings` — `load(path) -> (Settings, first_run)` (damaged files backed up),
+  `save(path, &Settings) -> Result<Settings>`, `normalize`, `parse_hotkey(&str)
+  -> Result<Option<Hotkey>>` (`""` = disabled); `Hotkey` `Display` gives
+  "Ctrl+Alt+Shift+R", `to_accelerator()` gives the global-shortcut plugin
+  form ("Control+Alt+Shift+KeyR").
+* `history` — `Journal` persisted as `{version, entries, failures}`:
+  `load` (missing → empty; damaged → backed up; newer version → error),
+  `entries`, `get`, `failure(id)`, `pending`, `entries_for`, `active_for`,
+  `original_for`, `begin(NewEntry) -> id` (persists *pending* first; applying
+  over an active entry inherits the chain's first `original`, sets
+  `supersedes`; refuses a second pending entry for the same target), `commit`,
+  `fail`, `mark_restored`; planning: `plan_undo(id)`, `plan_restore_target`,
+  `plan_restore_all` → `RestorePlan { entry_id, kind, target, name,
+  system_icon, elevated, to: RestoreTo::{Original, Icon, Delete}, scope }`,
+  `finish_plan(&plan, ok)`; `reconcile(probe)`; `referenced_icons`,
+  `gc_icons` (10-minute grace), `gc_icons_older_than`.
+* `job` — `ElevatedJob { version, id, created_at, ops }`,
+  `JobOp::{SetShortcutIcon, SetUrlIcon, RestoreShortcutIcon, RestoreUrlIcon}`
+  (`JobOp::set_icon`, `JobOp::restore_icon`), `new_job`, `validate_job`,
+  `trait JobExec`, `execute_job`, `write_job`, `read_job`, `write_result`,
+  `read_result`, `result_path`, and `run_job_file` (the whole
+  `--elevated-apply` helper). Exit codes `EXIT_OK` 0 / `EXIT_INVALID` 2 /
+  `EXIT_FAILED` 3.
 
 Windows (`win/`, `#[cfg(windows)]`, type-checked on Linux with
 `--target x86_64-pc-windows-msvc`, run on Windows CI):
 
-* `sta` — `Sta::spawn()`, `Sta::run(f) -> R` (blocking; one STA thread with a
-  message pump; COM initialised apartment-threaded). Tauri async commands wrap
-  calls in `spawn_blocking`.
-* `known` — `desktop()`, `public_desktop()`, `program_data()`, `start_menu()`,
-  `common_start_menu()`, `taskbar_pins()`, `roaming_app_data()`, `local_app_data()`
-  (SHGetKnownFolderPath).
-* `extract` — `Inspected` + `inspect_path(&Path)`, `icon_frames(&Path)`,
-  `inspect_system_icon(SystemIconId)`, `system_icon_frames(SystemIconId)`
-  (ladder: .ico frames → RT_GROUP_ICON rebuild → IShellItemImageFactory).
-* `shortcut` — `LinkInfo`, `read_link`, `set_link_icon(path, Option<(&str, i32)>)`
-  (None clears), `create_link(dest, target, args, icon, description)`.
-* `urlfile` — `read_url_icon`, `set_url_icon` (CLSID_InternetShortcut + IPropertySetStorage).
-* `folder` — `read_folder_icon`, `set_folder_icon(path, Option<(&Path, i32)>)`.
-* `sysicons` — `read_system_icon(id) -> OriginalIcon`, `set_system_icon(id, icon)`,
-  `restore_system_icon(id, &OriginalIcon)`.
-* `notify` — `item_updated(path)`, `assoc_changed()`, `rebuild_icon_cache()`.
+* `sta` — `Sta::spawn() -> Result<Sta>`; `run(f) -> Result<R>` (blocking; runs
+  inline on the STA itself; panics become errors), `try_run`, `is_current`.
+  Tauri async commands call it inside `spawn_blocking`.
+* `known` — `desktop`, `public_desktop`, `program_data`, `start_menu`,
+  `common_start_menu`, `roaming_app_data`, `local_app_data`, `windows_dir`,
+  `taskbar_pins` (all `Result<PathBuf>`).
+* `extract` — `Inspected` (+ `icon_data_url()`), `classify`, `inspect_path`,
+  `icon_frames` (largest first), `inspect_system_icon`, `system_icon_frames`,
+  `to_icon_frames`. Ladder: .ico frames → RT_GROUP_ICON rebuild (incl. `.mun`
+  fallback) → WIC for images → IShellItemImageFactory.
+* `shortcut` — `LinkInfo` (+ `icon_path()`), `read_link`, `set_link_icon(path,
+  Option<(&str, i32)>)` (None clears; verified by read-back), `create_link(dest,
+  target, args, Option<(&Path, i32)>, description)`.
+* `urlfile` — `read_url_icon`, `set_url_icon` (InternetShortcut COM object,
+  direct-file fallback if the change didn't stick).
+* `folder` — `read_folder_icon`, `set_folder_icon(path, Option<(&Path, i32)>)`
+  (clear removes the keys and an empty desktop.ini).
+* `sysicons` — `read_system_icon`, `set_system_icon`, `restore_system_icon`,
+  `effective_system_icon`.
+* `notify` — `item_updated`, `assoc_changed`, `rebuild_icon_cache() -> Result`.
 * `access` — `probe_writable(path) -> Access`, `location_of(path) -> ItemLocation`.
-* `desktop` — `find_desktop_icon(path) -> Option<DesktopSpot>` (IFolderView2 +
-  occlusion walk).
-* `elevate` — `run_elevated(exe, args) -> Result<i32>` (runas, wait,
-  `Error::Cancelled` on 1223) and `WinJobExec: job::JobExec`.
-* `fonts` — `system_fonts() -> Vec<String>` (DirectWrite).
-* `wallpaper` — `wallpaper_path()`, `wallpaper_info(monitor) -> WallpaperInfo`,
-  `accent_color()`, `client_area_animation() -> bool`, `is_windows11()`.
-* `contextmenu` — `install(exe)`, `uninstall()`, `is_installed()` (HKCU verbs for
-  lnkfile, InternetShortcut, Directory).
-* `fullscreen` — `is_fullscreen_busy()` (SHQueryUserNotificationState).
+* `desktop` — `find_desktop_icon(path) -> Result<Option<DesktopSpot>>` (also
+  `::{CLSID}`), `desktop_icon_size()`.
+* `elevate` — `run_elevated(exe, args) -> Result<i32>` (blocks ≤ 5 min; call
+  off the STA; `Error::Cancelled` on UAC cancel), `is_elevated()`.
+  `WinJobExec` lives in `src-tauri/src/helper.rs`.
+* `fonts` — `system_fonts()`.
+* `wallpaper` — `wallpaper_path`, `wallpaper_info(Option<(w, h)>)`,
+  `accent_color`, `client_area_animation`, `is_windows11`.
+* `contextmenu` — `install(exe)`, `uninstall()`, `is_installed()`,
+  `is_installed_for(exe)`, `installed_exe()`, `VERB_LABEL`.
+* `fullscreen` — `is_fullscreen_busy()`, `query_fullscreen_busy()`.
 
 ## Rust: src-tauri
 
