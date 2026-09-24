@@ -235,7 +235,7 @@ fn restore_all_summary(report: &RestoreReport) -> (String, bool) {
 
 pub fn quit<R: Runtime>(app: &AppHandle<R>) {
     log::line("quit requested");
-    app.exit(0);
+    crate::exit_with(app, 0);
 }
 
 #[cfg(test)]

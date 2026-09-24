@@ -206,7 +206,7 @@ pub fn on_ready<R: Runtime>(app: &AppHandle<R>, smoke: &Smoke, report: SmokeRepo
                 "smoke: finished with exit code {code} after {:.1} s",
                 t.elapsed().as_secs_f64()
             ));
-            app.exit(code);
+            crate::exit_with(&app, code);
         });
     }
 }

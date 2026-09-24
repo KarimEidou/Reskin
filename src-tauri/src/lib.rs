@@ -26,6 +26,7 @@ mod state;
 mod tray;
 pub mod windows;
 
+use std::sync::atomic::{AtomicI32, Ordering};
 use std::time::Duration;
 
 use ::windows::Win32::UI::WindowsAndMessaging::{
@@ -50,6 +51,25 @@ const WEBVIEW2_DOWNLOAD: &str = "https://go.microsoft.com/fwlink/p/?LinkId=21247
 
 /// Exit code when Reskin cannot start (no WebView2, unreadable history, …).
 const EXIT_CANNOT_START: i32 = 1;
+
+/// The code asked for with [`exit_with`]. Tauri's `AppHandle::exit(code)`
+/// drops the code on Windows (its event loop always stops with 0), so the
+/// process exits with this one instead.
+static EXIT_CODE: AtomicI32 = AtomicI32::new(0);
+
+/// Ends the app with `code` as the process exit code.
+pub(crate) fn exit_with<R: tauri::Runtime>(app: &tauri::AppHandle<R>, code: i32) {
+    EXIT_CODE.store(code, Ordering::SeqCst);
+    app.exit(code);
+}
+
+/// The exit code of a run whose event loop returned `returned`.
+fn final_exit_code(returned: i32) -> i32 {
+    match EXIT_CODE.load(Ordering::SeqCst) {
+        0 => returned,
+        asked => asked,
+    }
+}
 
 /// "release 1a2b3c4" / "debug".
 pub fn build_label() -> String {
@@ -295,7 +315,7 @@ pub fn run(argv: &[String]) -> i32 {
                         &format!("creating the box window failed: {e}"),
                         &format!("Reskin could not open its window:\n{e}"),
                     );
-                    handle.exit(EXIT_CANNOT_START);
+                    exit_with(&handle, EXIT_CANNOT_START);
                     return Ok(());
                 }
             };
@@ -390,10 +410,9 @@ pub fn run(argv: &[String]) -> i32 {
             return EXIT_CANNOT_START;
         }
     };
-    // `run` would end the process with code 0 whatever `app.exit(code)`
-    // asked for (tao exits on its own); `run_return` hands the code back so
-    // the smoke test and helper modes report failures.
-    app.run_return(|_app, event| {
+    // `run` would end the process on its own; `run_return` comes back so
+    // the exit code asked for with `exit_with` can be returned.
+    let returned = app.run_return(|_app, event| {
         // Windows are only ever hidden, never closed; keep running
         // unless an explicit exit code was requested.
         if let tauri::RunEvent::ExitRequested { api, code, .. } = event
@@ -401,12 +420,23 @@ pub fn run(argv: &[String]) -> i32 {
         {
             api.prevent_exit();
         }
-    })
+    });
+    final_exit_code(returned)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_asked_exit_code_wins_over_the_event_loop() {
+        // Tauri's event loop returns 0 even after `exit(3)`.
+        assert_eq!(final_exit_code(0), 0);
+        EXIT_CODE.store(3, Ordering::SeqCst);
+        assert_eq!(final_exit_code(0), 3);
+        EXIT_CODE.store(0, Ordering::SeqCst);
+        assert_eq!(final_exit_code(2), 2);
+    }
 
     #[test]
     fn the_welcome_waits_for_a_start_by_the_user() {
