@@ -1,15 +1,18 @@
 //! The apply journal: begin/commit, crash reconciliation, chains, undo,
-//! restore plans, persistence, icon GC and the size cap.
+//! groups, restore plans, persistence, sharing the file between processes,
+//! icon GC and the size cap.
 
 use std::collections::{BTreeMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::mpsc;
 use std::time::{Duration, SystemTime};
 
 use reskin_core::Error;
 use reskin_core::history::{
-    GC_GRACE, Journal, MAX_INACTIVE_ENTRIES, NewEntry, PlanScope, Probe, RestoreTo,
+    GC_GRACE, IN_FLIGHT_GRACE, Journal, MAX_INACTIVE_ENTRIES, NewEntry, PlanScope, Probe,
+    RestoreTo,
 };
 use reskin_core::model::{EntryState, HistoryEntry, OriginalIcon, SystemIconId, TargetKind};
 use reskin_core::store;
@@ -66,6 +69,7 @@ fn entry(target: &str, icon: &str, current: OriginalIcon) -> NewEntry {
         elevated: false,
         thumb: Some("dGh1bWI=".into()),
         design_name: Some("Neon".into()),
+        group: None,
     }
 }
 
@@ -501,12 +505,13 @@ fn persistence_round_trips_everything() {
     assert_eq!(raw["entries"].as_array().unwrap().len(), 4);
     assert_eq!(raw["entries"][0]["iconPath"], r"C:\icons\a.ico");
     assert_eq!(raw["failures"][failed.as_str()], "nope");
-    // No temp files are left next to the journal.
-    let names: Vec<String> = fs::read_dir(tmp.path())
+    // No temp files are left next to the journal, only its lock file.
+    let mut names: Vec<String> = fs::read_dir(tmp.path())
         .unwrap()
         .map(|d| d.unwrap().file_name().to_string_lossy().into_owned())
         .collect();
-    assert_eq!(names, ["journal.json"]);
+    names.sort();
+    assert_eq!(names, ["journal.json", "journal.json.lock"]);
 }
 
 #[test]
@@ -741,6 +746,7 @@ fn fabricated(id: &str, target: &str, state: EntryState) -> HistoryEntry {
         applied_at: 1.0,
         restored_at: None,
         supersedes: None,
+        group: None,
     }
 }
 
@@ -842,4 +848,257 @@ fn journal_cap_falls_back_to_the_oldest_superseded_entries() {
     assert_eq!(ids[0], "s10");
     assert_eq!(ids[MAX_INACTIVE_ENTRIES - 1], "s509");
     assert_eq!(ids[MAX_INACTIVE_ENTRIES], id);
+}
+
+// ---------------------------------------------------------------------------
+// Groups (an apply that also updated matching pins)
+// ---------------------------------------------------------------------------
+
+const PIN_1: &str = r"C:\Users\Kim\AppData\Roaming\Microsoft\Windows\Start Menu\Programs\App.lnk";
+const PIN_2: &str =
+    r"C:\Users\Kim\AppData\Roaming\Microsoft\Internet Explorer\Quick Launch\User Pinned\TaskBar\App.lnk";
+
+/// An apply of `icon` to `APP` that also changed both pins.
+fn apply_with_pins(j: &mut Journal, icon: &str) -> [String; 3] {
+    let main = apply(j, APP, icon, original("app.exe", 0));
+    let [pin_1, pin_2] = [PIN_1, PIN_2].map(|pin| {
+        let mut e = entry(pin, icon, original("app.exe", 0));
+        e.group = Some(main.clone());
+        let id = j.begin(e).unwrap();
+        j.commit(&id).unwrap();
+        id
+    });
+    [main, pin_1, pin_2]
+}
+
+#[test]
+fn undoing_an_apply_undoes_the_pins_it_changed() {
+    let tmp = TempDir::new("group");
+    let mut j = Journal::load(tmp.journal_path()).unwrap();
+    let [main, pin_1, pin_2] = apply_with_pins(&mut j, "a.ico");
+    assert_eq!(j.get(&pin_1).unwrap().group.as_deref(), Some(main.as_str()));
+    assert_eq!(j.get(&main).unwrap().group, None);
+    // The group survives a reload.
+    let reloaded = Journal::load(tmp.journal_path()).unwrap();
+    assert_eq!(
+        reloaded.get(&pin_2).unwrap().group.as_deref(),
+        Some(main.as_str())
+    );
+
+    let plans = j.plan_undo_group(&main).unwrap();
+    let targets: Vec<&str> = plans.iter().map(|p| p.target.as_str()).collect();
+    assert_eq!(targets, [APP, PIN_1, PIN_2]);
+    assert_eq!(plans[0], j.plan_undo(&main).unwrap());
+    for p in &plans {
+        assert_eq!(p.to, RestoreTo::Original(original("app.exe", 0)));
+        j.finish_plan(p, true).unwrap();
+    }
+    for id in [&main, &pin_1, &pin_2] {
+        assert_eq!(state(&j, id), EntryState::Restored, "{id}");
+    }
+
+    // Undoing a pin on its own leaves the rest of the group alone.
+    let [main, pin_1, pin_2] = apply_with_pins(&mut j, "b.ico");
+    assert_eq!(j.plan_undo_group(&pin_1).unwrap().len(), 1);
+    // A pin changed again since is no longer undone with the group.
+    let later = apply(&mut j, PIN_2, "c.ico", original("b.ico", 0));
+    let plans = j.plan_undo_group(&main).unwrap();
+    let ids: Vec<&str> = plans.iter().map(|p| p.entry_id.as_str()).collect();
+    assert_eq!(ids, [main.as_str(), pin_1.as_str()]);
+    assert_eq!(state(&j, &pin_2), EntryState::Superseded);
+    assert_eq!(j.active_for(PIN_2).unwrap().id, later);
+    assert!(j.plan_undo_group("missing").is_err());
+}
+
+#[test]
+fn entries_from_before_groups_still_load() {
+    let tmp = TempDir::new("group-compat");
+    let old = fabricated("old", APP, EntryState::Applied);
+    let raw = serde_json::to_value(&old).unwrap();
+    assert!(raw.get("group").is_none(), "an unset group is not written");
+    write_journal(&tmp.journal_path(), &[old.clone()], &BTreeMap::new());
+    let j = Journal::load(tmp.journal_path()).unwrap();
+    assert_eq!(j.get("old").unwrap(), &old);
+    assert_eq!(j.recovered_backup(), None);
+}
+
+// ---------------------------------------------------------------------------
+// Several processes (the app and `--restore-all`)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn another_process_restoring_everything_is_not_undone_by_the_app() {
+    let tmp = TempDir::new("two-processes");
+    let other = r"C:\Users\Kim\Desktop\Other.lnk";
+    let mut app = Journal::load(tmp.journal_path()).unwrap();
+    let first = apply(&mut app, APP, "a.ico", original("app.exe", 0));
+
+    // `--restore-all` runs in a second process while the app keeps its
+    // journal open.
+    let mut cli = Journal::load(tmp.journal_path()).unwrap();
+    for plan in cli.plan_restore_all() {
+        cli.finish_plan(&plan, true).unwrap();
+    }
+    assert_eq!(state(&cli, &first), EntryState::Restored);
+
+    // The app's next change starts from the file, not from its stale copy.
+    let second = apply(&mut app, other, "o.ico", original("o.exe", 0));
+    let on_disk = Journal::load(tmp.journal_path()).unwrap();
+    assert_eq!(state(&on_disk, &first), EntryState::Restored);
+    assert_eq!(state(&on_disk, &second), EntryState::Applied);
+    assert_eq!(app.entries(), on_disk.entries());
+    assert!(app.active_for(APP).is_none());
+
+    // Readers catch up with `refresh`.
+    cli.mark_restored(&second).unwrap();
+    assert_eq!(state(&app, &second), EntryState::Applied);
+    app.refresh().unwrap();
+    assert_eq!(state(&app, &second), EntryState::Restored);
+}
+
+#[test]
+fn the_lock_keeps_other_processes_out_until_released() {
+    let tmp = TempDir::new("lock");
+    let path = tmp.journal_path();
+    let mut first = Journal::load(&path).unwrap();
+    let mut second = Journal::load(&path).unwrap();
+    let (tx, rx) = mpsc::channel();
+    let (id, worker) = first
+        .locked(|j| {
+            let id = j.begin(entry(APP, "a.ico", original("x", 0)))?;
+            let worker = std::thread::spawn(move || {
+                tx.send(second.begin(entry(APP, "b.ico", original("x", 0))))
+                    .unwrap();
+            });
+            // The other journal waits for the lock however long it is held.
+            assert!(rx.recv_timeout(Duration::from_millis(300)).is_err());
+            j.commit(&id)?;
+            Ok((id, worker))
+        })
+        .unwrap();
+    let second_id = rx.recv_timeout(Duration::from_secs(20)).unwrap().unwrap();
+    worker.join().unwrap();
+    // It saw everything done under the lock: its entry builds on the
+    // committed one instead of clashing with a pending one.
+    let on_disk = Journal::load(&path).unwrap();
+    assert_eq!(state(&on_disk, &id), EntryState::Applied);
+    let second = on_disk.get(&second_id).unwrap();
+    assert_eq!(second.state, EntryState::Pending);
+    assert_eq!(second.supersedes.as_deref(), Some(id.as_str()));
+}
+
+#[test]
+fn loading_does_not_create_a_missing_folder() {
+    let tmp = TempDir::new("no-folder");
+    let path = tmp.path().join("roaming").join("journal.json");
+    let j = Journal::load(&path).unwrap();
+    assert!(j.entries().is_empty());
+    assert!(!tmp.path().join("roaming").exists());
+}
+
+#[test]
+fn reconcile_leaves_changes_another_process_may_still_be_making() {
+    let tmp = TempDir::new("reconcile-settled");
+    let old = r"C:\Users\Kim\Desktop\Old.lnk";
+    let young = r"C:\Users\Kim\Desktop\Young.lnk";
+    let landed = r"C:\Users\Kim\Desktop\Landed.lnk";
+    // Left pending long ago (applied 1 ms after the epoch).
+    write_journal(
+        &tmp.journal_path(),
+        &[fabricated("stale", old, EntryState::Pending)],
+        &BTreeMap::new(),
+    );
+    let mut app = Journal::load(tmp.journal_path()).unwrap();
+    let in_flight = app.begin(entry(young, "y.ico", original("y", 0))).unwrap();
+    let done = app.begin(entry(landed, "l.ico", original("l", 0))).unwrap();
+
+    let mut cli = Journal::load(tmp.journal_path()).unwrap();
+    let report = cli
+        .reconcile_settled(
+            |e| {
+                if e.target == landed {
+                    Probe::PointsToIcon
+                } else {
+                    Probe::PointsElsewhere
+                }
+            },
+            IN_FLIGHT_GRACE,
+        )
+        .unwrap();
+    assert_eq!(report.applied, [done.clone()]);
+    assert_eq!(report.failed, ["stale"]);
+    assert_eq!(report.in_flight, [in_flight.clone()]);
+    assert_eq!(state(&cli, &in_flight), EntryState::Pending);
+    // The app finishes its apply as if nothing happened.
+    app.commit(&in_flight).unwrap();
+    assert_eq!(state(&app, "stale"), EntryState::Failed);
+    assert_eq!(state(&app, &done), EntryState::Applied);
+    // Without a grace period (the app at startup) nothing waits.
+    let pending = app.begin(entry(young, "z.ico", original("y", 0))).unwrap();
+    let report = app.reconcile(|_| Probe::PointsElsewhere).unwrap();
+    assert_eq!(report.failed, [pending]);
+    assert!(report.in_flight.is_empty());
+}
+
+// ---------------------------------------------------------------------------
+// Public-Desktop icons released by a restore
+// ---------------------------------------------------------------------------
+
+#[test]
+fn icons_released_by_plans_are_only_this_journals_unneeded_ones() {
+    let tmp = TempDir::new("released");
+    let public = r"C:\ProgramData\Reskin\icons";
+    let icon = |name: &str| format!(r"{public}\{name}");
+    let one = r"C:\Users\Public\Desktop\One.lnk";
+    let two = r"C:\Users\Public\Desktop\Two.lnk";
+    let three = r"C:\Users\Public\Desktop\Three.lnk";
+    let mut j = Journal::load(tmp.journal_path()).unwrap();
+    apply(&mut j, one, &icon("one-aaaaaaaaaaaa.ico"), original("x", 0));
+    let one_b = apply(&mut j, one, &icon("one-bbbbbbbbbbbb.ico"), original("x", 0));
+    apply(&mut j, two, &icon("shared-cccccccccccc.ico"), original("y", 0));
+    apply(&mut j, three, &icon("shared-cccccccccccc.ico"), original("z", 0));
+    // An earlier elevated apply failed after writing its icon.
+    let failed = j
+        .begin(entry(two, &icon("left-dddddddddddd.ico"), original("y", 0)))
+        .unwrap();
+    j.fail(&failed, "helper failed").unwrap();
+    // Icons elsewhere are never listed.
+    apply(
+        &mut j,
+        r"C:\Users\Kim\Desktop\Mine.lnk",
+        r"C:\Users\Kim\icons\mine-eeeeeeeeeeee.ico",
+        original("m", 0),
+    );
+
+    // Nothing restored: only the leftover goes.
+    assert_eq!(j.icons_released_by(&[], public), ["left-dddddddddddd.ico"]);
+    // Undoing `one` once goes back to its first icon, which stays.
+    let undo = j.plan_undo(&one_b).unwrap();
+    assert_eq!(
+        j.icons_released_by(std::slice::from_ref(&undo), public),
+        ["left-dddddddddddd.ico", "one-bbbbbbbbbbbb.ico"]
+    );
+    // The shared icon stays while `three` still uses it.
+    let plans = [
+        j.plan_restore_target(one).unwrap(),
+        j.plan_restore_target(two).unwrap(),
+    ];
+    assert_eq!(
+        j.icons_released_by(&plans, public),
+        [
+            "left-dddddddddddd.ico",
+            "one-aaaaaaaaaaaa.ico",
+            "one-bbbbbbbbbbbb.ico"
+        ]
+    );
+    let all = j.plan_restore_all();
+    assert_eq!(
+        j.icons_released_by(&all, &format!(r"{public}\")),
+        [
+            "left-dddddddddddd.ico",
+            "one-aaaaaaaaaaaa.ico",
+            "one-bbbbbbbbbbbb.ico",
+            "shared-cccccccccccc.ico"
+        ]
+    );
 }
