@@ -561,7 +561,9 @@ describe('EditorSession robustness', () => {
     const red = await frameOf([255, 0, 0, 255]);
     const deps = makeDeps({ a: red, img: red }, applied);
     vi.mocked(deps.commands.libraryLoad).mockResolvedValue(await new Engine().serialize());
+    vi.mocked(deps.commands.readProject).mockResolvedValue(await new Engine().serialize());
     deps.inspected.set(item('a').path, item('a'));
+    const project = item('p', { kind: 'project', modes: [], path: 'C:\\p.reskin' });
     const drafted = new Engine();
     drafted.newDocument({ name: 'a', source: { kind: 'shortcut', name: 'a', path: item('a').path } });
     const draft = await drafted.serialize();
@@ -570,8 +572,11 @@ describe('EditorSession robustness', () => {
     const opens: [string, Mock, () => Promise<unknown>][] = [
       ['a queued item', deps.commands.itemFrames as Mock, () => s.openItems([item('a')], { replace: true })],
       ['an image', deps.commands.itemFrames as Mock, () => s.openItems([image('img')], { replace: true })],
+      ['a project file', deps.commands.readProject as Mock, () => s.openItems([project], { replace: true })],
+      ['an item and a project file', deps.commands.itemFrames as Mock, () => s.openItems([item('a'), project], { replace: true })],
       ['a Library design', deps.commands.libraryLoad as Mock, () => s.openLibraryDesign('lib1')],
       ['a recovered design', deps.commands.inspectPaths as Mock, () => s.restoreAutosave(draft)],
+      ['a recovered design with its item', deps.commands.itemFrames as Mock, () => s.restoreAutosave(draft)],
       ['an item and a picture', deps.commands.itemFrames as Mock, () => s.importSources([{ kind: 'item', info: item('a') }, pasted], 'queue')],
     ];
     for (const [what, command, open] of opens) {
@@ -594,17 +599,56 @@ describe('EditorSession robustness', () => {
     s.dispose();
   });
 
-  it('a picture being queued as the editor closes does not join the next queue', async () => {
+  it('what is still being added to the open design or queue as the editor closes stays out of the next open', async () => {
     const deps = makeDeps({ a: await frameOf([255, 0, 0, 255]) }, applied);
     const s = new EditorSession(deps, new Engine());
+    const project = item('p', { kind: 'project', modes: [], path: 'C:\\p.reskin' });
+    // An item, a picture queued as a design of its own, another item.
     await s.openItems([item('a')]);
     const encoded = deferred<string>();
     vi.spyOn(s, 'encodeProject').mockReturnValueOnce(encoded.promise);
-    const importing = s.importSources([{ kind: 'image', name: 'Pasted image', surface: new Surface(8, 8) }], 'queue');
+    const importing = s.importSources(
+      [
+        { kind: 'item', info: item('b') },
+        { kind: 'image', name: 'Pasted image', surface: new Surface(8, 8) },
+        { kind: 'item', info: item('c') },
+      ],
+      'queue',
+    );
+    // The editor closed; the next open's Prepare resets the session and shows the Start view.
     s.reset();
+    s.navigate('start');
     encoded.resolve(await new Engine().serialize());
+    // Nothing joined a queue that is still there.
     expect(await importing).toBe(0);
-    expect(s.queue).toEqual([]);
+    expect([s.queue.length, s.view]).toEqual([0, 'start']);
+    // An image becoming a layer, then a project joining the queue.
+    await s.openItems([item('a')]);
+    const release = holdNext(deps.commands.itemFrames as Mock);
+    const calls = vi.mocked(deps.commands.itemFrames).mock.calls.length;
+    const adding = s.openItems([image('img'), project]);
+    await vi.waitFor(() => expect(deps.commands.itemFrames).toHaveBeenCalledTimes(calls + 1));
+    s.reset();
+    s.navigate('start');
+    release();
+    await adding;
+    expect([s.hasDesign, s.queue.length, s.view]).toEqual([false, 0, 'start']);
+    s.dispose();
+  });
+
+  it('a switch that fails after the editor closed puts nothing back: the next open goes ahead', async () => {
+    const { s, deps } = await queued();
+    s.queue[1]!.project = '{"format":"reskin","version":1';
+    const release = holdNext(deps.commands.itemFrames as Mock);
+    const loading = s.select(1);
+    await vi.waitFor(() => expect(deps.commands.itemFrames).toHaveBeenCalledTimes(2));
+    s.reset();
+    const opening = s.openItems([item('c')], { replace: true });
+    release();
+    // Nobody is told: the queue it was for is gone.
+    await Promise.all([loading, opening]);
+    expect([s.item?.id, s.currentIndex, s.hasDesign]).toEqual(['c', 0, true]);
+    expect(center(s)).toEqual([0, 0, 255, 255]);
     s.dispose();
   });
 
@@ -1176,6 +1220,16 @@ describe('EditorSession "Apply style to all" and administrator approval', () => 
     s.dispose();
   });
 
+  it('personal copies asked for where none can be made: nothing runs, and the batch still reports', async () => {
+    const { s, deps } = await batch({ b: admin('t-b') });
+    await s.applyStyleToAll();
+    await s.personalCopy();
+    expect(s.elevation).toBeNull();
+    expect(deps.applied.filter((r) => r.mode === 'personalCopy')).toEqual([]);
+    expect(toasts()).toEqual([expect.objectContaining({ kind: 'warning', message: 'Applied to 2 of 3 icons.' })]);
+    s.dispose();
+  });
+
   it('keeps why an item failed on the item', async () => {
     const { s } = await batch({
       b: { type: 'failed', message: 'The shortcut is read-only.', hint: 'Clear its Read-only attribute.' },
@@ -1369,6 +1423,28 @@ describe('EditorSession autosave', () => {
     await s.flushAutosave();
     expect(writes(deps)).toEqual([expect.stringContaining('"format":"reskin"'), '']);
     s.dispose();
+  });
+
+  it('a design undone back to where it was loaded and put away before its autosave came leaves no draft either', async () => {
+    const blank = await new Engine().serialize();
+    const leaves: [string, (s: EditorSession) => Promise<unknown> | void][] = [
+      ['switched', (s) => s.select(1)],
+      ['removed', (s) => s.remove(0)],
+      ['replaced by a blank design', (s) => s.newBlank()],
+      ['replaced by a Library design', (s) => s.openLibraryDesign('lib1')],
+    ];
+    for (const [how, leave] of leaves) {
+      const { s, deps } = await queued();
+      vi.mocked(deps.commands.libraryLoad).mockResolvedValue(blank);
+      paint(s, [9, 9, 9, 255]);
+      await vi.advanceTimersByTimeAsync(2500);
+      s.engine.undo();
+      await leave(s);
+      await vi.advanceTimersByTimeAsync(5000);
+      await s.flushAutosave();
+      expect(writes(deps), how).toEqual([expect.stringContaining('"format":"reskin"'), '']);
+      s.dispose();
+    }
   });
 
   it('a design written as a switch put it away, then kept open (the switch failed) and undone, leaves no draft', async () => {

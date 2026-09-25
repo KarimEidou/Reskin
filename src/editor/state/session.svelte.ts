@@ -322,7 +322,12 @@ export class EditorSession {
   private generation = 0;
   private switchChain: Promise<void> = Promise.resolve();
   private readonly autosaver: Autosave;
-  /** The live autosave holds a draft of the open design (see `produceAutosave`). */
+  /**
+   * The live autosave holds a draft of the open design, or of the one it
+   * replaced in place (New blank, a Library design): once the open design
+   * is clean, that draft goes (see `produceAutosave`). A design put away
+   * in the queue takes its draft along (see `selectNow`).
+   */
   private draftWritten = false;
   private readonly unsubscribe: () => void;
   private disposed = false;
@@ -560,8 +565,6 @@ export class EditorSession {
     this.standalone = opts.standalone ?? null;
     this.cleanEntry = this.engine.currentEntryId;
     this.baseUnsaved = opts.unsaved ?? false;
-    // Whatever the autosave holds is some other design's.
-    this.draftWritten = false;
     this.hasDesign = true;
   }
 
@@ -676,7 +679,8 @@ export class EditorSession {
       } else if (this.enqueue(s.info)) {
         added++;
       }
-      if (generation !== this.generation) return added;
+      // Reset meanwhile: the queue they joined is gone.
+      if (generation !== this.generation) return 0;
     }
     this.view = 'edit';
     return added;
@@ -838,7 +842,9 @@ export class EditorSession {
     await this.replaceDesign(async () => {
       await this.stashCurrent();
       if (generation !== this.generation) return;
-      const previous = { index: this.currentIndex, original: this.original };
+      const previous = { index: this.currentIndex, original: this.original, draftWritten: this.draftWritten };
+      // Put away: a draft of it the autosave holds is a queued design's now.
+      this.draftWritten = false;
       const entry = this.queue[index]!;
       const status = entry.status;
       this.currentIndex = index;
@@ -851,6 +857,7 @@ export class EditorSession {
         // Nothing replaced the design in the engine: it stays the open one.
         this.currentIndex = previous.index;
         this.original = previous.original;
+        this.draftWritten = previous.draftWritten;
         entry.status = status;
         throw e;
       }
@@ -891,7 +898,8 @@ export class EditorSession {
     if (this.queueLocked || !this.queue[index]) return false;
     const generation = this.generation;
     const wasCurrent = index === this.currentIndex;
-    const dropped = wasCurrent ? this.unsaved : this.queue[index]!.unsaved;
+    // With its unsaved changes, or (the open one) a draft written before they were undone.
+    const dropped = wasCurrent ? this.unsaved || this.draftWritten : this.queue[index]!.unsaved;
     this.queue.splice(index, 1);
     if (index < this.currentIndex) this.currentIndex -= 1;
     if (wasCurrent) {
@@ -976,6 +984,8 @@ export class EditorSession {
     entry.project = project;
     await thumb;
     if (autosave) await this.autosaver.write(project).catch((e: unknown) => console.warn('autosave failed', e));
+    // Undone back to where it was loaded since its draft was written: the draft goes.
+    else if (!entry.unsaved && this.draftWritten) await this.settleAutosave();
   }
 
   /**
@@ -1587,10 +1597,10 @@ export class EditorSession {
   // 2 s after the last edit (at least every 10 s while editing goes on),
   // before another design is opened and when the editor closes; a design
   // without unsaved changes is never written. Once the open design is
-  // safe (applied, saved to the Library, exported as a project) or clean
-  // again (its changes undone), or removed from the queue with its
-  // changes, the slot takes another queued design with unsaved changes, or
-  // empties.
+  // safe (applied, saved to the Library, exported as a project), clean
+  // again (its changes undone) or gone with its changes (removed from the
+  // queue, a new blank or Library design in its place), the slot takes
+  // another queued design with unsaved changes, or empties.
 
   /**
    * What the scheduled autosave writes: the open design while it has
