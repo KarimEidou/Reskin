@@ -62,6 +62,7 @@ const LEAST_CONTRAST_SURFACE: Readonly<Record<ResolvedTheme, Rgb>> = {
  */
 const MIN_FILL_CONTRAST = 3;
 const MIN_TEXT_CONTRAST = 4.5;
+const WHITE_TEXT: Rgb = { r: 255, g: 255, b: 255 };
 
 /**
  * The strongest accent tint accent text is drawn on (tokens.css:
@@ -98,6 +99,8 @@ export function accentVars(accent: Rgb, theme: ResolvedTheme): Record<string, st
   // so towards the text too.
   const tinted = blend(parseHex(toHex(fill))!, MAX_ACCENT_TINT, surface);
   const text = withContrast(dark ? ramp.light3 : ramp.dark2, tinted, MIN_TEXT_CONTRAST, towards);
+  // The box's count badge: white numbers on a gradient between these two.
+  const badge = (rgb: Rgb) => withContrast(rgb, WHITE_TEXT, MIN_TEXT_CONTRAST, 'darker');
   const vars: Record<string, Rgb> = {
     'accent-base': ramp.base,
     accent: fill,
@@ -108,6 +111,8 @@ export function accentVars(accent: Rgb, theme: ResolvedTheme): Record<string, st
     'accent-vivid': ramp.vivid,
     'accent-light': ramp.light2,
     'accent-dark': ramp.dark2,
+    'accent-badge-top': badge(ramp.vivid),
+    'accent-badge-bottom': badge(ramp.dark2),
   };
   const out: Record<string, string> = {};
   for (const [name, rgb] of Object.entries(vars)) {

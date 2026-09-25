@@ -713,7 +713,12 @@
     display: grid;
     place-items: center;
     border-radius: 12px;
-    background: linear-gradient(180deg, rgb(var(--bv-glow-rgb) / 1), rgb(var(--accent-dark-rgb, 83 31 199) / 1));
+    /* Shades of the accent that keep the white count legible (theme.ts). */
+    background: linear-gradient(
+      180deg,
+      rgb(var(--accent-badge-top-rgb, 120 95 236) / 1),
+      rgb(var(--accent-badge-bottom-rgb, 83 31 199) / 1)
+    );
     color: #fff;
     font-size: 12.5px;
     font-weight: 700;

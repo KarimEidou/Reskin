@@ -193,6 +193,20 @@ describe('accent colours', () => {
     });
   }
 
+  it('keep the white count on the box badge legible across its gradient', () => {
+    const white = { '#fff': { r: 255, g: 255, b: 255 } };
+    const failures: string[] = [];
+    for (const theme of ['dark', 'light'] as const) {
+      for (const accent of ACCENTS) {
+        const vars = accentVars(parseHex(accent)!, theme);
+        const shades = gradient(parseHex(vars['--accent-badge-top']!)!, parseHex(vars['--accent-badge-bottom']!)!);
+        const named = Object.fromEntries(shades.map((c, step) => [`badge at ${step * 10}% (${theme})`, c]));
+        failures.push(...below(4.5, white, named).map((f) => `${accent}: ${f}`));
+      }
+    }
+    expect(failures).toEqual([]);
+  });
+
   for (const theme of ['dark', 'light'] as const) {
     it(`moves hover and pressed with a fill that had to move (${theme})`, () => {
       const moved = ACCENTS.filter((accent) => {

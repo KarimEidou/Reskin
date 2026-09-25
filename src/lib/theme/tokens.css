@@ -134,6 +134,10 @@
   --accent-light-rgb: 177 172 255;
   --accent-dark: #531fc7;
   --accent-dark-rgb: 83 31 199;
+  --accent-badge-top: #785fec;
+  --accent-badge-top-rgb: 120 95 236;
+  --accent-badge-bottom: #531fc7;
+  --accent-badge-bottom-rgb: 83 31 199;
   --accent-soft: rgb(var(--accent-rgb) / 0.16);
   --accent-soft-strong: rgb(var(--accent-rgb) / 0.26);
   --accent-border: rgb(var(--accent-rgb) / 0.55);
