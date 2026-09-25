@@ -50,8 +50,9 @@ Once Windows CI is green, v1.0.0 is published as a GitHub Release by pushing a `
     Replaces `data-tauri-drag-region` (eats mouseup, toggles maximize on double-click).
 - **Editor command mailbox**: Rust→editor commands go through a sequence-numbered long-poll `invoke('editor_next', {after})`
   with a 25 s heartbeat, not events (events to hidden-created windows can be dropped, tauri#15652). The box uses normal events.
-- **One STA COM worker thread** with a message pump runs all shell work. Commands that use COM or read or write files are
-  `async` and do that work off the main thread (Tauri runs synchronous commands there, where both windows and the handoff run).
+- **One STA COM worker thread** with a message pump runs all shell work. Commands that use COM or read or write files (a log
+  line aside) are `async` and do that work off the main thread (Tauri runs synchronous commands there, where both windows and
+  the handoff run).
 - **Security**: JS gets opaque `ItemId`s from `inspect_paths`; Rust keeps `ItemId → path`. Mutating commands never accept raw
   paths. Capabilities split per window (`capabilities/box.json`, `capabilities/editor.json`); app-command permissions from
   `build.rs` via `AppManifest::commands`. Strict CSP: `default-src 'self'`, `img-src 'self' data: blob:`,

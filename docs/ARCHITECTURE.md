@@ -654,11 +654,13 @@ Windows (`win/`, `#[cfg(windows)]`, type-checked on Linux with
 * `commands/*.rs`: `boot, box_cmds, editor_cmds, library, system, settings`
   (and the commands of `items.rs`, `apply.rs`, `restore.rs`). Tauri runs a
   synchronous command on the main thread, where both windows and the
-  handoff run, so every command that uses COM or reads or writes files is
-  `async` and does that work in `spawn_blocking` (shell work through
-  `Sta::run`). The synchronous ones only read state or the registry, show
-  or hide a window or the box menu, add a log line, or hand a link to the
-  opener plugin.
+  handoff run, so every command that uses COM or reads or writes files (a
+  log line aside) is `async` and does that work off it: in `spawn_blocking`
+  (shell work through `Sta::run`), except that `box_drag` saves the
+  position it returns on the async runtime. The synchronous ones only read
+  or record state, read Windows settings, show or hide a window or the box
+  menu, add a log line, hand a link to the opener plugin, start their work
+  on a thread of their own (`editor_close`, `smoke_ready`) or quit.
   `settings::rebuild_windows` (compatibility mode) and the low-memory drop
   destroy the editor through `morph::destroy_editor`, which returns once
   tauri has released its label and the mailbox moved on, so the next open
