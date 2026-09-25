@@ -1,0 +1,26 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="330" height="64" viewBox="0 0 330 64" role="img" aria-label="Download for Windows">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#7c5cff"/>
+      <stop offset="0.6" stop-color="#4f7dff"/>
+      <stop offset="1" stop-color="#2a9df4"/>
+    </linearGradient>
+    <linearGradient id="shine" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#fff" stop-opacity="0.22"/>
+      <stop offset="0.5" stop-color="#fff" stop-opacity="0"/>
+    </linearGradient>
+  </defs>
+  <rect width="330" height="64" rx="16" fill="url(#bg)"/>
+  <rect width="330" height="64" rx="16" fill="url(#shine)"/>
+  <rect x="0.75" y="0.75" width="328.5" height="62.5" rx="15.25" fill="none" stroke="#fff" stroke-opacity="0.28" stroke-width="1.5"/>
+  <g fill="#fff" transform="translate(26 20)">
+    <rect width="11" height="11" rx="1"/>
+    <rect x="13" width="11" height="11" rx="1"/>
+    <rect y="13" width="11" height="11" rx="1"/>
+    <rect x="13" y="13" width="11" height="11" rx="1"/>
+  </g>
+  <g font-family="'Segoe UI Variable Display', 'Segoe UI', Inter, system-ui, -apple-system, 'Helvetica Neue', Arial, sans-serif" fill="#fff">
+    <text x="68" y="30" font-size="19" font-weight="700">Download for Windows</text>
+    <text x="68" y="48" font-size="12.5" font-weight="500" fill-opacity="0.85">Free · Windows 10 &amp; 11</text>
+  </g>
+</svg>
