@@ -826,15 +826,18 @@ Budgets, and what enforces them:
   morph nor a collapse runs a style recalc of half the Edit view's
   elements or more (it has ~580; a change they all inherit restyles
   nearly all of them, the targeted changes a few dozen).
-* **Counted work of the open morph** (same spec, Chromium trace from the
-  morph's `data-transition` to `expanded`; counted, not timed, so they
-  hold on a machine of any speed): the box proxy is rastered in at most
-  two of the morph's frames (as it gets its layer, and once at the size it
-  grows to), the canvas is never handed to the compositor again (no
+* **Counted work of the open morph** (same spec, Chromium traces;
+  counted, not timed, so they hold on a machine of any speed): the box
+  proxy is rastered in at most two of the morph's frames (as it gets its
+  layer, and once at the size it grows to; traced from Reveal to
+  `expanded`). While the morph plays — from the frame's `data-transition`
+  to its end, marked in the page: the canvas shows again a few frames
+  later, and the ack's round trip to the test could take those in — the
+  canvas is never handed to the compositor again (no
   `CanvasResource…::ProduceCanvasResource` / `PrepareTransferableResource`:
   it holds still, see below), and the page rasters at most
   `MORPH_TILES_PER_FRAME` (16) tiles per frame it commits — the morph
-  rastered 21–23 before the measures below, ~12 with them.
+  rastered 22–24 before the measures below, 12–13 with them.
 * **Idle** (same spec): the box at rest, and the editor in the Edit view
   with nothing happening, run no animation-frame callback, no animation,
   no style recalc and no layout for 2 s (< 20 ms of tasks: idle CPU ~0).
@@ -911,9 +914,21 @@ the display compositor 19.2 → 12.7 ms per drawn frame (−34 %), raster
 10.1 → 7.0 ms (−31 %), 25.5 → 13.1 tiles. Played in real time (slowed 4×
 to see every frame): main thread 11.6–13.6 → 8.3–10.0 ms per frame (−22
 to −28 %), the compositor's draw 15.8–16.9 → 13.0–13.6 ms (−17 to −20 %),
-23 → 11 tiles. (Medians of 4–8 alternated runs each, three sets.) The
-collapse and the Start view keep their main-thread time (within ±10 %,
-the spread between runs) and the compositor draws 35–45 % less.
+23 → 11 tiles. (Medians of 4–8 alternated runs each, three sets.)
+Measured again at full speed (4× CPU, 8 alternated runs each, medians;
+per frame the page commits or the compositor draws): played in real
+time, the main thread 13.9 → 10.2 ms per frame (−27 %; −19 % per morph,
+which now commits ~27 frames instead of ~24), the compositor's draw 17.0
+→ 13.2 ms (−22 %), raster 10.2 → 7.2 ms (−29 %), 23.6 → 13.0 tiles, 4.3
+→ 2.9 render passes, the longest gap between drawn frames (traced) 68 →
+34 ms; stepped through 30 states, main thread 12.8 → 9.9 ms (−23 %),
+draw 20.5 → 13.5 ms (−34 %), raster 16.5 → 13.2 ms (−20 %). Much of
+what the main thread still does at every frame is for the content's
+clip: whenever it changes the page is re-layerized (~2 ms at 4×, as it
+was for the clip-path) and laid out anew. The collapse's main thread takes
+4–16 % more (for the ~110 ms its clip moves, the page is re-layerized
+at every frame) while its compositor draws 34–48 % less; the Start
+view's is within ±9 %.
 
 What gets the open ready before its motion (the Edit view with an item):
 

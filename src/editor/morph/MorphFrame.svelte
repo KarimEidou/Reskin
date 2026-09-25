@@ -173,12 +173,17 @@
     running = [];
   }
 
-  /** Holds the Edit view's canvas still for the motion (see `stage.hold`); resolves once it is. */
-  async function holdStill(): Promise<void> {
+  /**
+   * Holds the Edit view's canvas still for the motion of run `my` (see
+   * `stage.hold`); resolves once it is.
+   */
+  async function holdStill(my: number): Promise<void> {
     if (letGo) return;
     const release = await stage.hold();
-    // Two calls may race for it: only one holds.
-    if (letGo) release();
+    // Two calls may race for it: only one holds. A call that took over
+    // meanwhile (a collapse, a clear) has let go of what was held already:
+    // the picture taken for this one goes too.
+    if (letGo || my !== run) release();
     else letGo = release;
   }
 
@@ -238,7 +243,7 @@
     // The canvas stops being handed to the compositor at every frame; its
     // still picture is what the icon lands on. This is the one wait before
     // the set-up below, which then happens in one go.
-    await holdStill();
+    await holdStill(my);
     if (my !== run) return;
     stopAll();
     transition = null;

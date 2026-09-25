@@ -88,8 +88,8 @@ describe('frames', () => {
     // flipCss keeps 3 decimals of scale: well under a pixel.
     expect(Math.abs(at.x - g.box.x)).toBeLessThan(0.01);
     expect(Math.abs(at.y - g.box.y)).toBeLessThan(0.01);
-    expect(Math.abs(at.w - g.box.w)).toBeLessThan(0.6);
-    expect(Math.abs(at.h - g.box.h)).toBeLessThan(0.6);
+    expect(Math.abs(at.w - g.box.w)).toBeLessThan(0.5);
+    expect(Math.abs(at.h - g.box.h)).toBeLessThan(0.5);
     expect(shellFrame(g, 1).transform).toBe('translate(0px, 0px) scale(1, 1)');
     expect(shellFrame(g, 1).borderRadius).toBe('16px / 16px');
   });
@@ -255,7 +255,7 @@ describe('play', () => {
       expect(iconOpacity(from)).toBe(1);
       fade.frames.forEach((f) => {
         const at = from + (to - from) * (f.offset as number);
-        expect((f.opacity as number) + iconOpacity(at)).toBeCloseTo(1, 1);
+        expect((f.opacity as number) + iconOpacity(at)).toBeCloseTo(1, 2);
       });
     }
   });

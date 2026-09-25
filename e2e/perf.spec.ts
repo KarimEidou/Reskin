@@ -668,8 +668,10 @@ test.describe('the morph frame', () => {
   });
 
   // The open morph of the Edit view, traced from the moment its animations
-  // play (a user-timing mark as the frame sets `data-transition`) to
-  // `expanded`. Counted, not timed: these hold on any machine.
+  // play to their end (user-timing marks as the frame sets and clears
+  // `data-transition`, in the page: the ack's round trip to the test would
+  // let the frames after the morph in — the canvas shows again a few frames
+  // after it). Counted, not timed: these hold on any machine.
   type WorkEvent = { name: string; cat: string; ph: string; ts: number; pid: number; tid: number; args?: { tileData?: unknown } };
 
   async function traceOpenMorph(page: Page, browser: Browser): Promise<{ motion: WorkEvent[]; frames: number }> {
@@ -684,9 +686,14 @@ test.describe('the morph frame', () => {
     await expect.poll(() => page.getByTestId('canvas').evaluate((el) => el.getBoundingClientRect().width)).toBeGreaterThan(100);
     await settle(page);
     await page.evaluate(() => {
+      let playing = false;
       new MutationObserver((records, observer) => {
-        if (records.some((r) => r.target instanceof HTMLElement && r.target.dataset.transition)) {
+        const set = records.some((r) => r.target instanceof HTMLElement && r.target.dataset.transition);
+        if (!playing && set) {
+          playing = true;
           performance.mark('perf:from');
+        } else if (playing && !set) {
+          performance.mark('perf:to');
           observer.disconnect();
         }
       }).observe(document, { subtree: true, attributes: true, attributeFilter: ['data-transition'] });
@@ -696,7 +703,6 @@ test.describe('the morph frame', () => {
     try {
       await pushEditorCmd(page, { type: 'expand', session, morph: true });
       expect(await waitForAck(page, session, 'expanded')).toBe(true);
-      await page.evaluate(() => performance.mark('perf:to'));
     } finally {
       events = (JSON.parse((await browser.stopTracing()).toString('utf8')) as { traceEvents: WorkEvent[] }).traceEvents;
     }
