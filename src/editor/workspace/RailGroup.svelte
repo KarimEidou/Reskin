@@ -1,8 +1,9 @@
 <!--
   One slot of the tool rail. A single tool is a toggle button; a group
   shows its current tool plus a corner triangle, and opens a flyout with
-  the others on right-click, a long press, → or Alt+↓. Icons follow the
-  tools' options (dodge ↔ burn, blur ↔ sharpen, freehand ↔ polygonal
+  the others on right-click, a long press, → or Alt+↓; closed by a choice
+  or Escape, it gives focus back to the slot's tool button. Icons follow
+  the tools' options (dodge ↔ burn, blur ↔ sharpen, freehand ↔ polygonal
   lasso); tooltips name the tool and its shortcut.
 -->
 <script lang="ts">
@@ -50,6 +51,8 @@
     if (group.tools.includes(selected)) remembered = selected;
   });
 
+  /** The slot's tool button: where focus goes when the flyout closes (not its 10 px corner trigger). */
+  let toolEl: HTMLButtonElement | undefined = $state();
   let flyoutTrigger: HTMLElement | null = null;
   let pressTimer: ReturnType<typeof setTimeout> | undefined;
   let suppressClick = false;
@@ -131,6 +134,7 @@
 <div class="slot" class:active>
   <Tooltip text={multi ? `${tool.label} — hold for more` : tool.label} shortcut={tool.shortcut} placement="right">
     <button
+      bind:this={toolEl}
       type="button"
       class="tool"
       aria-label={tool.label}
@@ -153,7 +157,7 @@
     </button>
   </Tooltip>
   {#if multi}
-    <Menu label={group.label} {items} placement="right-start" onselect={(id) => choose(id as ToolId)}>
+    <Menu label={group.label} {items} placement="right-start" onselect={(id) => choose(id as ToolId)} returnFocusTo={() => toolEl}>
       {#snippet trigger(props)}
         <button
           {...props}

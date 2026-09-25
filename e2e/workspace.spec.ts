@@ -107,6 +107,43 @@ test.describe('tool rail', () => {
     expect(tabStops).toBe(1);
   });
 
+  test('a flyout closed from the keyboard gives focus back to its slot; arrows on the colour chips stay there', async ({ page }) => {
+    await openWorkspace(page);
+    const menu = page.getByRole('menu');
+    // → opens the flyout on its first tool; ↓ Enter chooses the next one.
+    await page.getByTestId('tool-selectRect').focus();
+    await page.keyboard.press('ArrowRight');
+    await expect(menu.getByRole('menuitemcheckbox', { name: /Rectangle select/ })).toBeFocused();
+    await page.keyboard.press('ArrowDown');
+    await page.keyboard.press('Enter');
+    await expect(menu).toHaveCount(0);
+    expect(await withSession(page, (s) => s.engine.selectedToolId)).toBe('selectEllipse');
+    // Focus is on the slot's tool, where ↓ moves along the rail (the
+    // corner trigger would open the flyout again).
+    await expect(page.getByTestId('tool-selectEllipse')).toBeFocused();
+    await page.keyboard.press('ArrowDown');
+    await expect(page.getByTestId('tool-brush')).toBeFocused();
+    await expect(menu).toHaveCount(0);
+
+    // Escape closes it the same way.
+    await page.keyboard.press('ArrowUp');
+    await page.keyboard.press('ArrowRight');
+    await expect(menu).toBeVisible();
+    await page.keyboard.press('Escape');
+    await expect(menu).toHaveCount(0);
+    await expect(page.getByTestId('tool-selectEllipse')).toBeFocused();
+    await page.keyboard.press('ArrowUp');
+    await expect(page.getByTestId('tool-move')).toBeFocused();
+    await expect(menu).toHaveCount(0);
+
+    // The colour chips are not rail slots: the arrows leave their focus alone.
+    await page.getByTestId('color-primary').focus();
+    for (const key of ['ArrowUp', 'ArrowDown', 'Home', 'End']) {
+      await page.keyboard.press(key);
+      await expect(page.getByTestId('color-primary'), key).toBeFocused();
+    }
+  });
+
   test('colour chips: picker, swap (X) and reset (D)', async ({ page }) => {
     await openWorkspace(page);
     await page.getByTestId('color-primary').click();
@@ -129,6 +166,43 @@ test.describe('tool rail', () => {
       { r: 0, g: 0, b: 0, a: 1 },
       { r: 255, g: 255, b: 255, a: 1 },
     ]);
+  });
+
+  test('Tab past either end of the colour picker closes it: back to its chip, or on to what follows the chip', async ({ page }) => {
+    await openWorkspace(page);
+    const chip = page.getByTestId('color-primary');
+    const picker = page.getByRole('dialog', { name: 'Primary colour' });
+    /** Focuses the picker's first or last focusable control. */
+    const focusEnd = (end: 'first' | 'last') =>
+      picker.evaluate((el, which) => {
+        const all = [...el.querySelectorAll<HTMLElement>('button, input, select, textarea, [tabindex]:not([tabindex="-1"])')];
+        const shown = all.filter((c) => !c.matches(':disabled') && c.tabIndex >= 0 && c.getClientRects().length > 0);
+        (which === 'first' ? shown[0] : shown.at(-1))!.focus();
+      }, end);
+
+    await chip.focus();
+    await page.keyboard.press('Enter');
+    await expect(picker.getByRole('textbox', { name: 'Primary colour: hex' })).toBeVisible();
+    await focusEnd('first');
+    await page.keyboard.press('Shift+Tab');
+    await expect(picker).toHaveCount(0);
+    await expect(chip).toBeFocused();
+
+    await page.keyboard.press('Enter');
+    await expect(picker.getByRole('textbox', { name: 'Primary colour: hex' })).toBeVisible();
+    await focusEnd('last');
+    await page.keyboard.press('Tab');
+    await expect(picker).toHaveCount(0);
+    await expect(page.getByRole('button', { name: 'Swap colours' })).toBeFocused();
+
+    // Inside the picker, Tab still moves between its controls.
+    await chip.focus();
+    await page.keyboard.press('Enter');
+    await expect(picker.getByRole('textbox', { name: 'Primary colour: hex' })).toBeVisible();
+    await focusEnd('first');
+    await page.keyboard.press('Tab');
+    await expect(picker).toBeVisible();
+    expect(await picker.evaluate((el) => el.contains(document.activeElement) && document.activeElement !== el)).toBe(true);
   });
 });
 
@@ -1231,6 +1305,52 @@ test.describe('robustness', () => {
     await page.keyboard.press('Tab');
     await expect(canvas).toBeFocused();
     expect(await ring()).not.toBe('none');
+  });
+
+  test('closing a toast from the keyboard moves focus to the next toast, then back to where it came from', async ({ page }) => {
+    await openWorkspace(page);
+    await page.evaluate(() => window.__e2e!.failNext('export_file', 'the disk is full'));
+    await withSession(page, (s) => void s.exportAs('png'));
+    await withSession(page, (s) => void s.saveToLibrary());
+    const alert = page.getByRole('alert').filter({ hasText: 'the disk is full' });
+    const saved = page.getByRole('status').filter({ hasText: 'Saved' });
+    await expect(alert).toBeVisible();
+    await expect(saved).toBeVisible();
+
+    const origin = page.getByTestId('tool-brush');
+    await origin.focus();
+    await alert.getByRole('button', { name: 'Dismiss notification' }).focus();
+    await page.keyboard.press('Enter');
+    await expect(alert.getByText('the disk is full')).toHaveCount(0);
+    await expect(saved.getByRole('button', { name: 'Dismiss notification' })).toBeFocused();
+    await page.keyboard.press('Enter');
+    await expect(saved.getByText('Saved')).toHaveCount(0);
+    await expect(origin).toBeFocused();
+  });
+
+  test('switching views from the keyboard keeps focus in the view: Delete in the Edit view then clears nothing', async ({ page }) => {
+    await openWorkspace(page);
+    const host = page.locator('[data-view-host]');
+    const labels = () => withSession(page, (s) => s.engine.historyEntries.map((e) => e.label));
+    // A control of the Edit view has focus when Ctrl+, opens Settings.
+    await page.getByTestId('tool-brush').focus();
+    await page.keyboard.press('Control+,');
+    await expect(host).toHaveAttribute('data-view', 'settings');
+    await expect(host).toBeFocused();
+
+    // From a control of Settings, the palette goes back to the editor.
+    await page.getByRole('navigation', { name: 'Settings sections' }).getByRole('button').first().focus();
+    await page.keyboard.press('Control+k');
+    await page.getByRole('combobox', { name: 'Search commands' }).fill('Go to the editor');
+    await page.keyboard.press('Enter');
+    await expect(host).toHaveAttribute('data-view', 'edit');
+    await expect(page.getByTestId('canvas')).toBeVisible();
+    await expect(host).toBeFocused();
+    const before = await compositeHash(page);
+    await page.keyboard.press('Delete');
+    await page.keyboard.press('Backspace');
+    expect(await labels()).not.toContain('Clear');
+    expect(await compositeHash(page)).toBe(before);
   });
 
   test('Space activates a keyboard-focused rail button instead of panning', async ({ page }) => {

@@ -375,6 +375,60 @@ test.describe('adjust', () => {
   });
 });
 
+for (const [size, viewport, filters] of [
+  ['S', { width: 900, height: 620 }, ['levels', 'hueSaturation']],
+  ['M', { width: 1080, height: 720 }, ['levels']],
+] as const) {
+  test.describe(`adjust at the ${size} size`, () => {
+    test.use({ viewport });
+
+    for (const filter of filters) {
+      test(`${filter}: Apply and Cancel stay in view below its settings`, async ({ page }) => {
+        await openEditor(page);
+        await openTab(page, 'adjust');
+        await page.locator(`[data-filter="${filter}"]`).click();
+        await expect(page.getByTestId('adjust-editor')).toBeVisible();
+        const scroller = page.getByTestId('panel-adjust');
+        // The settings are taller than the panel: it scrolls, the buttons stay.
+        expect(await scroller.evaluate((el) => el.scrollHeight > el.clientHeight)).toBe(true);
+        for (const top of [0, Number.MAX_SAFE_INTEGER]) {
+          await scroller.evaluate((el, y) => el.scrollTo(0, y), top);
+          const panel = (await scroller.boundingBox())!;
+          for (const id of ['adjust-apply', 'adjust-cancel']) {
+            const button = page.getByTestId(id);
+            const box = (await button.boundingBox())!;
+            expect(box.y, `${id} top`).toBeGreaterThanOrEqual(panel.y);
+            expect(box.y + box.height, `${id} bottom`).toBeLessThanOrEqual(panel.y + panel.height);
+            expect(box.y + box.height, `${id} in the window`).toBeLessThanOrEqual(viewport.height);
+            // Nothing covers it: a press at its centre reaches it.
+            const hit = await button.evaluate((el) => {
+              const r = el.getBoundingClientRect();
+              return el.contains(document.elementFromPoint(r.x + r.width / 2, r.y + r.height / 2));
+            });
+            expect(hit, `${id} is on top`).toBe(true);
+          }
+        }
+        // Tab from the top: every control it reaches comes out clear of the
+        // bar that holds the buttons (Reset is its first).
+        await scroller.evaluate((el) => el.scrollTo(0, 0));
+        const editor = page.getByTestId('adjust-editor');
+        await editor.getByRole('button', { name: 'Back to adjustments (cancel)' }).focus();
+        const reset = editor.getByRole('button', { name: 'Reset' });
+        for (let stops = 1; ; stops++) {
+          await page.keyboard.press('Tab');
+          if (await reset.evaluate((el) => el === document.activeElement)) break;
+          expect(stops, 'Tab reaches the buttons').toBeLessThan(20);
+          const control = (await page.locator(':focus').boundingBox())!;
+          const barTop = await reset.evaluate((el) => el.parentElement!.getBoundingClientRect().top);
+          expect(control.y + control.height, `control ${stops} is clear of the bar`).toBeLessThanOrEqual(barTop);
+        }
+        await page.getByTestId('adjust-apply').click();
+        await expect(page.getByTestId('adjust-editor')).toHaveCount(0);
+      });
+    }
+  });
+}
+
 test.describe('effects', () => {
   test('add, toggle and remove layer effects', async ({ page }) => {
     // Every step lands inside the merge window, however slow the machine.

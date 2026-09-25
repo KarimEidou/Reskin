@@ -1,8 +1,9 @@
 <!--
   Dropdown menu button. Keyboard: ↓/Enter/Space open on the first item, ↑
   on the last; ↑/↓/Home/End move, typing jumps to a label, Enter/Space
-  choose, Escape and Tab close (focus returns to the trigger: the menu is
-  portalled, so a native Tab would leave the page).
+  choose, Escape and Tab close (focus returns to the trigger, or to
+  `returnFocusTo`: the menu is portalled, so a native Tab would leave the
+  page).
     <Menu label="More" iconOnly icon={Ellipsis} items={[…]} onselect={(id) => …} />
   A custom trigger gets every prop it needs (spread them onto a button):
     <Menu {items} label="Export" onselect={…}>
@@ -63,6 +64,11 @@
     disabled?: boolean;
     onselect: (id: string) => void;
     trigger?: Snippet<[MenuTriggerProps]>;
+    /**
+     * Where focus goes when the menu closes from the keyboard or with a
+     * choice, when not the trigger (e.g. a control the trigger belongs to).
+     */
+    returnFocusTo?: () => HTMLElement | null | undefined;
   }
 
   let {
@@ -76,6 +82,7 @@
     disabled = false,
     onselect,
     trigger,
+    returnFocusTo,
   }: Props = $props();
 
   const uid = $props.id();
@@ -101,7 +108,7 @@
   function closeMenu(returnFocus: boolean): void {
     open = false;
     active = -1;
-    if (returnFocus) triggerEl?.focus();
+    if (returnFocus) (returnFocusTo?.() ?? triggerEl)?.focus();
   }
 
   function choose(action: MenuAction): void {

@@ -1,7 +1,8 @@
 <!--
   The tool rail (left): every engine tool, grouped as in docs/UI.md, as a
   vertical toolbar (one tab stop; ↑/↓/Home/End move between tools, →
-  opens a group's flyout), with the colour chips at the bottom.
+  opens a group's flyout), with the colour chips at the bottom (tab stops
+  of their own, which the arrows leave alone).
 -->
 <script lang="ts">
   import { rovingIndex } from '$lib/ui/focus';
@@ -24,9 +25,12 @@
   let toolbar: HTMLDivElement | undefined = $state();
 
   const indexOf = (groupId: string) => RAIL_GROUPS.findIndex((g) => g.id === groupId);
+  /** Each slot's tool button (RailGroup). */
+  const RAIL_TOOL = 'button[data-rail-tool]';
 
+  /** The arrows move between the tools; keys on the colour chips (or a flyout trigger) are theirs. */
   function onKeyDown(e: KeyboardEvent): void {
-    if (e.defaultPrevented) return;
+    if (e.defaultPrevented || !(e.target instanceof Element) || !e.target.matches(RAIL_TOOL)) return;
     const next = rovingIndex(
       e.key,
       tabStop,
@@ -36,7 +40,7 @@
     if (next === null) return;
     e.preventDefault();
     focusIndex = next;
-    toolbar?.querySelectorAll<HTMLButtonElement>('button[data-rail-tool]')[next]?.focus();
+    toolbar?.querySelectorAll<HTMLButtonElement>(RAIL_TOOL)[next]?.focus();
   }
 </script>
 
