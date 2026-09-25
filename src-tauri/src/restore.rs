@@ -7,16 +7,18 @@
 //! holding the journal lock ([`execute_steps`]). Public-Desktop steps are
 //! planned under the lock, carried out by the elevated helper without it
 //! (a UAC prompt may take minutes), and recorded under it again only if
-//! they still plan the same.
+//! they still plan the same. Undoing an apply undoes its own entry first
+//! and the entries applied with it only once that went through
+//! ([`execute_undo`]).
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::MutexGuard;
 
 use reskin_core::history::{Journal, Probe, RestorePlan, RestoreStep, RestoreTo};
 use reskin_core::model::{
     BoxProgress, HistoryEntry, RefreshLevel, RestoreReport, RestoreTarget, TargetKind,
 };
-use reskin_core::paths::AppDirs;
+use reskin_core::paths::{self, AppDirs};
 use reskin_core::win::{folder, notify, shortcut, sysicons, urlfile};
 use reskin_core::{Error, job};
 use tauri::{AppHandle, Emitter, Manager, Runtime};
@@ -102,6 +104,27 @@ pub fn is_gone(plan: &RestorePlan) -> bool {
     missing && path.ancestors().last().is_some_and(Path::is_dir)
 }
 
+/// Where Public-Desktop steps go: the elevated helper, one UAC prompt per
+/// job.
+pub trait Elevation {
+    /// Where the helper keeps the Public-Desktop icons
+    /// (`%ProgramData%\Reskin\icons`).
+    fn public_icons_dir(&self) -> reskin_core::Result<PathBuf>;
+    /// Runs one job; `Error::Cancelled` when the prompt is declined.
+    fn run_job(&self, ops: Vec<job::JobOp>) -> reskin_core::Result<job::JobResult>;
+}
+
+/// The elevated helper itself; its job files go to the app's `jobs` folder.
+impl Elevation for AppDirs {
+    fn public_icons_dir(&self) -> reskin_core::Result<PathBuf> {
+        helper::public_icons_dir()
+    }
+
+    fn run_job(&self, ops: Vec<job::JobOp>) -> reskin_core::Result<job::JobResult> {
+        helper::run_elevated_job(self, ops)
+    }
+}
+
 /// The helper op that restores an elevated (Public Desktop) plan.
 fn elevated_op(plan: &RestorePlan) -> reskin_core::Result<job::JobOp> {
     let original = match &plan.to {
@@ -140,15 +163,54 @@ enum Ran {
 /// restore and make the uninstaller keep Reskin's data for good. Every
 /// step is planned, run and recorded in one hold of the journal lock, so
 /// it restores what the journal on disk says at that moment.
-/// Public-Desktop steps then go to the elevated helper together
+/// Public-Desktop steps then go to `elevation` together
 /// ([`execute_elevated`]).
 pub fn execute_steps<'a>(
-    dirs: &AppDirs,
+    elevation: &dyn Elevation,
     journal: &dyn Fn() -> MutexGuard<'a, Journal>,
     run: &dyn Fn(&RestorePlan) -> reskin_core::Result<()>,
     gone: &dyn Fn(&RestorePlan) -> bool,
     progress: &mut dyn FnMut(u32, u32),
     steps: Vec<RestoreStep>,
+) -> RestoreReport {
+    execute_steps_then(elevation, journal, run, gone, progress, steps, &[])
+}
+
+/// Undoes an apply: `steps` are [`Journal::undo_steps`], the apply's own
+/// entry first. The entries applied with it (its group: the matching pins)
+/// are undone only once that one went through, so a declined UAC prompt or
+/// a failure leaves the whole apply in place instead of half undone.
+pub fn execute_undo<'a>(
+    elevation: &dyn Elevation,
+    journal: &dyn Fn() -> MutexGuard<'a, Journal>,
+    run: &dyn Fn(&RestorePlan) -> reskin_core::Result<()>,
+    gone: &dyn Fn(&RestorePlan) -> bool,
+    mut steps: Vec<RestoreStep>,
+) -> RestoreReport {
+    let group = steps.split_off(steps.len().min(1));
+    let mut report =
+        execute_steps_then(elevation, journal, run, gone, &mut |_, _| {}, steps, &group);
+    if report.failed.is_empty() && report.needs_elevation == 0 && !group.is_empty() {
+        let rest = execute_steps(elevation, journal, run, gone, &mut |_, _| {}, group);
+        report.restored += rest.restored;
+        report.failed.extend(rest.failed);
+        report.needs_elevation += rest.needs_elevation;
+    }
+    report
+}
+
+/// [`execute_steps`] for steps that `then` follows once they went through:
+/// an elevated job also deletes the Public-Desktop icons that no entry
+/// needs once `then` is done as well — `then` asks for no approval of its
+/// own to delete them with.
+fn execute_steps_then<'a>(
+    elevation: &dyn Elevation,
+    journal: &dyn Fn() -> MutexGuard<'a, Journal>,
+    run: &dyn Fn(&RestorePlan) -> reskin_core::Result<()>,
+    gone: &dyn Fn(&RestorePlan) -> bool,
+    progress: &mut dyn FnMut(u32, u32),
+    steps: Vec<RestoreStep>,
+    then: &[RestoreStep],
 ) -> RestoreReport {
     let total = steps.len() as u32;
     let mut report = RestoreReport::default();
@@ -192,7 +254,7 @@ pub fn execute_steps<'a>(
         progress(done, total);
     }
     if !elevated.is_empty() {
-        execute_elevated(dirs, journal, elevated, &mut report);
+        execute_elevated(elevation, journal, elevated, then, &mut report);
         progress(total, total);
     }
     report
@@ -201,15 +263,17 @@ pub fn execute_steps<'a>(
 /// Carries out Public-Desktop steps through the elevated helper, in jobs of
 /// at most [`job::MAX_JOB_OPS`] ops (one UAC prompt each; a declined prompt
 /// ends the batch). The last job also deletes the Public-Desktop icons that
-/// no entry needs once the steps are done ([`Journal::icons_released_by`]);
-/// the helper keeps any a Public Desktop shortcut still shows.
+/// no entry needs once the steps — and the steps `then` runs after them —
+/// are done ([`Journal::icons_released_by`]); the helper keeps any a Public
+/// Desktop shortcut still shows.
 fn execute_elevated<'a>(
-    dirs: &AppDirs,
+    elevation: &dyn Elevation,
     journal: &dyn Fn() -> MutexGuard<'a, Journal>,
     steps: Vec<RestoreStep>,
+    then: &[RestoreStep],
     report: &mut RestoreReport,
 ) {
-    let icons_dir = helper::public_icons_dir();
+    let icons_dir = elevation.public_icons_dir();
     let planned = journal().locked(|j| {
         let mut plans = Vec::new();
         let mut failed = Vec::new();
@@ -220,7 +284,11 @@ fn execute_elevated<'a>(
                 Err(e) => failed.push(e.to_string()),
             }
         }
-        let just_plans: Vec<RestorePlan> = plans.iter().map(|(_, p)| p.clone()).collect();
+        let just_plans: Vec<RestorePlan> = plans
+            .iter()
+            .map(|(_, p)| p.clone())
+            .chain(then.iter().filter_map(|s| j.plan_step(s).ok().flatten()))
+            .collect();
         let released = match &icons_dir {
             Ok(dir) => j.icons_released_by(&just_plans, &dir.display().to_string()),
             Err(_) => Vec::new(),
@@ -254,7 +322,7 @@ fn execute_elevated<'a>(
                 job::MAX_JOB_OPS - ops.len(),
             ));
         }
-        match helper::run_elevated_job(dirs, ops) {
+        match elevation.run_job(ops) {
             Ok(result) => record_elevated(journal, chunk, &result, report),
             Err(Error::Cancelled) => {
                 let left: usize = chunks[n..].iter().map(|c| c.len()).sum();
@@ -378,7 +446,10 @@ pub fn restore_blocking<R: Runtime>(
             );
         }
     };
-    let report = execute_steps(&state.dirs, &journal, &run, &is_gone, &mut progress, steps);
+    let report = match target {
+        RestoreTarget::Entry { .. } => execute_undo(&state.dirs, &journal, &run, &is_gone, steps),
+        _ => execute_steps(&state.dirs, &journal, &run, &is_gone, &mut progress, steps),
+    };
     // Items whose chain is gone are no longer "reskinned".
     if let RestoreTarget::Item { item } = target {
         state.items.update(item, |i| i.reskinned = false);
@@ -449,7 +520,10 @@ pub async fn refresh_icons(app: AppHandle, level: RefreshLevel) -> CmdResult<()>
     .map_err(|e| e.to_string())?
 }
 
-/// Current icon location of a journal target (for reconcile).
+/// Current icon location of a journal target (for reconcile). A shortcut's
+/// or folder's is resolved to the absolute path the shell uses: Windows may
+/// store it with `%VARS%` (a path under the user's profile, as Reskin's
+/// icons are) or relative to the item's folder.
 fn current_location(e: &HistoryEntry) -> reskin_core::Result<Option<String>> {
     let path = Path::new(&e.target);
     Ok(match e.kind {
@@ -463,11 +537,13 @@ fn current_location(e: &HistoryEntry) -> reskin_core::Result<Option<String>> {
             {
                 urlfile::read_url_icon(path)?.0
             } else {
-                shortcut::read_link(path)?.icon_location
+                shortcut::read_link(path)?
+                    .icon_path(path)
+                    .map(|(p, _)| p.display().to_string())
             }
         }
         TargetKind::InternetShortcut => urlfile::read_url_icon(path)?.0,
-        TargetKind::Folder => folder::read_folder_icon(path)?.map(|(l, _)| l),
+        TargetKind::Folder => folder::folder_icon_path(path)?.map(|(p, _)| p.display().to_string()),
         TargetKind::SystemIcon => {
             let id = e
                 .system_icon
@@ -481,8 +557,7 @@ fn current_location(e: &HistoryEntry) -> reskin_core::Result<Option<String>> {
 pub fn probe(e: &HistoryEntry) -> Probe {
     match current_location(e) {
         Ok(Some(loc))
-            if Path::new(&loc) == Path::new(&e.icon_path)
-                || loc.eq_ignore_ascii_case(&e.icon_path) =>
+            if paths::normalize_for_compare(&loc) == paths::normalize_for_compare(&e.icon_path) =>
         {
             Probe::PointsToIcon
         }
@@ -517,8 +592,7 @@ pub fn reconcile_at_startup<R: Runtime>(app: &AppHandle<R>) {
 
 #[cfg(test)]
 mod tests {
-    use std::cell::RefCell;
-    use std::path::PathBuf;
+    use std::cell::{Cell, RefCell};
     use std::sync::Mutex;
 
     use reskin_core::history::NewEntry;
@@ -526,23 +600,54 @@ mod tests {
 
     use super::*;
 
-    fn apply(journal: &mut Journal, target: &str) -> String {
-        let id = journal
-            .begin(NewEntry {
-                kind: TargetKind::Shortcut,
-                target: target.into(),
-                name: reskin_core::paths::file_name_of(target).into(),
-                system_icon: None,
-                icon_path: format!("{target}.ico"),
-                original: OriginalIcon::default(),
-                elevated: false,
-                thumb: None,
-                design_name: None,
-                group: None,
-            })
-            .unwrap();
+    /// A shortcut change to `target` pointing it at `icon_path`.
+    fn change(target: &str, icon_path: &str) -> NewEntry {
+        NewEntry {
+            kind: TargetKind::Shortcut,
+            target: target.into(),
+            name: paths::file_name_of(target).into(),
+            system_icon: None,
+            icon_path: icon_path.into(),
+            original: OriginalIcon::default(),
+            elevated: false,
+            thumb: None,
+            design_name: None,
+            group: None,
+        }
+    }
+
+    fn commit(journal: &mut Journal, new: NewEntry) -> String {
+        let id = journal.begin(new).unwrap();
         journal.commit(&id).unwrap();
         id
+    }
+
+    fn apply(journal: &mut Journal, target: &str) -> String {
+        commit(journal, change(target, &format!("{target}.ico")))
+    }
+
+    /// The elevated helper, faked: records every job, then declines it as a
+    /// declined UAC prompt does, or runs every op of it.
+    struct FakeHelper {
+        icons: PathBuf,
+        approve: Cell<bool>,
+        jobs: RefCell<Vec<Vec<job::JobOp>>>,
+    }
+
+    impl Elevation for FakeHelper {
+        fn public_icons_dir(&self) -> reskin_core::Result<PathBuf> {
+            Ok(self.icons.clone())
+        }
+
+        fn run_job(&self, ops: Vec<job::JobOp>) -> reskin_core::Result<job::JobResult> {
+            let count = ops.len();
+            self.jobs.borrow_mut().push(ops);
+            if self.approve.get() {
+                Ok(job::JobResult::from_exit_code("job", job::EXIT_OK, count))
+            } else {
+                Err(Error::Cancelled)
+            }
+        }
     }
 
     #[test]
@@ -710,6 +815,217 @@ mod tests {
             TargetKind::SystemIcon,
             Path::new("this-pc")
         )));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn undoing_an_elevated_apply_leaves_its_pins_until_windows_approves() {
+        let root = std::env::temp_dir().join(format!(
+            "reskin-undo-elevated-{}-{}",
+            std::process::id(),
+            reskin_core::now_ms() as u64
+        ));
+        let dirs = AppDirs::at(&root);
+        let icons = root.join("public-icons");
+        std::fs::create_dir_all(&icons).unwrap();
+        let name = "app-0123456789ab.ico";
+        std::fs::write(icons.join(name), b"ico").unwrap();
+        let icon = icons.join(name).display().to_string();
+        let public = r"C:\Users\Public\Desktop\App.lnk";
+        let pin = r"C:\Users\Kim\AppData\Roaming\Microsoft\Windows\Start Menu\Programs\App.lnk";
+        let mut app = Journal::load(dirs.journal_file()).unwrap();
+        let main = commit(
+            &mut app,
+            NewEntry {
+                elevated: true,
+                ..change(public, &icon)
+            },
+        );
+        // The matching pin shows the same Public-Desktop icon.
+        let grouped = commit(
+            &mut app,
+            NewEntry {
+                group: Some(main.clone()),
+                ..change(pin, &icon)
+            },
+        );
+
+        let journal = Mutex::new(app);
+        let lock = || journal.lock().unwrap();
+        let ran = RefCell::new(Vec::new());
+        let run = |plan: &RestorePlan| {
+            ran.borrow_mut().push(plan.target.clone());
+            Ok(())
+        };
+        let uac = FakeHelper {
+            icons,
+            approve: Cell::new(false),
+            jobs: RefCell::default(),
+        };
+        let undo = || {
+            let steps = lock().undo_steps(&main).unwrap();
+            execute_undo(&uac, &lock, &run, &|_| false, steps)
+        };
+        let states = || {
+            let on_disk = Journal::load(dirs.journal_file()).unwrap();
+            [&main, &grouped].map(|id| on_disk.get(id).unwrap().state)
+        };
+
+        // Declined: the pin is left as it is too, not half the apply undone.
+        let report = undo();
+        assert_eq!(report.needs_elevation, 1);
+        assert_eq!(report.restored, 0);
+        assert!(report.failed.is_empty(), "{:?}", report.failed);
+        assert!(ran.borrow().is_empty(), "{:?}", ran.borrow());
+        assert_eq!(states(), [EntryState::Applied, EntryState::Applied]);
+
+        // Approved: the Public-Desktop shortcut, then the pin. Its job also
+        // deletes the shared icon, which nothing needs once the pin is back —
+        // and only the helper can delete.
+        uac.approve.set(true);
+        let report = undo();
+        assert_eq!(report.restored, 2);
+        assert!(report.failed.is_empty(), "{:?}", report.failed);
+        assert_eq!(report.needs_elevation, 0);
+        assert_eq!(*ran.borrow(), [pin]);
+        let jobs = uac.jobs.borrow();
+        assert_eq!(jobs.len(), 2);
+        assert_eq!(
+            jobs[1],
+            [
+                job::JobOp::restore_icon(public, &OriginalIcon::default()).unwrap(),
+                job::JobOp::delete_icon(name),
+            ]
+        );
+        assert_eq!(states(), [EntryState::Restored, EntryState::Restored]);
+        drop(jobs);
+        drop(journal);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn an_undo_that_fails_leaves_the_pins_applied_with_it() {
+        let root = std::env::temp_dir().join(format!(
+            "reskin-undo-failed-{}-{}",
+            std::process::id(),
+            reskin_core::now_ms() as u64
+        ));
+        let dirs = AppDirs::at(&root);
+        let desktop = r"C:\Users\Kim\Desktop\App.lnk";
+        let pin = r"C:\Users\Kim\AppData\Roaming\Microsoft\Windows\Start Menu\Programs\App.lnk";
+        let mut app = Journal::load(dirs.journal_file()).unwrap();
+        let main = apply(&mut app, desktop);
+        let grouped = commit(
+            &mut app,
+            NewEntry {
+                group: Some(main.clone()),
+                ..change(pin, &format!("{desktop}.ico"))
+            },
+        );
+
+        let journal = Mutex::new(app);
+        let lock = || journal.lock().unwrap();
+        let read_only = Cell::new(true);
+        let ran = RefCell::new(Vec::new());
+        let run = |plan: &RestorePlan| {
+            ran.borrow_mut().push(plan.target.clone());
+            if plan.target == desktop && read_only.get() {
+                Err(Error::AccessDenied("read-only".into()))
+            } else {
+                Ok(())
+            }
+        };
+        let undo = || {
+            let steps = lock().undo_steps(&main).unwrap();
+            execute_undo(&dirs, &lock, &run, &|_| false, steps)
+        };
+        let states = || {
+            let on_disk = Journal::load(dirs.journal_file()).unwrap();
+            [&main, &grouped].map(|id| on_disk.get(id).unwrap().state)
+        };
+
+        // The desktop shortcut can't be written: its pin is left as it is too.
+        let report = undo();
+        assert_eq!(report.restored, 0);
+        assert_eq!(report.failed.len(), 1, "{:?}", report.failed);
+        assert_eq!(*ran.borrow(), [desktop]);
+        assert_eq!(states(), [EntryState::Applied, EntryState::Applied]);
+
+        read_only.set(false);
+        ran.borrow_mut().clear();
+        let report = undo();
+        assert_eq!(report.restored, 2);
+        assert!(report.failed.is_empty(), "{:?}", report.failed);
+        assert_eq!(*ran.borrow(), [desktop, pin]);
+        assert_eq!(states(), [EntryState::Restored, EntryState::Restored]);
+        drop(journal);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    #[ignore = "Windows shell integration (run with --include-ignored)"]
+    fn a_change_left_pending_is_found_applied_however_windows_stored_its_icon() {
+        // Under %LOCALAPPDATA%, like Reskin's icons: Windows may store a
+        // path there with %VARS%.
+        let local = PathBuf::from(std::env::var_os("LOCALAPPDATA").expect("%LOCALAPPDATA%"));
+        let name = format!(
+            "reskin-reconcile-{}-{}",
+            std::process::id(),
+            reskin_core::now_ms() as u64
+        );
+        let root = local.join(&name);
+        let dirs = AppDirs::at(root.join("data"));
+        let icon = root.join("app-0123456789ab.ico");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(&icon, b"ico").unwrap();
+        let lnk = root.join("App.lnk");
+        let notepad =
+            PathBuf::from(std::env::var_os("SystemRoot").unwrap_or_else(|| r"C:\Windows".into()))
+                .join(r"System32\notepad.exe");
+        shortcut::create_link(&lnk, &notepad, "", None, "").unwrap();
+        let customised = root.join("Folder");
+        let inside = customised.join("inside.ico");
+        std::fs::create_dir(&customised).unwrap();
+        std::fs::write(&inside, b"ico").unwrap();
+        let absolute = icon.display().to_string();
+        let unexpanded = format!(r"%LOCALAPPDATA%\{name}\app-0123456789ab.ico");
+        let mut journal = Journal::load(dirs.journal_file()).unwrap();
+
+        for (kind, target, stored, icon) in [
+            (TargetKind::Shortcut, &lnk, absolute.as_str(), &icon),
+            (TargetKind::Shortcut, &lnk, unexpanded.as_str(), &icon),
+            (TargetKind::Folder, &customised, unexpanded.as_str(), &icon),
+            (TargetKind::Folder, &customised, "inside.ico", &inside),
+        ] {
+            let target_text = target.display().to_string();
+            let id = journal
+                .begin(NewEntry {
+                    kind,
+                    ..change(&target_text, &icon.display().to_string())
+                })
+                .unwrap();
+            // Reskin stopped after changing the icon, before the commit.
+            match kind {
+                TargetKind::Folder => {
+                    folder::set_folder_icon(target, Some((Path::new(stored), 0))).unwrap()
+                }
+                _ => shortcut::set_link_icon(target, Some((stored, 0))).unwrap(),
+            }
+            let report = journal.reconcile(probe).unwrap();
+            assert_eq!(report.applied, [id], "{stored}: {report:?}");
+            assert!(report.failed.is_empty(), "{stored}: {report:?}");
+        }
+
+        // A change that never reached the shortcut is still one that failed.
+        let other = root.join("other-0123456789ab.ico").display().to_string();
+        let id = journal
+            .begin(change(&lnk.display().to_string(), &other))
+            .unwrap();
+        let report = journal.reconcile(probe).unwrap();
+        assert_eq!(report.failed, [id], "{report:?}");
+
+        folder::set_folder_icon(&customised, None).unwrap();
+        drop(journal);
         let _ = std::fs::remove_dir_all(&root);
     }
 }

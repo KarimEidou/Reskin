@@ -71,7 +71,12 @@ struct TempDir(PathBuf);
 
 impl TempDir {
     fn new(tag: &str) -> Self {
-        let dir = std::env::temp_dir().join(unique(tag));
+        Self::under(&std::env::temp_dir(), tag)
+    }
+
+    /// A fresh directory in `base`.
+    fn under(base: &Path, tag: &str) -> Self {
+        let dir = base.join(unique(tag));
         std::fs::create_dir_all(&dir).unwrap();
         TempDir(dir)
     }
@@ -494,6 +499,85 @@ fn folder_icon_set_read_and_clear() {
     let t = target.clone();
     assert_eq!(
         sta().try_run(move || folder::read_folder_icon(&t)).unwrap(),
+        None
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Stored icon locations (%VARS%, relative)
+// ---------------------------------------------------------------------------
+
+#[test]
+#[ignore = "Windows shell integration (run with --include-ignored)"]
+fn stored_icon_locations_resolve_to_the_icon_file() {
+    // Under %LOCALAPPDATA%, like Reskin's icons: Windows may store a path
+    // there with %VARS%.
+    let local = PathBuf::from(std::env::var_os("LOCALAPPDATA").expect("%LOCALAPPDATA%"));
+    let dir = TempDir::under(&local, "resolve");
+    let ico = dir.join("resolve.ico");
+    write_ico(&ico, 90);
+    let dir_name = dir.0.file_name().unwrap().to_string_lossy().into_owned();
+    let unexpanded = format!(r"%LOCALAPPDATA%\{dir_name}\resolve.ico");
+
+    // Shortcuts: set as an apply does (absolute) and with %VARS%.
+    let lnk = dir.join("Resolve.lnk");
+    let l = lnk.clone();
+    sta()
+        .try_run(move || shortcut::create_link(&l, &notepad(), "", None, ""))
+        .unwrap();
+    for location in [ico.display().to_string(), unexpanded.clone()] {
+        let (l, loc) = (lnk.clone(), location.clone());
+        sta()
+            .try_run(move || shortcut::set_link_icon(&l, Some((&loc, 0))))
+            .unwrap();
+        let l = lnk.clone();
+        let info = sta().try_run(move || shortcut::read_link(&l)).unwrap();
+        let raw = info.icon_location.clone().expect("icon location set");
+        if location == unexpanded {
+            assert!(raw.starts_with('%'), "stored as {raw}");
+        }
+        let (icon_path, index) = info.icon_path(&lnk).expect("icon location set");
+        assert!(
+            same_path(&icon_path, &ico),
+            "{location}: {raw} → {icon_path:?}"
+        );
+        assert_eq!(index, 0);
+    }
+
+    // Folders: with %VARS% and relative to the folder, as an original icon
+    // put back may be.
+    let customised = dir.join("Customised");
+    std::fs::create_dir(&customised).unwrap();
+    let inside = customised.join("inside.ico");
+    write_ico(&inside, 60);
+    for (location, expected) in [(unexpanded.as_str(), &ico), ("inside.ico", &inside)] {
+        let (c, loc) = (customised.clone(), PathBuf::from(location));
+        sta()
+            .try_run(move || folder::set_folder_icon(&c, Some((&loc, 0))))
+            .unwrap();
+        let c = customised.clone();
+        let (raw, _) = sta()
+            .try_run(move || folder::read_folder_icon(&c))
+            .unwrap()
+            .expect("folder icon set");
+        let c = customised.clone();
+        let (icon_path, index) = sta()
+            .try_run(move || folder::folder_icon_path(&c))
+            .unwrap()
+            .expect("folder icon set");
+        assert!(
+            same_path(&icon_path, expected),
+            "{location}: {raw} → {icon_path:?}"
+        );
+        assert_eq!(index, 0);
+    }
+    let c = customised.clone();
+    sta()
+        .try_run(move || folder::set_folder_icon(&c, None))
+        .unwrap();
+    let c = customised.clone();
+    assert_eq!(
+        sta().try_run(move || folder::folder_icon_path(&c)).unwrap(),
         None
     );
 }
