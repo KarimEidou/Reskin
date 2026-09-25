@@ -77,7 +77,7 @@ pub fn open_external(app: AppHandle, link: String) -> CmdResult<()> {
     let url = match link.as_str() {
         "releases" => format!("{REPO}/releases"),
         "repo" => REPO.to_string(),
-        "license" => format!("{REPO}/blob/main/LICENSE"),
+        "license" => format!("{REPO}/blob/HEAD/LICENSE"),
         other => return Err(format!("unknown link {other}")),
     };
     app.opener()

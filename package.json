@@ -1,7 +1,7 @@
 {
   "name": "reskin",
   "private": true,
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "A floating box that turns any desktop icon into an editable canvas.",
   "license": "MIT",
   "type": "module",

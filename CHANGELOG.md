@@ -6,6 +6,25 @@ All notable changes to Reskin are documented here. The format follows
 
 ## [Unreleased]
 
+## [1.0.1] - 2026-09-25
+
+Easier to download, and the links in the app go where they should.
+
+### Changed
+
+- The downloads have short names that stay the same from one release to the
+  next — `Reskin-Setup.exe`, `Reskin-Portable.exe` and `Reskin.msi` — so the
+  newest installer is always one click away:
+  <https://github.com/KarimEidou/Reskin/releases/latest/download/Reskin-Setup.exe>.
+- Release notes start with what to download and how to install it.
+
+### Fixed
+
+- **Settings → About → MIT license** opens Reskin's license instead of a page
+  that doesn't exist.
+- The **Releases** button in Settings → About and Reskin's support link in
+  Windows' *Installed apps* point to Reskin's current home.
+
 ## [1.0.0] - 2026-09-25
 
 The first release: a small glass box that floats on your Windows desktop.
@@ -236,5 +255,6 @@ Apply changes the real icon — every change journaled and undoable.
   Reskin run out of memory: its sizes are checked before anything is read
   or decoded.
 
-[Unreleased]: https://github.com/KarimEidou/Reskin/compare/v1.0.0...HEAD
+[Unreleased]: https://github.com/KarimEidou/Reskin/compare/v1.0.1...HEAD
+[1.0.1]: https://github.com/KarimEidou/Reskin/releases/tag/v1.0.1
 [1.0.0]: https://github.com/KarimEidou/Reskin/releases/tag/v1.0.0
