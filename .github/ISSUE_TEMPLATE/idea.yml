@@ -1,0 +1,16 @@
+name: 💡 I have an idea
+description: Suggest a feature, a new style or anything that would make Reskin better.
+labels: [enhancement]
+body:
+  - type: textarea
+    id: idea
+    attributes:
+      label: What would you like Reskin to do?
+      placeholder: A "Cyberpunk" style with pink and yellow glow.
+    validations:
+      required: true
+  - type: textarea
+    id: why
+    attributes:
+      label: How would it help you?
+      description: What are you trying to do? Pictures of what you have in mind are welcome.

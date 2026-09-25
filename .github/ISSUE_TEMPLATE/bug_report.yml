@@ -1,0 +1,51 @@
+name: 🐞 Something isn't working
+description: Tell us what went wrong, and we'll fix it.
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for taking the time! A few answers help a lot — only the first one is required.
+        To put your icons back at any time: right-click the box → **Restore all icons…**
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened?
+      description: What did you do, and what went wrong? Screenshots are welcome — drag them in.
+      placeholder: I dropped my Steam shortcut on the box, pressed Save & Apply, and the icon on my desktop didn't change.
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: What did you expect instead?
+  - type: input
+    id: version
+    attributes:
+      label: Reskin version
+      description: In Reskin, **Settings → About**.
+      placeholder: "1.0.1"
+  - type: dropdown
+    id: windows
+    attributes:
+      label: Windows version
+      options:
+        - Windows 11
+        - Windows 10
+        - Something else
+  - type: dropdown
+    id: download
+    attributes:
+      label: Which download do you use?
+      options:
+        - Reskin-Setup.exe (installed)
+        - Reskin-Portable.exe
+        - Reskin.msi
+        - Built from source
+  - type: textarea
+    id: log
+    attributes:
+      label: Log file (optional)
+      description: |
+        Reskin writes what it did to `reskin.log` in your temporary folder. Press **Win + R**, type `%TEMP%`, press Enter,
+        and drag `reskin.log` into this box. It lists file paths on your PC, so glance over it first.

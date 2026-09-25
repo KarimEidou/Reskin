@@ -1,0 +1,5 @@
+blank_issues_enabled: true
+contact_links:
+  - name: 📖 User guide and common questions
+    url: https://github.com/KarimEidou/Reskin/blob/HEAD/docs/GUIDE.md#troubleshooting
+    about: How to use Reskin, get your old icons back, find the box again, or uninstall.
