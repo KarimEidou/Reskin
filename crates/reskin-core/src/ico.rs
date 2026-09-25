@@ -12,6 +12,22 @@ use crate::pixels::Rgba;
 /// accepts).
 pub const MAX_ICO_BYTES: usize = 1024 * 1024;
 
+/// Largest frame edge [`parse_ico`] decodes, in pixels: the editor's
+/// working size. A frame's own header (BITMAPINFOHEADER or PNG IHDR) sets
+/// what decoding it allocates, so a few bytes could otherwise ask for
+/// gigabytes; bigger frames are skipped before anything is allocated.
+pub const MAX_FRAME_PX: u32 = 1024;
+
+/// Most pixels [`parse_ico`] decodes from one icon, broken frames
+/// included: sixteen frames of [`MAX_FRAME_PX`]. Real icons stay far below
+/// it; the frames after it is spent are skipped, so many frames cannot add
+/// up to gigabytes either.
+pub const MAX_DECODE_PX: u64 = 16 * MAX_FRAME_PX as u64 * MAX_FRAME_PX as u64;
+
+/// ICONDIR and ICONDIRENTRY sizes.
+const DIR_HEADER_LEN: usize = 6;
+const DIR_ENTRY_LEN: usize = 16;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FrameEncoding {
     Bmp,
@@ -151,15 +167,64 @@ pub struct IcoFrame {
     pub bits_per_pixel: u16,
 }
 
+/// Checks an .ico's directory against the file before the `ico` crate
+/// reads it, which allocates the data size every entry claims up front:
+/// the directory must fit in the file, each entry's data must lie inside
+/// it, and all of them together may claim no more than the file holds.
+fn check_directory(bytes: &[u8]) -> Result<(), String> {
+    let count = match bytes.get(4..DIR_HEADER_LEN) {
+        Some(&[lo, hi]) => usize::from(u16::from_le_bytes([lo, hi])),
+        _ => return Err("ico: the header is cut short".into()),
+    };
+    let entries = bytes
+        .get(DIR_HEADER_LEN..DIR_HEADER_LEN + count * DIR_ENTRY_LEN)
+        .ok_or("ico: the directory is cut short")?;
+    let len = bytes.len() as u64;
+    let mut claimed = 0u64;
+    for (i, entry) in entries.chunks_exact(DIR_ENTRY_LEN).enumerate() {
+        // dwBytesInRes at 8, dwImageOffset at 12.
+        let field = |at: usize| {
+            u64::from(u32::from_le_bytes([
+                entry[at],
+                entry[at + 1],
+                entry[at + 2],
+                entry[at + 3],
+            ]))
+        };
+        let (size, offset) = (field(8), field(12));
+        if offset + size > len {
+            return Err(format!("ico: image {i} lies outside the file"));
+        }
+        claimed += size;
+    }
+    if claimed > len {
+        return Err("ico: the images claim more data than the file holds".into());
+    }
+    Ok(())
+}
+
 /// Parses every frame of an .ico (largest first). Frames that fail to
-/// decode are skipped; an error is returned only if none decode.
+/// decode are skipped, and so are frames over [`MAX_FRAME_PX`] and those
+/// after [`MAX_DECODE_PX`] is spent; an error is returned only if none
+/// decode.
 pub fn parse_ico(bytes: &[u8]) -> Result<Vec<IcoFrame>, String> {
+    check_directory(bytes)?;
     let dir = ico::IconDir::read(std::io::Cursor::new(bytes)).map_err(|e| format!("ico: {e}"))?;
     if dir.resource_type() != ico::ResourceType::Icon {
         return Err("not an icon (cursor file)".into());
     }
+    let mut budget = MAX_DECODE_PX;
     let mut frames = Vec::new();
     for entry in dir.entries() {
+        // `IconDir::read` took the size from the frame's own header, which
+        // is what `decode` allocates for before it reads any pixels. (Where
+        // that header is unreadable, `decode` fails on it first.)
+        let (w, h) = (entry.width(), entry.height());
+        let pixels = u64::from(w) * u64::from(h);
+        if w > MAX_FRAME_PX || h > MAX_FRAME_PX || pixels > budget {
+            continue;
+        }
+        budget -= pixels;
         let Ok(img) = entry.decode() else { continue };
         let (w, h) = (img.width(), img.height());
         let Ok(rgba) = Rgba::from_raw(w, h, img.into_rgba_data()) else {
@@ -262,5 +327,82 @@ mod tests {
             png: sample(16).to_png_base64(),
         };
         assert!(build_ico_from_pngs(&[bad]).is_err());
+    }
+
+    /// An .ico listing `images` (encoded frames), laid out one after
+    /// another. The directory's width and height bytes say "256 or more",
+    /// leaving the size to each image's own header.
+    fn ico_of(images: &[Vec<u8>]) -> Vec<u8> {
+        let mut out = vec![0, 0, 1, 0];
+        out.extend_from_slice(&(images.len() as u16).to_le_bytes());
+        let mut offset = DIR_HEADER_LEN + DIR_ENTRY_LEN * images.len();
+        for image in images {
+            out.extend_from_slice(&[0, 0, 0, 0]);
+            out.extend_from_slice(&1u16.to_le_bytes());
+            out.extend_from_slice(&32u16.to_le_bytes());
+            out.extend_from_slice(&(image.len() as u32).to_le_bytes());
+            out.extend_from_slice(&(offset as u32).to_le_bytes());
+            offset += image.len();
+        }
+        for image in images {
+            out.extend_from_slice(image);
+        }
+        out
+    }
+
+    #[test]
+    fn the_directory_must_fit_in_the_file() {
+        let bytes = ico_of(&[encode_bmp_frame(&sample(16))]);
+        assert_eq!(check_directory(&bytes), Ok(()));
+        parse_ico(&bytes).unwrap();
+
+        // Cut short in the header, in the directory, in the image.
+        for len in [5, DIR_HEADER_LEN + DIR_ENTRY_LEN - 1, bytes.len() - 1] {
+            assert!(check_directory(&bytes[..len]).is_err(), "{len} bytes");
+            assert!(parse_ico(&bytes[..len]).is_err(), "{len} bytes");
+        }
+
+        // A 22-byte file whose image claims almost 4 GiB, or starts far past
+        // its end.
+        let mut huge = bytes[..DIR_HEADER_LEN + DIR_ENTRY_LEN].to_vec();
+        huge[14..18].copy_from_slice(&0xFFFF_FFF0u32.to_le_bytes());
+        assert!(check_directory(&huge).is_err());
+        let mut far = bytes.clone();
+        far[18..22].copy_from_slice(&u32::MAX.to_le_bytes());
+        assert!(check_directory(&far).is_err());
+
+        // Two entries sharing one image claim twice what the file holds.
+        let mut shared = ico_of(&[encode_bmp_frame(&sample(16)), Vec::new()]);
+        let (first, second) = (DIR_HEADER_LEN, DIR_HEADER_LEN + DIR_ENTRY_LEN);
+        let size_and_offset = shared[first + 8..first + 16].to_vec();
+        shared[second + 8..second + 16].copy_from_slice(&size_and_offset);
+        assert!(check_directory(&shared).is_err());
+    }
+
+    #[test]
+    fn frames_over_the_size_limit_are_skipped() {
+        let wide = Rgba::filled(MAX_FRAME_PX + 1, 1, [9, 8, 7, 255]);
+        let tall = Rgba::filled(1, MAX_FRAME_PX + 1, [9, 8, 7, 255]);
+        let widest = Rgba::filled(MAX_FRAME_PX, 1, [1, 2, 3, 255]);
+        let bytes = ico_of(&[
+            encode_bmp_frame(&tall),
+            wide.encode_png(),
+            widest.encode_png(),
+            encode_bmp_frame(&sample(16)),
+        ]);
+        let parsed = parse_ico(&bytes).unwrap();
+        let sizes: Vec<(u32, u32)> = parsed.iter().map(|f| (f.image.w, f.image.h)).collect();
+        assert_eq!(sizes, [(MAX_FRAME_PX, 1), (16, 16)]);
+        assert_eq!(parsed[0].image, widest);
+        // Nothing within the limit: nothing readable.
+        assert!(parse_ico(&ico_of(&[encode_bmp_frame(&tall)])).is_err());
+    }
+
+    #[test]
+    fn frames_after_the_decode_budget_are_skipped() {
+        let full = Rgba::filled(MAX_FRAME_PX, MAX_FRAME_PX, [40, 80, 120, 255]).encode_png();
+        let fit = (MAX_DECODE_PX / u64::from(MAX_FRAME_PX * MAX_FRAME_PX)) as usize;
+        let parsed = parse_ico(&ico_of(&vec![full; fit + 1])).unwrap();
+        assert_eq!(parsed.len(), fit);
     }
 }

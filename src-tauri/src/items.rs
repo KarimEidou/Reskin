@@ -366,14 +366,19 @@ pub async fn pick_files(app: AppHandle, purpose: PickPurpose) -> CmdResult<Vec<I
     .map_err(|e| e.to_string())?
 }
 
+/// The project file's text. A project may be up to [`MAX_PROJECT_BYTES`],
+/// so it is read on the blocking pool: Tauri runs a synchronous command on
+/// the main thread, where both windows and the open/close handoff run.
 #[tauri::command]
-pub fn read_project(state: State<'_, AppState>, item: ItemId) -> CmdResult<String> {
+pub async fn read_project(state: State<'_, AppState>, item: ItemId) -> CmdResult<String> {
     let rec = state.items.get(&item).ok_or("unknown item")?;
     if rec.info.kind != ItemKind::Project {
         return Err("not a Reskin project".into());
     }
     let path = rec.path.ok_or("project has no path")?;
-    read_limited(&path)
+    tauri::async_runtime::spawn_blocking(move || read_limited(&path))
+        .await
+        .map_err(|e| e.to_string())?
 }
 
 fn read_limited(path: &Path) -> Result<String, String> {
@@ -481,6 +486,14 @@ pub(crate) mod tests {
         let items = with_skipped(vec![info("a")], 0);
         assert_eq!(items[0].skipped, None);
         assert!(with_skipped(Vec::new(), 3).is_empty());
+    }
+
+    /// Tauri runs a synchronous command on the main thread: reading a
+    /// project must be a future (which Tauri runs on its async runtime).
+    #[test]
+    fn reading_a_project_is_a_future() {
+        fn two<'a, A, F: std::future::Future>(_: impl Fn(State<'a, AppState>, A) -> F) {}
+        two(read_project);
     }
 
     #[test]
