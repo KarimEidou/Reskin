@@ -16,6 +16,9 @@
 //   without build and dev dependencies and proc macros (they only run
 //   while building) and without the workspace's own crates, described by
 //   `cargo metadata`.
+// * Native libraries: the WebView2 SDK's loader, which webview2-com-sys
+//   ships and links statically into reskin.exe on msvc targets, with the
+//   SDK's license from scripts/licenses/.
 // * License texts are the files each component ships (LICENSE*, COPYING*,
 //   NOTICE*, …), each distinct text once. A component that ships none gets
 //   its license's text as another component ships it (Apache-2.0,
@@ -192,6 +195,48 @@ export function linkedCrates(metadata, tree) {
 /** Runs cargo in the repository; its stdout. @param {string[]} args */
 function cargo(args) {
   return execFileSync('cargo', args, { cwd: ROOT, encoding: 'utf8', maxBuffer: 256 * 1024 * 1024 });
+}
+
+// ---------------------------------------------------------------------------
+// Native libraries
+// ---------------------------------------------------------------------------
+
+/**
+ * The WebView2 SDK (NuGet package Microsoft.Web.WebView2) each
+ * webview2-com-sys version ships, as its CHANGELOG names it. Its license
+ * is the SDK's LICENSE.txt, kept verbatim in scripts/licenses/.
+ * @type {Record<string, string>}
+ */
+const WEBVIEW2_SDK = { '0.38.2': '1.0.3650.58' };
+const WEBVIEW2_LICENSE = join(ROOT, 'scripts', 'licenses', 'Microsoft.Web.WebView2-LICENSE.txt');
+
+/**
+ * Libraries that are not crates but get linked into reskin.exe for
+ * `target`: on msvc, webview2-com-sys links the WebView2 SDK's
+ * WebView2LoaderStatic.lib (other targets load WebView2Loader.dll instead).
+ * @param {Component[]} crates the linked crates @param {string} target
+ * @returns {Component[]}
+ */
+export function nativeLibraries(crates, target) {
+  const sys = crates.find((c) => c.name === 'webview2-com-sys');
+  if (!sys || !target.endsWith('-msvc')) return [];
+  const version = WEBVIEW2_SDK[sys.version];
+  if (!version) {
+    throw new Error(
+      `webview2-com-sys ${sys.version} ships a WebView2 SDK this script doesn't know: add the SDK version its CHANGELOG names to WEBVIEW2_SDK, and check that the SDK's LICENSE.txt still matches ${WEBVIEW2_LICENSE}`,
+    );
+  }
+  return [
+    {
+      name: 'Microsoft.Web.WebView2',
+      version,
+      license: 'BSD-3-Clause',
+      url: `https://www.nuget.org/packages/Microsoft.Web.WebView2/${version}`,
+      authors: ['Microsoft Corporation'],
+      dir: sys.dir,
+      files: [WEBVIEW2_LICENSE],
+    },
+  ];
 }
 
 // ---------------------------------------------------------------------------
@@ -433,18 +478,19 @@ function main() {
   /** @type {CargoMetadata} */
   const metadata = JSON.parse(cargo(['metadata', '--format-version', '1', '--locked', '--filter-platform', args.target]));
   const rust = linkedCrates(metadata, tree);
-  const text = renderNotices(
-    pkg.version,
-    [
-      { title: 'JavaScript packages in the app pages', components: js },
-      { title: `Rust crates linked into reskin.exe for ${args.target}`, components: rust },
-    ],
-    sharedTexts([...js, ...rust]),
-  );
+  const native = nativeLibraries(rust, args.target);
+  const groups = [
+    { title: 'JavaScript packages in the app pages', components: js },
+    { title: `Rust crates linked into reskin.exe for ${args.target}`, components: rust },
+  ];
+  if (native.length > 0) {
+    groups.push({ title: `Native libraries linked into reskin.exe for ${args.target}`, components: native });
+  }
+  const text = renderNotices(pkg.version, groups, sharedTexts([...js, ...rust, ...native]));
   mkdirSync(dirname(args.out), { recursive: true });
   writeFileSync(args.out, text);
   console.log(
-    `✓ third-party notices: ${js.length} JavaScript packages, ${rust.length} Rust crates → ${args.out} (${(text.length / 1024).toFixed(0)} KB)`,
+    `✓ third-party notices: ${js.length} JavaScript packages, ${rust.length} Rust crates, ${native.length} native ${native.length === 1 ? 'library' : 'libraries'} → ${args.out} (${(text.length / 1024).toFixed(0)} KB)`,
   );
 }
 
