@@ -138,13 +138,15 @@
 <style>
   .split {
     --h: 36px;
-    --brand: linear-gradient(135deg, var(--accent-base) 0%, #4f7dff 58%, #1fb3d6 100%);
     position: relative;
     display: inline-flex;
     flex: none;
     height: var(--h);
     border-radius: var(--radius-md);
-    background: var(--brand);
+    /* The accent's fill shading into its pressed shade (one shade lighter on
+       hover, pressed when pressed): theme.ts keeps --on-accent at 4.5:1 on
+       each, whatever the Windows accent, and so across the gradients. */
+    background: linear-gradient(135deg, var(--accent) 0%, var(--accent-pressed) 100%);
     box-shadow:
       inset 0 1px 0 rgb(255 255 255 / 0.22),
       0 1px 2px rgb(var(--accent-dark-rgb) / 0.4),
@@ -166,7 +168,7 @@
   button {
     border: 0;
     background: transparent;
-    color: #fff;
+    color: var(--on-accent);
     font: inherit;
     cursor: default;
   }
@@ -179,14 +181,28 @@
     border-radius: var(--radius-md) 0 0 var(--radius-md);
     font-size: var(--text-md);
     font-weight: var(--weight-semibold);
-    text-shadow: 0 1px 1px rgb(0 0 0 / 0.18);
-    transition: background-color var(--fade-1) linear;
   }
-  .main:hover:not([aria-disabled='true']) {
-    background: rgb(255 255 255 / 0.1);
+  /* Hover: the gradient one shade lighter; pressed: the pressed shade —
+     eased in over the resting gradient. */
+  .main::before,
+  .caret::before {
+    content: '';
+    position: absolute;
+    inset: 0;
+    z-index: -1;
+    border-radius: inherit;
+    background: linear-gradient(135deg, var(--accent-hover) 0%, var(--accent) 100%);
+    opacity: 0;
+    transition: opacity var(--fade-1) linear;
   }
-  .main:active:not([aria-disabled='true']) {
-    background: rgb(0 0 0 / 0.08);
+  .main:hover:not([aria-disabled='true'])::before,
+  .caret:hover:not(:disabled)::before {
+    opacity: 1;
+  }
+  .main:active:not([aria-disabled='true'])::before,
+  .caret[aria-expanded='true']::before {
+    background: var(--accent-pressed);
+    opacity: 1;
   }
   .main:focus-visible,
   .caret:focus-visible {
@@ -218,32 +234,26 @@
     transform: none;
   }
   .face.working :global(.track) {
-    stroke: rgb(255 255 255 / 0.3);
+    stroke: rgb(var(--on-accent-rgb) / 0.3);
   }
   .face.working :global(.bar) {
-    stroke: #fff;
+    stroke: var(--on-accent);
   }
   .label {
     font-variant-numeric: tabular-nums;
   }
 
   .caret {
+    position: relative;
     display: grid;
     place-items: center;
     width: 32px;
     height: 100%;
-    border-left: 1px solid rgb(255 255 255 / 0.24);
+    border-left: 1px solid rgb(var(--on-accent-rgb) / 0.24);
     border-radius: 0 var(--radius-md) var(--radius-md) 0;
-    transition: background-color var(--fade-1) linear;
-  }
-  .caret:hover:not(:disabled) {
-    background: rgb(255 255 255 / 0.12);
   }
   .caret:disabled {
     opacity: 0.6;
-  }
-  .caret[aria-expanded='true'] {
-    background: rgb(0 0 0 / 0.12);
   }
 
   .menu {

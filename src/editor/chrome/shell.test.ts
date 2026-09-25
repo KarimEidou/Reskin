@@ -68,7 +68,7 @@ beforeEach(() => {
     }),
     openItems: vi.fn(async () => {}),
     importSources: vi.fn(async () => 0),
-    openLibraryDesign: vi.fn(async () => {}),
+    openLibraryDesign: vi.fn(async () => true),
     saveToLibrary: vi.fn(async () => ({ id: 'lib1', name: 'Neon', thumb: '', updatedAt: 0, bytes: 1 })),
     navigate: vi.fn((v: string) => {
       session.view = v;
@@ -216,6 +216,12 @@ describe('Library designs', () => {
     answerConfirm(true);
     expect(await accepted).toBe(true);
     expect(session.openLibraryDesign).toHaveBeenCalledTimes(1);
+  });
+
+  it('is not open when the session dropped it (the editor closed and opened again while it loaded)', async () => {
+    session.openLibraryDesign.mockResolvedValueOnce(false);
+    expect(await shell.openLibraryDesign(neon)).toBe(false);
+    expect(session.openLibraryDesign).toHaveBeenCalledWith('lib1', 'Neon');
   });
 
   it('saves over the open design’s Library design, or as a new one', async () => {

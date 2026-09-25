@@ -217,6 +217,39 @@ test.describe('removing a queued item', () => {
     await idle(page);
     expect((await session(page)).open).toBe('Steam');
   });
+
+  test('with the keyboard, focus moves to the thumbnail in its place, else the one before it — never <body>', async ({ page }) => {
+    await openQueue(page, [SAMPLE_PATHS.steam, SAMPLE_PATHS.notes, SAMPLE_PATHS.site]);
+    await idle(page);
+    const thumb = (name: string) => page.getByTestId('queue-item').and(page.locator(`[aria-label^="${name},"]`));
+    const remove = (name: string) => page.getByRole('button', { name: `Remove ${name} from the queue` });
+
+    // The open design, changed: its × asks first (focus on Cancel), and Remove takes it out.
+    await paint(page);
+    await thumb('Steam').focus();
+    await page.keyboard.press('Tab');
+    await expect(remove('Steam')).toBeFocused();
+    await page.keyboard.press('Enter');
+    await expect(ask(page, 'Steam')).toBeVisible();
+    await page.keyboard.press('Tab');
+    await expect(ask(page, 'Steam').getByRole('button', { name: 'Remove', exact: true })).toBeFocused();
+    await page.keyboard.press('Enter');
+    await expect.poll(async () => (await session(page)).names).toEqual(['Notes', 'Docs Portal']);
+    // The next item's thumbnail took its place, and its focus.
+    await expect(thumb('Notes')).toBeFocused();
+    await idle(page);
+    await expect(thumb('Notes')).toBeFocused();
+
+    // The last one (nothing unsaved: it goes at once): the thumbnail before it.
+    await page.keyboard.press('Tab');
+    await page.keyboard.press('Tab');
+    await expect(thumb('Docs Portal')).toBeFocused();
+    await page.keyboard.press('Tab');
+    await expect(remove('Docs Portal')).toBeFocused();
+    await page.keyboard.press('Enter');
+    await expect.poll(async () => (await session(page)).names).toEqual(['Notes']);
+    await expect(thumb('Notes')).toBeFocused();
+  });
 });
 
 test.describe('stickers panel', () => {

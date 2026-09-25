@@ -5,8 +5,10 @@
 import { mkdirSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import type { Page } from '@playwright/test';
+import type { Locator, Page } from '@playwright/test';
+import { PNG } from 'pngjs';
 import type { EditorSession } from '../src/editor/state/session.svelte';
+import { contrast } from '../src/lib/theme/color';
 import { expect, SAMPLE_PATHS, simulateOpen, test, type E2EConfig } from './support/fixtures';
 
 type Point = { x: number; y: number };
@@ -1336,6 +1338,8 @@ test.describe('robustness', () => {
     await page.keyboard.press('Control+,');
     await expect(host).toHaveAttribute('data-view', 'settings');
     await expect(host).toBeFocused();
+    // A screen reader says where focus landed: the view, by name.
+    await expect(page.getByRole('main', { name: 'Settings' })).toBeFocused();
 
     // From a control of Settings, the palette goes back to the editor.
     await page.getByRole('navigation', { name: 'Settings sections' }).getByRole('button').first().focus();
@@ -1345,11 +1349,56 @@ test.describe('robustness', () => {
     await expect(host).toHaveAttribute('data-view', 'edit');
     await expect(page.getByTestId('canvas')).toBeVisible();
     await expect(host).toBeFocused();
+    await expect(page.getByRole('main', { name: 'Edit' })).toBeFocused();
     const before = await compositeHash(page);
     await page.keyboard.press('Delete');
     await page.keyboard.press('Backspace');
     expect(await labels()).not.toContain('Clear');
     expect(await compositeHash(page)).toBe(before);
+  });
+
+  test('a press on empty space in the bars around the canvas gives the canvas its keys back', async ({ page }) => {
+    await openWorkspace(page);
+    const canvas = page.getByTestId('canvas');
+    const labels = () => withSession(page, (s) => s.engine.historyEntries.map((e) => e.label));
+    /** A point of `bar` where a press focuses nothing in it (the view host would take it). */
+    const emptySpot = (testid: string) =>
+      page.evaluate((id) => {
+        const bar = document.querySelector(`[data-testid="${id}"]`)!;
+        const host = document.querySelector('[data-view-host]');
+        const r = bar.getBoundingClientRect();
+        const y = r.top + r.height / 2;
+        for (let x = r.right - 2; x > r.left; x -= 4) {
+          const el = document.elementFromPoint(x, y);
+          const focusable = el?.closest('a[href], button, input, select, textarea, summary, [tabindex], [contenteditable="true"]');
+          if (el && bar.contains(el) && focusable === host) return { x, y };
+        }
+        throw new Error(`no empty space in ${id}`);
+      }, testid);
+
+    // Focus on the view itself, as a view change from the keyboard leaves it: Delete there clears nothing.
+    await page.locator('[data-view-host]').focus();
+    await page.keyboard.press('Delete');
+    expect(await labels()).not.toContain('Clear');
+
+    // A press beside the controls of the tool options bar: the arrows nudge the layer, Enter commits.
+    await page.getByTestId('tool-move').click();
+    const options = await emptySpot('tool-options');
+    await page.mouse.click(options.x, options.y);
+    await expect(canvas).toBeFocused();
+    // Focus from a press shows no ring.
+    await expect(canvas).toHaveAttribute('data-pointer-focus', '');
+    await page.keyboard.press('ArrowRight');
+    await page.keyboard.press('Enter');
+    await expect.poll(labels).toContain('Move');
+
+    // …and of the bottom bar: Delete clears the layer.
+    await page.locator('[data-view-host]').focus();
+    const bottom = await emptySpot('bottom-bar');
+    await page.mouse.click(bottom.x, bottom.y);
+    await expect(canvas).toBeFocused();
+    await page.keyboard.press('Delete');
+    await expect.poll(labels).toContain('Clear');
   });
 
   test('Space activates a keyboard-focused rail button instead of panning', async ({ page }) => {
@@ -1424,6 +1473,71 @@ test.describe('robustness', () => {
     expect(await withSession(page, (s) => s.compare)).toBe('off');
     await expect(toggle).toBeDisabled();
   });
+});
+
+test.describe('legible chrome', () => {
+  /**
+   * The least contrast `text`'s colour has on what is drawn behind its
+   * glyphs (a screenshot of their box with the text hidden), once nothing
+   * animates any more.
+   */
+  async function worstContrast(page: Page, text: Locator): Promise<number> {
+    await expect
+      .poll(() => page.evaluate(() => document.getAnimations().filter((a) => a.playState === 'running').length))
+      .toBe(0);
+    const { clip, color } = await text.evaluate((el) => {
+      const range = document.createRange();
+      range.selectNodeContents(el);
+      const { x, y, width, height } = range.getBoundingClientRect();
+      return { clip: { x, y, width, height }, color: getComputedStyle(el).color };
+    });
+    await text.evaluate((el) => (el.style.visibility = 'hidden'));
+    const behind = PNG.sync.read(await page.screenshot({ clip }));
+    await text.evaluate((el) => (el.style.visibility = ''));
+    const [r, g, b] = color.match(/[\d.]+/g)!.map(Number);
+    let worst = Infinity;
+    for (let i = 0; i < behind.data.length; i += 4) {
+      worst = Math.min(worst, contrast({ r: r!, g: g!, b: b! }, { r: behind.data[i]!, g: behind.data[i + 1]!, b: behind.data[i + 2]! }));
+    }
+    return worst;
+  }
+
+  /** Windows accents across the palette: light ones take dark text, dark ones light text. */
+  const ACCENTS = ['#FFB900', '#0078D4', '#9A0089', '#00B7C3', '#E74856', '#7A7574'];
+
+  for (const theme of ['dark', 'light'] as const) {
+    test(`Save & Apply and the command search keep 4.5:1, resting and hovered, whatever the accent (${theme})`, async ({ page }) => {
+      await openWorkspace(page, [SAMPLE_PATHS.steam], { settings: { theme } });
+      const apply = page.getByTestId('apply-button');
+      const label = apply.locator('.face.idle .label');
+      await expect(apply).not.toHaveClass(/blocked/);
+      const failures: string[] = [];
+      for (const accent of ACCENTS) {
+        await page.evaluate((a) => {
+          window.__e2e!.setAccent(a);
+          window.dispatchEvent(new Event('focus'));
+        }, accent);
+        await expect
+          .poll(() => page.evaluate(() => document.documentElement.style.getPropertyValue('--accent-base')))
+          .toBe(accent.toLowerCase());
+        await page.mouse.move(1, 1);
+        const resting = await worstContrast(page, label);
+        await apply.getByRole('button', { name: 'Save & Apply' }).hover();
+        const hovered = await worstContrast(page, label);
+        if (resting < 4.5) failures.push(`${accent}: Save & Apply ${resting.toFixed(2)}`);
+        if (hovered < 4.5) failures.push(`${accent}: Save & Apply hovered ${hovered.toFixed(2)}`);
+      }
+      expect(failures).toEqual([]);
+
+      // The search is a control on the panel: over the wallpaper that takes the most from it.
+      await page.addStyleTag({ content: `html, body { background: ${theme === 'dark' ? '#fff' : '#000'} !important; }` });
+      const search = page.locator('header.titlebar .search');
+      await page.mouse.move(1, 1);
+      expect(await worstContrast(page, search.getByText('Search commands'))).toBeGreaterThanOrEqual(4.5);
+      await search.hover();
+      expect(await worstContrast(page, search.getByText('Search commands'))).toBeGreaterThanOrEqual(4.5);
+    });
+  }
 });
 
 test.describe('small window', () => {

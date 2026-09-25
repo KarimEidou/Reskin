@@ -109,6 +109,12 @@ export function oklchToRgb(color: Oklch): Rgb {
   return { r: r!, g: g!, b: b! };
 }
 
+/** `top` at `alpha` (0..1) over an opaque `under`, as the page composites it. */
+export function blend(top: Rgb, alpha: number, under: Rgb): Rgb {
+  const mix = (t: number, u: number) => t * alpha + u * (1 - alpha);
+  return { r: mix(top.r, under.r), g: mix(top.g, under.g), b: mix(top.b, under.b) };
+}
+
 /** WCAG relative luminance (0 = black, 1 = white). */
 export function luminance({ r, g, b }: Rgb): number {
   return 0.2126 * toLinear(r) + 0.7152 * toLinear(g) + 0.0722 * toLinear(b);
