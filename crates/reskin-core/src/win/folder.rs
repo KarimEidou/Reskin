@@ -78,6 +78,13 @@ pub fn read_folder_icon(path: &Path) -> Result<Option<(String, i32)>> {
     read_ini_icon(path)
 }
 
+/// The folder's custom icon as an absolute path — `%VARS%` expanded and a
+/// relative location resolved against the folder, as the shell does — and
+/// its index; `None` when the folder has no custom icon.
+pub fn folder_icon_path(path: &Path) -> Result<Option<(PathBuf, i32)>> {
+    Ok(read_folder_icon(path)?.map(|(raw, index)| (resolve_icon_path(&raw, Some(path)), index)))
+}
+
 fn read_ini_icon(folder: &Path) -> Result<Option<(String, i32)>> {
     let ini = match read_ini(&desktop_ini(folder)) {
         Ok(ini) => ini,
@@ -113,13 +120,13 @@ pub fn set_folder_icon(path: &Path, icon: Option<(&Path, i32)>) -> Result<()> {
     }
 }
 
+/// Whether the folder shows `icon` at `index`. `icon` is resolved as the
+/// stored location is: an original icon put back may use `%VARS%` or be
+/// relative to the folder.
 fn shows(path: &Path, icon: &Path, index: i32) -> Result<bool> {
-    Ok(read_folder_icon(path)?.is_some_and(|(file, i)| {
-        i == index
-            && paths_equal_ci(
-                resolve_icon_path(&file, Some(path)).as_os_str(),
-                icon.as_os_str(),
-            )
+    let wanted = resolve_icon_path(&icon.to_string_lossy(), Some(path));
+    Ok(folder_icon_path(path)?.is_some_and(|(file, i)| {
+        i == index && paths_equal_ci(file.as_os_str(), wanted.as_os_str())
     }))
 }
 

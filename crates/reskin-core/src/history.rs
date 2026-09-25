@@ -738,8 +738,10 @@ impl Journal {
 
     /// The steps undoing entry `id` together with the entries applied with
     /// it — its group, e.g. matching pins — that are still their targets'
-    /// applied entries; `id` comes first. Fails, like
-    /// [`Journal::plan_undo`], when `id` is not its target's current icon.
+    /// applied entries; `id` comes first, and the group's steps are meant
+    /// to run only once it went through (it may wait for a UAC prompt the
+    /// user declines). Fails, like [`Journal::plan_undo`], when `id` is not
+    /// its target's current icon.
     pub fn undo_steps(&self, id: &str) -> Result<Vec<RestoreStep>> {
         self.plan_undo(id)?;
         let group = self
