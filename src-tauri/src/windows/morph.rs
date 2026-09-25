@@ -57,9 +57,10 @@ struct Inner {
     phase: Phase,
     acks: HashSet<(u32, AckStage)>,
     /// Latest box session: numbers every picture handed to the box
-    /// (`box:handoff`, `box:collapse`), apart from the editor's `session`.
+    /// (`box:handoff`, `box:collapse`) and each of its halves of a swap
+    /// (`box:conceal`, `box:reveal`), apart from the editor's `session`.
     box_session: u32,
-    /// Latest box session whose picture the box confirmed on screen.
+    /// Latest box session the box confirmed on screen.
     box_painted: u32,
     /// The box was visible when this session opened (so it morphs back).
     box_was_visible: bool,
@@ -90,7 +91,7 @@ impl Morph {
         self.cv.notify_all();
     }
 
-    /// Records that the box shows the picture of box session `session`.
+    /// Records that the box shows what box session `session` asked for.
     pub fn box_painted(&self, session: u32) {
         let mut g = self.lock();
         g.box_painted = g.box_painted.max(session);
@@ -132,19 +133,19 @@ impl Morph {
         acked
     }
 
-    /// Numbers a new picture for the box.
+    /// Numbers a new picture for the box, or its half of a swap.
     fn next_box_session(&self) -> u32 {
         let mut g = self.lock();
         g.box_session += 1;
         g.box_session
     }
 
-    /// Waits for the box to confirm the picture of box session `session`.
+    /// Waits for the box to confirm box session `session` on screen.
     fn wait_box_painted(&self, session: u32, timeout: Duration) -> bool {
         let painted = self.wait_until(timeout, |g| g.box_painted >= session);
         if !painted {
             log::line(&format!(
-                "morph: the box did not confirm its picture {session} in time; going on"
+                "morph: the box did not confirm box session {session} in time; going on"
             ));
         }
         painted

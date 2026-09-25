@@ -606,18 +606,36 @@ test.describe('events from Rust', () => {
     expect(open).toMatchObject({ boxPainted: true, boxConcealed: true });
     await expect(hint).toHaveCount(0);
     await expect(box.icon).toHaveCount(0);
-    // When the box paints again, and when (and how) the hint comes back.
-    type Watch = { __watch?: { paintedAt: number | null; hintAt: number | null; hintOpacity: string | null } };
+    // When the box paints again, and when (and how) the hint comes back:
+    // where the mark is then, and where it starts from as the hint appears.
+    type Rect = { x: number; y: number; w: number; h: number };
+    interface Watched {
+      paintedAt: number | null;
+      hintAt: number | null;
+      hintOpacity: string | null;
+      /** The mark as the box paints again, and as the hint appears. */
+      mark: Rect | null;
+      markFrom: Rect | null;
+    }
+    type Watch = { __watch?: Watched };
     await page.evaluate(() => {
       const root = document.querySelector('main.box-page')!;
-      const watch: NonNullable<Watch['__watch']> = { paintedAt: null, hintAt: null, hintOpacity: null };
+      const mark = (): Rect => {
+        const r = root.querySelector('.glyphs')!.getBoundingClientRect();
+        return { x: r.x, y: r.y, w: r.width, h: r.height };
+      };
+      const watch: Watched = { paintedAt: null, hintAt: null, hintOpacity: null, mark: null, markFrom: null };
       (window as Watch).__watch = watch;
       new MutationObserver(() => {
-        if (watch.paintedAt === null && !root.classList.contains('veiled')) watch.paintedAt = performance.now();
+        if (watch.paintedAt === null && !root.classList.contains('veiled')) {
+          watch.paintedAt = performance.now();
+          watch.mark = mark();
+        }
         const shown = root.querySelector('.hint');
         if (shown && watch.hintAt === null) {
           watch.hintAt = performance.now();
           watch.hintOpacity = getComputedStyle(shown).opacity;
+          watch.markFrom = mark();
         }
       }).observe(root, { subtree: true, childList: true, attributes: true, attributeFilter: ['class'] });
     });
@@ -628,9 +646,40 @@ test.describe('events from Rust', () => {
     await expect(hint).toHaveText(FIRST_RUN_HINT);
     const watch = (await page.evaluate(() => (window as Watch).__watch))!;
     expect(watch.paintedAt).not.toBeNull();
-    // It comes a moment later, fading in.
+    // It comes a moment later, fading in, and the mark moves up out of its
+    // way from where it was rather than jumping there.
     expect(watch.hintAt! - watch.paintedAt!).toBeGreaterThanOrEqual(200);
     expect(Number(watch.hintOpacity)).toBeLessThan(1);
+    for (const k of ['x', 'y', 'w', 'h'] as const) {
+      expect(Math.abs(watch.markFrom![k] - watch.mark![k])).toBeLessThanOrEqual(0.5);
+    }
+    await box.expectStatic();
+    const markTo = await box.visual.locator('.glyphs').boundingBox();
+    expect(markTo!.width).toBeLessThan(watch.mark!.w * 0.8);
+  });
+
+  test('an error message giving way to the hint leaves the mark where the message put it', async ({ openBox, page }) => {
+    const box = await openBox({ firstRun: true, settings: { animationSpeed: 2 } });
+    await box.expectStatic();
+    const lifted = (await box.visual.locator('.glyphs').boundingBox())!;
+    await emit(page, 'box:flight', { phase: 'error', icon: null, durationMs: 480, message: 'Nope' });
+    await box.expectState('error');
+    // Every frame until the hint is back: the mark never drops back to the
+    // middle to move up again (it is 38 / 28 as large there).
+    await page.evaluate(() => {
+      const w = window as unknown as { __markWidths: number[] };
+      w.__markWidths = [];
+      const frame = () => {
+        w.__markWidths.push(document.querySelector('.glyphs')!.getBoundingClientRect().width);
+        requestAnimationFrame(frame);
+      };
+      requestAnimationFrame(frame);
+    });
+    await box.expectState('idle', 15000);
+    await expect(box.visual.locator('.hint')).toHaveText(FIRST_RUN_HINT);
+    await box.expectStatic();
+    const widths = await page.evaluate(() => (window as unknown as { __markWidths: number[] }).__markWidths);
+    expect(Math.max(...widths)).toBeLessThan(lifted.width * 1.1);
   });
 
   test('a hotkey another app holds at start-up: the box says so once, and its description while it lasts', async ({ openBox, page }) => {

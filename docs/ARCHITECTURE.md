@@ -161,7 +161,8 @@ Rust: the swap: Clear{session} + (held) box:reveal{session: box session}
    box:    on its next frame paints the picture it holds; double rAF →
            box_painted(session). What only the box shows — the hint, the
            Undo chip — is not in the proxy: it comes 250 ms after the box
-           shows its picture on its own again, fading in
+           shows its picture on its own again, fading in (the mark moves
+           up out of the hint's way from where the proxy had it)
 Rust: waits for cleared (1 s) and the box's box_painted (300 ms from
       box:reveal); hide editor, box back to the top of the topmost band
       (+ low-memory: destroy the editor); glide box home if needed.

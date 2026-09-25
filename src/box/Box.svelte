@@ -558,7 +558,8 @@
     opacity: 0;
   }
 
-  /* What only the box shows comes back fading in (DECORATION_DELAY_MS);
+  /* What only the box shows comes back fading in (DECORATION_DELAY_MS),
+     the mark moving up out of the hint's way rather than jumping there;
      the Undo chip has an entrance of its own. */
   .box-page :global(.hint:not(.message)) {
     animation: hint-in var(--fade-3) var(--ease-decelerate) both;
@@ -566,6 +567,23 @@
   @keyframes hint-in {
     from {
       opacity: 0;
+    }
+  }
+  .box-page :global(.content:has(> .hint) > .glyphs) {
+    animation: glyphs-up var(--dur-spring) var(--ease-spring);
+  }
+  /* An error message lifts the mark at once, as it shakes; the hint that
+     may follow it finds the mark lifted already (the animation, finished,
+     does not start again). */
+  .box-page :global(.content:has(> .hint.message) > .glyphs) {
+    animation-duration: 0s;
+  }
+  /* From where the mark is without a caption (BoxVisual's `.glyphs`: 38 %
+     of the box, centred) to where it is with one (`.with-hint .glyphs`:
+     28 %, its centre 19 % higher, which is 19 / 28 of its own height). */
+  @keyframes glyphs-up {
+    from {
+      transform: translateY(67.857%) scale(1.3571);
     }
   }
 
