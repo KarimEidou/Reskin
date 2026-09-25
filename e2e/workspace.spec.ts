@@ -1309,17 +1309,16 @@ test.describe('robustness', () => {
 
   test('closing a toast from the keyboard moves focus to the next toast, then back to where it came from', async ({ page }) => {
     await openWorkspace(page);
+    const origin = page.getByTestId('tool-brush');
+    await origin.focus();
     await page.evaluate(() => window.__e2e!.failNext('export_file', 'the disk is full'));
     await withSession(page, (s) => void s.exportAs('png'));
     await withSession(page, (s) => void s.saveToLibrary());
     const alert = page.getByRole('alert').filter({ hasText: 'the disk is full' });
     const saved = page.getByRole('status').filter({ hasText: 'Saved' });
-    await expect(alert).toBeVisible();
-    await expect(saved).toBeVisible();
-
-    const origin = page.getByTestId('tool-brush');
-    await origin.focus();
+    // Focus in the stack stops the toasts timing out, however slow the machine.
     await alert.getByRole('button', { name: 'Dismiss notification' }).focus();
+    await expect(saved).toBeVisible();
     await page.keyboard.press('Enter');
     await expect(alert.getByText('the disk is full')).toHaveCount(0);
     await expect(saved.getByRole('button', { name: 'Dismiss notification' })).toBeFocused();
@@ -1455,6 +1454,33 @@ test.describe('small window', () => {
     await expect(page.getByTestId('apply-style-all')).toHaveAccessibleName('Apply style to all');
     await expect(page.getByTestId('save-library')).toHaveAccessibleName('Save to Library');
     await expect(page.getByTestId('export-menu')).toHaveAccessibleName('Export');
+  });
+
+  test('a Tab from a segmented control at either end of "More options" closes it', async ({ page }) => {
+    await openWorkspace(page);
+    // The eyedropper's two choices do not fit the bar here: "More options"
+    // shows, with "Sample" first and "Sample size" last. A segmented control
+    // is one Tab stop (its selected segment), so the Tab that leaves it can
+    // start with other segments before or after it.
+    await setTool(page, 'eyedropper');
+    await withSession(page, (s) => s.engine.setToolOptions('eyedropper', { sample: 'layer', size: 1 }));
+    const trigger = page.getByTestId('tool-options').getByRole('button', { name: 'More eyedropper options' });
+    const more = page.getByRole('dialog', { name: 'Eyedropper options' });
+    const selected = (group: string) => more.getByRole('radiogroup', { name: group, exact: true }).getByRole('radio', { checked: true });
+
+    await trigger.focus();
+    await page.keyboard.press('Enter');
+    await selected('Sample').focus();
+    await page.keyboard.press('Shift+Tab');
+    await expect(more).toHaveCount(0);
+    await expect(trigger).toBeFocused();
+
+    await page.keyboard.press('Enter');
+    await selected('Sample size').focus();
+    await page.keyboard.press('Tab');
+    await expect(more).toHaveCount(0);
+    // On from the trigger, as without the popover.
+    await expect(page.getByTestId('canvas')).toBeFocused();
   });
 
   test('the rail shows every tool and the colour chips without scrolling', async ({ page }) => {

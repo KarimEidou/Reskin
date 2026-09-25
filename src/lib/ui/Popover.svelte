@@ -44,6 +44,12 @@
   /** What had focus when the popover opened (never the page itself). */
   let opener: HTMLElement | null = null;
 
+  /**
+   * The popover's Tab stops, in DOM order: not the other options of a
+   * roving-tabindex group (a segmented control's unselected segments).
+   */
+  const tabStops = (node: HTMLElement) => focusableIn(node).filter((el) => el.tabIndex >= 0);
+
   function close(reason: 'outside' | 'escape' | 'tab'): void {
     open = false;
     onclose?.();
@@ -65,7 +71,7 @@
       const from = document.activeElement;
       if (!from || !node.contains(from)) return;
       const onward = e.shiftKey ? Node.DOCUMENT_POSITION_PRECEDING : Node.DOCUMENT_POSITION_FOLLOWING;
-      if (focusableIn(node).some((el) => from.compareDocumentPosition(el) & onward)) return;
+      if (tabStops(node).some((el) => from.compareDocumentPosition(el) & onward)) return;
       if (e.shiftKey) e.preventDefault();
       close('tab');
     };
