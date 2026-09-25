@@ -611,6 +611,60 @@ test.describe('the morph frame', () => {
     expectNoViewRestyle(recalcs, view);
   });
 
+  // The held proxy (painted from Reveal on, the swap with the box) must cost
+  // the expand nothing: its picture is rastered as the morph gives it a
+  // layer of its own, not again frame after frame while it moves and fades
+  // — a proxy re-rastered, or its layer dropped and made again, would add
+  // that work to every frame of the morph. Counted, not timed: it holds on
+  // any machine.
+  test('an open morph never re-rasters the box proxy frame after frame', async ({ page, browser }) => {
+    const items = await freshEditor(page, [SAMPLE_PATHS.steam]);
+    const devtools = await cdp(page);
+    // The element each compositor layer draws (DevTools' layer tree).
+    const nodeOf = new Map<number, number>();
+    devtools.on('LayerTree.layerTreeDidChange', ({ layers }) => {
+      for (const l of layers ?? []) if (l.backendNodeId) nodeOf.set(Number(l.layerId), l.backendNodeId);
+    });
+    await devtools.send('LayerTree.enable');
+    const session = 1;
+    await pushEditorCmd(page, { type: 'prepare', session, boxRect: BOX_RECT, items, view: 'edit', settings: await settings(page), morph: true });
+    expect(await waitForAck(page, session, 'prepared')).toBe(true);
+    const { root } = await devtools.send('DOM.getDocument', { depth: 0 });
+    const { nodeId } = await devtools.send('DOM.querySelector', { nodeId: root.nodeId, selector: '[data-testid="box-proxy"]' });
+    const proxy = (await devtools.send('DOM.describeNode', { nodeId })).node.backendNodeId;
+
+    type RasterEvent = { name: string; ts: number; args?: { tileData?: { layerId: number; sourceFrameNumber: number } } };
+    await browser.startTracing(page, { categories: ['disabled-by-default-devtools.timeline', 'blink.user_timing'] });
+    let events: RasterEvent[] = [];
+    try {
+      await page.evaluate(() => performance.mark('perf:from'));
+      await pushEditorCmd(page, { type: 'reveal', session });
+      expect(await waitForAck(page, session, 'revealed')).toBe(true);
+      await pushEditorCmd(page, { type: 'expand', session, morph: true });
+      expect(await waitForAck(page, session, 'expanded')).toBe(true);
+      await page.evaluate(() => performance.mark('perf:to'));
+    } finally {
+      events = (JSON.parse((await browser.stopTracing()).toString('utf8')) as { traceEvents: RasterEvent[] }).traceEvents;
+      await devtools.send('LayerTree.disable');
+    }
+    const mark = (name: string) => events.find((e) => e.name === name)?.ts;
+    const [from, to] = [mark('perf:from'), mark('perf:to')];
+    expect(from, 'trace marks').toBeDefined();
+    expect(to, 'trace marks').toBeDefined();
+    const rasters = events.filter((e) => e.name === 'RasterTask' && e.ts >= from! && e.ts <= to! && e.args?.tileData);
+    // Without the proxy's layer, or any raster at all, it would pass vacuously.
+    const proxyLayers = [...nodeOf].filter(([, node]) => node === proxy).map(([layer]) => layer);
+    expect(proxyLayers, 'the proxy morphs as a layer of its own').not.toEqual([]);
+    expect(rasters.length, 'rasters during the open').toBeGreaterThan(0);
+    const proxyFrames = new Set(
+      rasters.filter((e) => proxyLayers.includes(e.args!.tileData!.layerId)).map((e) => e.args!.tileData!.sourceFrameNumber),
+    );
+    // Its picture as the morph starts, and once more at the size it grows
+    // to (the compositor re-rasters a layer scaled up by a main-thread
+    // animation once); a morph has some 25 frames.
+    expect(proxyFrames.size, 'frames that raster the proxy').toBeLessThanOrEqual(2);
+  });
+
   test('a morphing panel takes neither the pointer nor the focus, without going inert', async ({ page }) => {
     // Half speed: the collapse runs about a second.
     await freshEditor(page, [], { settings: { animationSpeed: 0.5 } });
