@@ -13,9 +13,9 @@ Easier to download, and the links in the app go where they should.
 ### Changed
 
 - The downloads have short names that stay the same from one release to the
-  next — `Reskin-Setup.exe`, `Reskin-Portable.exe` and `Reskin.msi` — so the
-  newest installer is always one click away:
-  <https://github.com/KarimEidou/Reskin/releases/latest/download/Reskin-Setup.exe>.
+  next — `Reskin-Setup.exe`, `Reskin-Portable.exe` and `Reskin.msi` — so
+  [the newest installer](https://github.com/KarimEidou/Reskin/releases/latest/download/Reskin-Setup.exe)
+  is always one click away.
 - Release notes start with what to download and how to install it.
 
 ### Fixed

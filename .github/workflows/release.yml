@@ -1,8 +1,17 @@
 name: Release
 
+# Two ways to publish a release:
+# * Actions > Release > Run workflow: releases the version in package.json
+#   from the commit it runs on and creates its tag (vX.Y.Z) there.
+# * Pushing a vX.Y.Z tag.
 on:
   push:
     tags: ['v*']
+  workflow_dispatch:
+
+concurrency:
+  group: release
+  cancel-in-progress: false
 
 permissions:
   contents: read
@@ -20,14 +29,36 @@ jobs:
       contents: read
       actions: read
     outputs:
+      tag: ${{ steps.tag.outputs.tag }}
       notes: ${{ steps.notes.outputs.notes }}
     steps:
       - uses: actions/checkout@v5
+      - name: The tag to release
+        id: tag
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          # A pushed tag names itself. Run from the Actions tab, the release is
+          # the version in package.json, tagged on this commit when it is
+          # published; a tag of that name on another commit stops it.
+          if [ "$GITHUB_REF_TYPE" = tag ]; then
+            tag="$GITHUB_REF_NAME"
+          else
+            tag="v$(node -p 'require("./package.json").version')"
+            if existing=$(gh api "repos/$GITHUB_REPOSITORY/commits/$tag" --jq .sha 2>/dev/null) && [ "$existing" != "$GITHUB_SHA" ]; then
+              echo "::error::$tag is already released from $existing. Raise the version in package.json, tauri.conf.json and Cargo.toml, add its CHANGELOG section, then run the release again."
+              exit 1
+            fi
+          fi
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "releasing $tag from $GITHUB_SHA"
       - name: Versions match the tag
+        env:
+          TAG: ${{ steps.tag.outputs.tag }}
         run: |
           node --input-type=module -e '
             import { readFileSync } from "node:fs";
-            const tag = process.env.GITHUB_REF_NAME.replace(/^v/, "");
+            const tag = process.env.TAG.replace(/^v/, "");
             let table = "";
             let cargo;
             for (const line of readFileSync("Cargo.toml", "utf8").split(/\r?\n/)) {
@@ -46,55 +77,16 @@ jobs:
             if (wrong.length > 0) process.exit(1);
             console.log(`package.json, tauri.conf.json and Cargo.toml are all ${tag}`);
           '
-      - name: Release notes from CHANGELOG.md
+      - name: Release notes (downloads, then the CHANGELOG section)
         id: notes
+        env:
+          TAG: ${{ steps.tag.outputs.tag }}
         run: |
-          # The release text is the tag's section of CHANGELOG.md (GitHub adds
-          # its generated list of changes below it). Taken here, before the
-          # wait for CI, so a tag the CHANGELOG doesn't describe fails at once.
-          node --input-type=module -e '
-            import { randomUUID } from "node:crypto";
-            import { appendFileSync, readFileSync } from "node:fs";
-            const tag = process.env.GITHUB_REF_NAME;
-            const version = tag.replace(/^v/, "");
-            const lines = readFileSync("CHANGELOG.md", "utf8").split(/\r?\n/);
-            const start = lines.findIndex((line) => line.startsWith(`## [${version}]`));
-            if (start < 0) {
-              console.log(`::error::CHANGELOG.md has no "## [${version}]" section`);
-              process.exit(1);
-            }
-            // Up to the next version, the link references at the end, or EOF.
-            const rest = lines.slice(start + 1);
-            const end = rest.findIndex((line) => line.startsWith("## [") || /^\[[^\]]+\]:\s/.test(line));
-            // A release text shows every line break, so the wrapped lines of a
-            // paragraph or list item become one. Only plain text is joined:
-            // code, headings, quotes, tables, HTML and hard breaks stay as
-            // they are, and a line starting a list item or rule starts anew.
-            const plain = (line) => line.trim() !== "" && !/^( {4}|\t)|^\s*(#|>|<|```|~~~)|\|/.test(line);
-            const section = [];
-            let fenced = false;
-            for (const line of end < 0 ? rest : rest.slice(0, end)) {
-              if (/^\s*(```|~~~)/.test(line)) fenced = !fenced;
-              const prev = section.at(-1);
-              const joins =
-                !fenced && prev !== undefined && plain(prev) && !/( {2}|\\)$/.test(prev) &&
-                plain(line) && !/^\s*(?:[-*+](?:\s|$)|\d+[.)](?:\s|$)|[=-]+\s*$|([-*_])(?:\s*\1){2,}\s*$)/.test(line);
-              if (joins) section[section.length - 1] = `${prev.trimEnd()} ${line.trimStart()}`;
-              else section.push(line);
-            }
-            const notes = section.join("\n").trim();
-            if (!notes) {
-              console.log(`::error::the "## [${version}]" section of CHANGELOG.md is empty`);
-              process.exit(1);
-            }
-            const readme = `${process.env.GITHUB_SERVER_URL}/${process.env.GITHUB_REPOSITORY}/blob/${tag}/README.md`;
-            const unsigned =
-              `Reskin is not code-signed yet: see [Windows protected your PC](${readme}#windows-protected-your-pc) ` +
-              "for the SmartScreen warning, and check the downloads against `SHA256SUMS.txt`.";
-            const eof = `EOF_${randomUUID()}`;
-            appendFileSync(process.env.GITHUB_OUTPUT, `notes<<${eof}\n${notes}\n\n---\n\n${unsigned}\n${eof}\n`);
-            console.log(`release notes: the ${version} section of CHANGELOG.md (${notes.split("\n").length} lines)`);
-          '
+          # Taken here, before the wait for CI, so a version the CHANGELOG
+          # doesn't describe fails at once (scripts/release-notes.mjs).
+          node scripts/release-notes.mjs "$TAG" --out "$RUNNER_TEMP/notes.md"
+          eof="EOF_$(od -An -N16 -tx1 /dev/urandom | tr -d ' \n')"
+          { echo "notes<<$eof"; cat "$RUNNER_TEMP/notes.md"; echo "$eof"; } >> "$GITHUB_OUTPUT"
       - name: CI passed on this commit
         env:
           GH_TOKEN: ${{ github.token }}
@@ -116,7 +108,7 @@ jobs:
             total=$(jq 'length' <<<"$runs")
             running=$(jq 'map(select(.status != "completed")) | length' <<<"$runs")
             if [ "$running" -eq 0 ] && { [ "$total" -gt 0 ] || [ "$SECONDS" -ge "$appear_by" ]; }; then
-              echo "::error::ci.yml has not passed on $GITHUB_SHA. Fix it (or push the commit to a branch so CI runs), then tag again."
+              echo "::error::ci.yml has not passed on $GITHUB_SHA. Fix it (or push the commit to a branch so CI runs), then release again."
               jq -r '.[] | "  \(.conclusion // .status): \(.url)"' <<<"$runs"
               exit 1
             fi
@@ -169,12 +161,17 @@ jobs:
           }
       - name: Stage release assets
         shell: pwsh
+        env:
+          TAG: ${{ needs.gate.outputs.tag }}
         run: |
-          $v = '${{ github.ref_name }}'.TrimStart('v')
+          # The same names in every release, so .../releases/latest/download/
+          # Reskin-Setup.exe always gets the newest installer
+          # (scripts/release-notes.mjs links them by these names).
+          $v = $env:TAG.TrimStart('v')
           New-Item -ItemType Directory -Force release-assets | Out-Null
-          Copy-Item "target\release\bundle\nsis\Reskin_${v}_x64-setup.exe" release-assets\
-          Copy-Item "target\release\bundle\msi\Reskin_${v}_x64_en-US.msi" release-assets\
-          Copy-Item 'target\release\reskin.exe' "release-assets\Reskin_${v}_x64_portable.exe"
+          Copy-Item "target\release\bundle\nsis\Reskin_${v}_x64-setup.exe" 'release-assets\Reskin-Setup.exe'
+          Copy-Item "target\release\bundle\msi\Reskin_${v}_x64_en-US.msi" 'release-assets\Reskin.msi'
+          Copy-Item 'target\release\reskin.exe' 'release-assets\Reskin-Portable.exe'
           Copy-Item 'dist\THIRD_PARTY_NOTICES.txt' release-assets\
           Push-Location release-assets
           $lines = Get-ChildItem -File | Sort-Object Name | ForEach-Object {
@@ -192,14 +189,19 @@ jobs:
       - name: Publish GitHub Release
         uses: softprops/action-gh-release@v3
         with:
-          name: Reskin ${{ github.ref_name }}
+          # Creates the tag on this commit when the release was started from
+          # the Actions tab.
+          tag_name: ${{ needs.gate.outputs.tag }}
+          target_commitish: ${{ github.sha }}
+          name: Reskin ${{ needs.gate.outputs.tag }}
           draft: false
           prerelease: false
+          make_latest: true
           body: ${{ needs.gate.outputs.notes }}
-          generate_release_notes: true
           fail_on_unmatched_files: true
           files: |
-            release-assets/*.exe
-            release-assets/*.msi
+            release-assets/Reskin-Setup.exe
+            release-assets/Reskin-Portable.exe
+            release-assets/Reskin.msi
             release-assets/THIRD_PARTY_NOTICES.txt
             release-assets/SHA256SUMS.txt
