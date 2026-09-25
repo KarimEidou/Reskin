@@ -1,16 +1,21 @@
 //! The box ⇄ editor handoff state machine.
 //!
 //! Invariant: a window hides only when its content is transparent, and a
-//! window shows only over an identical picture (the box comes back under
-//! the editor's proxy and paints before the proxy goes). Neither window
-//! resizes while visible. The editor draws a proxy of the box (same
-//! `BoxVisual` component) exactly where the real box is, so swapping
-//! windows is invisible; the proxy then morphs into the panel. See
+//! window shows only over an identical picture. Neither window resizes
+//! while visible. The editor draws a proxy of the box (same `BoxVisual`
+//! component) exactly where the real box is; the proxy then morphs into
+//! the panel. Both windows are translucent, so the box's picture must be
+//! painted by exactly one of them at every moment: the window that shows
+//! over the other paints nothing at first (the editor holds its proxy, the
+//! box its picture), and the two swap in one frame — Rust sends both halves
+//! at once (`Reveal` + `box:conceal` on open, `Clear` + `box:reveal` on
+//! close) and each page makes its change on its next frame. See
 //! docs/ARCHITECTURE.md for the message sequence.
 //!
-//! Every picture the box takes on for a handoff comes the same way:
-//! `box:handoff` (open) or `box:collapse` (close) with a box session
-//! number, confirmed with `box_painted` once it is on screen.
+//! Every picture the box takes on for a handoff, and each half of a swap,
+//! comes the same way: `box:handoff` (open), `box:conceal`, `box:collapse`
+//! (close) or `box:reveal` with a box session number, confirmed with
+//! `box_painted` once it is on screen.
 //!
 //! Outside a handoff the box follows `box_allowed`: shown unless the user
 //! hid it or a fullscreen app runs (`settle_box`).
@@ -21,13 +26,13 @@ use std::time::{Duration, Instant};
 
 use reskin_core::geom;
 use reskin_core::model::{
-    AckStage, BoxCollapse, BoxHandoff, CollapseThen, EditorCmd, EditorView, ItemInfo, MotionPref,
-    OpenStyle, Rect, Settings, editor_size,
+    AckStage, BoxCollapse, BoxHandoff, BoxSwap, CollapseThen, EditorCmd, EditorView, ItemInfo,
+    MotionPref, OpenStyle, Rect, Settings, editor_size,
 };
 use tauri::{AppHandle, Emitter, Manager, PhysicalPosition, PhysicalSize, Runtime, WebviewWindow};
 
-use super::rules::AfterClose;
 pub use super::rules::Phase;
+use super::rules::{AfterClose, BoxReturn};
 use super::{box_window, editor_window, monitors, raw, rules, webview2};
 use crate::state::AppState;
 use crate::{log, tray};
@@ -38,8 +43,8 @@ const REVEAL_TIMEOUT: Duration = Duration::from_millis(1500);
 const EXPAND_TIMEOUT: Duration = Duration::from_millis(2500);
 const COLLAPSE_TIMEOUT: Duration = Duration::from_millis(1800);
 const CLEAR_TIMEOUT: Duration = Duration::from_millis(1000);
-/// How long the box may take to show a picture it takes on (two frames
-/// once it is visible, plus the IPC round trip).
+/// How long the box may take to show a picture it takes on, or its half of
+/// a swap (up to three frames once it is visible, plus the IPC round trip).
 const BOX_PAINT_TIMEOUT: Duration = Duration::from_millis(300);
 /// The editor page must be polling the mailbox within this long.
 const ALIVE_GRACE: Duration = Duration::from_secs(2);
@@ -52,9 +57,10 @@ struct Inner {
     phase: Phase,
     acks: HashSet<(u32, AckStage)>,
     /// Latest box session: numbers every picture handed to the box
-    /// (`box:handoff`, `box:collapse`), apart from the editor's `session`.
+    /// (`box:handoff`, `box:collapse`) and each of its halves of a swap
+    /// (`box:conceal`, `box:reveal`), apart from the editor's `session`.
     box_session: u32,
-    /// Latest box session whose picture the box confirmed on screen.
+    /// Latest box session the box confirmed on screen.
     box_painted: u32,
     /// The box was visible when this session opened (so it morphs back).
     box_was_visible: bool,
@@ -85,7 +91,7 @@ impl Morph {
         self.cv.notify_all();
     }
 
-    /// Records that the box shows the picture of box session `session`.
+    /// Records that the box shows what box session `session` asked for.
     pub fn box_painted(&self, session: u32) {
         let mut g = self.lock();
         g.box_painted = g.box_painted.max(session);
@@ -127,19 +133,19 @@ impl Morph {
         acked
     }
 
-    /// Numbers a new picture for the box.
+    /// Numbers a new picture for the box, or its half of a swap.
     fn next_box_session(&self) -> u32 {
         let mut g = self.lock();
         g.box_session += 1;
         g.box_session
     }
 
-    /// Waits for the box to confirm the picture of box session `session`.
+    /// Waits for the box to confirm box session `session` on screen.
     fn wait_box_painted(&self, session: u32, timeout: Duration) -> bool {
         let painted = self.wait_until(timeout, |g| g.box_painted >= session);
         if !painted {
             log::line(&format!(
-                "morph: the box did not confirm its picture {session} in time; going on"
+                "morph: the box did not confirm box session {session} in time; going on"
             ));
         }
         painted
@@ -266,6 +272,14 @@ pub fn settle_box<R: Runtime>(app: &AppHandle<R>) {
     }
 }
 
+/// Shows the editor window on top of the topmost band, with a taskbar
+/// button.
+fn show_editor<R: Runtime>(editor: &WebviewWindow<R>) {
+    let _ = editor.set_always_on_top(true);
+    let _ = editor.set_skip_taskbar(false);
+    let _ = editor.show();
+}
+
 /// Puts the editor window at rest: hidden, not topmost, without a taskbar
 /// button, its WebView2 memory target low.
 fn rest_editor<R: Runtime>(editor: &WebviewWindow<R>) {
@@ -345,6 +359,15 @@ fn hand_picture<R: Runtime>(app: &AppHandle<R>, items: &[ItemInfo]) -> u32 {
     session
 }
 
+/// Sends the box its half of a swap with the editor's proxy (`box:conceal`
+/// or `box:reveal`, see `BoxSwap`), right after the editor's half. Returns
+/// the box session its confirmation carries.
+fn swap_box<R: Runtime>(app: &AppHandle<R>, event: &str) -> u32 {
+    let session = app.state::<AppState>().morph.next_box_session();
+    let _ = app.emit_to(box_window::LABEL, event, BoxSwap { session });
+    session
+}
+
 fn open_inner<R: Runtime>(
     app: &AppHandle<R>,
     items: Vec<ItemInfo>,
@@ -398,6 +421,12 @@ fn open_inner<R: Runtime>(
         )
     });
     webview2::set_memory_low(&editor, false);
+    // Over the box, the editor paints nothing until the swap (its proxy
+    // is held); see `rules::shows_while_preparing`.
+    let show_early = rules::shows_while_preparing(settings.compatibility_mode);
+    if show_early {
+        show_editor(&editor);
+    }
     state.mailbox.push(EditorCmd::Prepare {
         session,
         // A hidden box leaves nothing to morph from: the panel fades in.
@@ -411,19 +440,34 @@ fn open_inner<R: Runtime>(
     if let Some((box_session, by)) = picture {
         morph.wait_box_painted(box_session, by.saturating_duration_since(Instant::now()));
     }
+    if !show_early {
+        show_editor(&editor);
+    }
 
-    let _ = editor.set_always_on_top(true);
-    let _ = editor.set_skip_taskbar(false);
-    let _ = editor.show();
+    // The swap: the editor paints its proxy over the box and the box stops
+    // painting, each on its next frame — exactly one of them paints the
+    // picture at every moment.
     state.mailbox.push(EditorCmd::Reveal { session });
+    let concealed = box_visible.then(|| {
+        (
+            swap_box(app, "box:conceal"),
+            Instant::now() + BOX_PAINT_TIMEOUT,
+        )
+    });
     let morphing = if prepared {
-        // The proxy is on screen over the real box; swap them.
         morph.wait(session, AckStage::Revealed, REVEAL_TIMEOUT);
         do_morph
     } else {
         log::line("morph: Prepared late, falling back to crossfade");
         false
     };
+    // The box hides only once it paints nothing — also when the editor was
+    // late: shown again for a close, it may show its last frame until it
+    // paints anew.
+    if let Some((box_session, by)) = concealed {
+        morph.wait_box_painted(box_session, by.saturating_duration_since(Instant::now()));
+    }
+    crate::smoke::probe(app, "1-swapped");
     raw::hide(bh);
     crate::smoke::probe(app, "2-revealed");
     crate::smoke::handoff_taken(app, crate::smoke::Handoff::Open, morphing);
@@ -515,13 +559,14 @@ fn close_inner<R: Runtime>(
         morph: do_morph,
     });
     morph.wait(session, AckStage::Collapsed, COLLAPSE_TIMEOUT);
-    if show_box {
-        // The hidden box takes on the picture the editor's proxy ends on,
-        // is shown right under the (still topmost) editor — until it paints
-        // again it may show what it painted before it was hidden — and
-        // confirms once that picture is on screen: a hidden window paints
-        // nothing, so it can only confirm after being shown. Only then may
-        // the proxy go.
+    let back = rules::box_return(show_box, do_morph);
+    if back != BoxReturn::Hidden {
+        // The hidden box takes on the picture the editor ends on — under
+        // the proxy held, painting nothing until the swap — is shown right
+        // under the (still topmost) editor, and confirms once its frame is
+        // on screen: a hidden window paints nothing, so it can only confirm
+        // after being shown. Until then it shows its last frame, which is
+        // empty under the proxy: the open's swap left it painting nothing.
         let box_session = morph.next_box_session();
         let _ = app.emit_to(
             box_window::LABEL,
@@ -530,6 +575,7 @@ fn close_inner<R: Runtime>(
                 session: box_session,
                 then,
                 icon,
+                held: back == BoxReturn::Held,
             },
         );
         raw::show_below(bh, eh);
@@ -537,8 +583,21 @@ fn close_inner<R: Runtime>(
         morph.wait_box_painted(box_session, BOX_PAINT_TIMEOUT);
     }
     crate::smoke::probe(app, "5-collapsed");
+    // The swap: the editor stops painting its proxy and the box paints the
+    // picture it holds, each on its next frame. (After a fade out the
+    // editor paints nothing any more, and the box paints already.)
     state.mailbox.push(EditorCmd::Clear { session });
+    let revealed = (back == BoxReturn::Held).then(|| {
+        (
+            swap_box(app, "box:reveal"),
+            Instant::now() + BOX_PAINT_TIMEOUT,
+        )
+    });
     morph.wait(session, AckStage::Cleared, CLEAR_TIMEOUT);
+    if let Some((box_session, by)) = revealed {
+        morph.wait_box_painted(box_session, by.saturating_duration_since(Instant::now()));
+    }
+    crate::smoke::probe(app, "6-cleared");
     let _ = editor.hide();
     if show_box {
         // Back on top of the topmost band, where it lives.
@@ -613,6 +672,7 @@ fn rest_closed<R: Runtime>(app: &AppHandle<R>, then: CollapseThen) {
                 session: morph.next_box_session(),
                 then: CollapseThen::Hide,
                 icon: None,
+                held: false,
             },
         );
         raw::show_no_activate(bh);
@@ -668,6 +728,12 @@ mod tests {
         assert!(!m.wait_box_painted(close, Duration::from_millis(5)));
         m.box_painted(close);
         assert!(m.wait_box_painted(close, Duration::from_millis(1)));
+        // Nor does the held picture's confirmation stand for the swap that
+        // reveals it: the box confirms its half of the swap on its own.
+        let reveal = m.next_box_session();
+        assert!(!m.wait_box_painted(reveal, Duration::from_millis(5)));
+        m.box_painted(reveal);
+        assert!(m.wait_box_painted(reveal, Duration::from_millis(1)));
     }
 
     #[test]

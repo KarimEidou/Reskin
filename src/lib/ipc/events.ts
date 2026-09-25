@@ -4,7 +4,7 @@
 // whenever its window shows anyway (src/lib/boot.ts).
 
 import { listen, type UnlistenFn } from '@tauri-apps/api/event';
-import type { BoxCollapse, BoxFlight, BoxHandoff, BoxProgress, Settings } from './types';
+import type { BoxCollapse, BoxFlight, BoxHandoff, BoxProgress, BoxSwap, Settings } from './types';
 
 export const EVENTS = {
   /** Fly-to-icon legs and celebrate/error states for the box. */
@@ -17,10 +17,21 @@ export const EVENTS = {
    */
   handoff: 'box:handoff',
   /**
-   * The editor collapsed onto its proxy: take on its final picture while
-   * still hidden, then confirm with `box_painted` once shown.
+   * The editor starts to paint its proxy over the box: stop painting on the
+   * next frame (the box hides next), then confirm with `box_painted`.
+   */
+  conceal: 'box:conceal',
+  /**
+   * The editor collapsed onto its proxy (or faded out): take on its final
+   * picture while still hidden — `held`, without painting it — then confirm
+   * with `box_painted` once shown.
    */
   collapse: 'box:collapse',
+  /**
+   * The editor stops painting its proxy: paint the held picture on the
+   * next frame, then confirm with `box_painted`.
+   */
+  reveal: 'box:reveal',
   /** The box was shown again (after the editor collapsed / hotkey). */
   shown: 'box:shown',
   /** Settings changed anywhere; payload is the full settings. */
@@ -39,7 +50,9 @@ export interface EventPayloads {
   'box:flight': BoxFlight;
   'box:progress': BoxProgress;
   'box:handoff': BoxHandoff;
+  'box:conceal': BoxSwap;
   'box:collapse': BoxCollapse;
+  'box:reveal': BoxSwap;
   'box:shown': null;
   'settings:changed': Settings;
   'box:undo': string;

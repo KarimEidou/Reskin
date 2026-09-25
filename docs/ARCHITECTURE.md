@@ -35,7 +35,8 @@ src-tauri/                      the Tauri app (windows, animator, mailbox, comma
 * Errors: commands return `Result<T, String>`; JS sees a rejected promise with
   the message string.
 * Rust → box: events in `src/lib/ipc/events.ts` (`box:flight`, `box:progress`,
-  `box:handoff`, `box:collapse`, `box:shown`, `settings:changed`, `box:undo`).
+  `box:handoff`, `box:conceal`, `box:collapse`, `box:reveal`, `box:shown`,
+  `settings:changed`, `box:undo`).
 * `inspect_paths(paths)` inspects at most the first 64 paths (each costs
   shell work on the STA and a ≤256 px preview, while the user is still
   dragging); the first returned item's optional `skipped` says how many
@@ -80,6 +81,16 @@ src-tauri/                      the Tauri app (windows, animator, mailbox, comma
 
 ### Morph / handoff protocol (session numbers increase per open)
 
+Both windows are translucent glass. Where they overlap, the box's picture
+painted by both — the proxy over the box — shows darker glass and both
+windows' contents at once, so at every moment exactly one of them paints
+it: the window that shows over the other paints nothing at first (the
+editor holds its proxy, the box its picture), and then the two **swap**.
+Rust sends both halves of a swap at once (`Reveal` + `box:conceal` on open,
+`Clear` + `box:reveal` on close); each page makes its change on its next
+frame (in a rAF callback), and both are driven by the display's vsync, so
+the two changes land in the same composed frame — at worst a frame apart.
+
 ```
 open_editor(items, view)                     [box → Rust; or tray, menu, Explorer…]
 Rust: place_editor(), move hidden editor     (editor never resizes while visible)
@@ -89,18 +100,30 @@ Rust: box:handoff{session: box session, icon: items[0].icon, count} to the
       box_painted once it is on screen (decoded + double rAF); a drop it was
       still absorbing asks open_editor for its items all the same (handed
       over once the editor is open)
+Rust: show editor (topmost): transparent, it paints nothing until Reveal,
+      and it draws by the swap — a window that was hidden runs no frames
+      for a moment after it shows, and `prepared` comes after a double rAF.
+      An opaque one (compatibility mode) would cover the box with an empty
+      window meanwhile: it shows once prepared (rules::shows_while_preparing)
 Prepare{session, boxRect(css px, editor-relative; null: box hidden), items,
         view, settings, morph}
-   editor: render BoxVisual proxy at boxRect (same skin/size/state as the box),
-           await img.decode() + double rAF → editor_ack(session,'prepared');
-           no boxRect: no proxy (morph is false). The items start loading
-           (the icon's resample to the design runs in the panels worker)
-           and the view gets ready behind the proxy: the panel is laid out
-           and drawn there, only transparent (its shield takes the pointer)
+   editor: lay out the BoxVisual proxy at boxRect (same skin/size/state as
+           the box) HELD (not painted), await img.decode() + double rAF →
+           editor_ack(session,'prepared'); no boxRect: no proxy (morph is
+           false). The items start loading (the icon's resample to the
+           design runs in the panels worker) and the view gets ready behind
+           the proxy: the panel is laid out and drawn there, only
+           transparent (its shield takes the pointer)
 Rust: waits for prepared (400 ms) and box_painted (300 ms from box:handoff)
-Rust: show editor (topmost), Reveal{session}
-   editor: double rAF → editor_ack(session,'revealed')
-Rust: hide box; Expand{session, morph}
+Rust: the swap: Reveal{session} + box:conceal{session: box session}
+   editor: on its next frame paints the proxy; double rAF →
+           editor_ack(session,'revealed')
+   box:    on its next frame stops painting (and stays blank, hidden, until
+           told what to show); double rAF → box_painted(session)
+Rust: waits for revealed (1.5 s; not when prepared came late) and the box's
+      box_painted (300 ms from box:conceal); hide box (it paints nothing,
+      so shown again it shows nothing until it paints anew);
+      Expand{session, morph}
    editor: waits (≤ 1 s, READY_WAIT_MS) until the view is ready — the items
            Prepare loads are in, the Edit workspace mounted, laid out and its
            canvas drawn (stage.docRect()) — so nothing loads while the panel
@@ -120,22 +143,35 @@ editor_close(reason)                          [editor → Rust]
 Rust: editor topmost; Collapse{session, boxRect, then, icon, morph}
    editor: panel → proxy at boxRect (or fade out when morph=false), showing
            handoffProps(collapseItems(then, icon)) → editor_ack(session,'collapsed')
-Rust: box:collapse{session: box session, then, icon} to the still hidden box
+Rust: box:collapse{session: box session, then, icon, held} to the still
+      hidden box — held when the close morphed: the proxy shows that
+      picture over it (rules::box_return); after a fade out nothing covers it
    box: takes over that picture (the same collapseItems → BoxVisual props:
-        empty after `hide`, the new icon after `fly`/`celebrate`)
-Rust: show box right under the (topmost) editor — it may show its last
-      picture until it paints again — + box:shown
-   box: keeps the picture; its icon decoded (from box:collapse on), double
-        rAF (hidden windows run no rAF, so only now) → box_painted(session)
+        empty after `hide`, the new icon after `fly`/`celebrate`); held:
+        laid out, its icon decoded, painting nothing
+Rust: show box right under the (topmost) editor — until it paints it shows
+      its last frame: nothing, as the open's swap left it — + box:shown
+   box: keeps the picture (held: still unpainted, frozen); its icon decoded
+        (from box:collapse on), double rAF (hidden windows run no rAF, so
+        only now) → box_painted(session)
         [the box confirms anyway after 250 ms; Rust waits 300 ms, logs a timeout]
-Rust: Clear{session}
-   editor: clear to fully transparent, double rAF → editor_ack(session,'cleared')
-Rust: hide editor, box back to the top of the topmost band (+ low-memory:
-      destroy the editor); glide box home if needed.
+Rust: the swap: Clear{session} + (held) box:reveal{session: box session}
+   editor: on its next frame clears to fully transparent; double rAF →
+           editor_ack(session,'cleared')
+   box:    on its next frame paints the picture it holds; double rAF →
+           box_painted(session). What only the box shows — the hint, the
+           Undo chip — is not in the proxy: it comes 250 ms after the box
+           shows its picture on its own again, fading in (the mark moves
+           up out of the hint's way from where the proxy had it)
+Rust: waits for cleared (1 s) and the box's box_painted (300 ms from
+      box:reveal); hide editor, box back to the top of the topmost band
+      (+ low-memory: destroy the editor); glide box home if needed.
 ```
 Box sessions number the pictures handed to the box (`box:handoff`,
-`box:collapse`), apart from the editor's sessions: an open's picture and the
-close's of the same editor session never stand for each other.
+`box:collapse`) and the box's halves of the swaps (`box:conceal`,
+`box:reveal`), apart from the editor's sessions: an open's picture and the
+close's of the same editor session never stand for each other, nor does a
+picture's confirmation stand for the swap that follows it.
 
 One handoff runs at a time (`morph.rs` holds `busy` through it; outside it
 the editor is open or closed). An open or a close that comes during a
@@ -167,8 +203,9 @@ Reskin started again without paths (single-instance) brings the open editor
 to the front, else does what *Show box* does.
 Invariant: a window hides only when its content is transparent and shows only
 over an identical picture (the editor over the box at open; the box under
-the editor's proxy at close, which goes only once the box has painted it).
-Acks for an old session are ignored.
+the editor's proxy at close), and exactly one window paints the box's
+picture at every moment: the one that shows over the other paints nothing
+until the two swap. Acks for an old session are ignored.
 After a plain close the box rests on the picture it took over; after an
 apply it stays frozen on the new icon until its flight (`depart` /
 `celebrate`) carries it on (or 8 s pass without one).
@@ -192,10 +229,12 @@ message: shown inside the box, which stays in the error state long enough to
 read it; exactly one per failed apply, sent only once the editor has
 collapsed). `box:progress` (`BoxProgress{done, total}`: the batch ring while
 Restore all runs; `done == total` clears it), `box:handoff`
-(`BoxHandoff{session, icon, count}`, see the open handoff) and `box:collapse`
-(`BoxCollapse{session, then, icon}`, see the close handoff), both answered
-with `box_painted(session)`, `box:shown` (keeps a picture taken over with
-`box:collapse`, else resets the box), `settings:changed`, and `box:undo`
+(`BoxHandoff{session, icon, count}`, see the open handoff), `box:collapse`
+(`BoxCollapse{session, then, icon, held}`, see the close handoff) and the
+box's halves of the swaps, `box:conceal` / `box:reveal`
+(`BoxSwap{session}`), all answered with `box_painted(session)`,
+`box:shown` (keeps a picture taken over with `box:collapse`, else resets
+the box), `settings:changed`, and `box:undo`
 (payload: history entry id) — after a successful apply the box shows an
 **Undo** chip for 6 s; clicking it calls `restore({type:'entry', id})`, then
 celebrates, or shakes saying why the icon is not back (a failed entry, or
@@ -746,6 +785,15 @@ Budgets, and what enforces them:
   open (morph=true)` / `closed (morph=true)` in the log) and keep the
   handoff invariant on its captured frames
   (`%TEMP%\reskin-handoff-<path>-<frame>.png`); either failing exits 3.
+  The frames are probed where the picture on screen is certain — each after
+  the pages confirmed theirs (`smoke::HANDOFF_FRAMES`): the open's swap with
+  the box still shown (`1-swapped`), the box hidden (`2-revealed`), the
+  panel (`3-expanded`), the box shown under the proxy before the close's
+  swap (`5-collapsed`), after it with the editor still shown (`6-cleared`)
+  and hidden (`9-after-close`). None may look like the bare desktop, and all
+  but the panel like the box (mean colour difference ≤ 14): both windows
+  painting the box's picture, one over the other, differ by more (25 was
+  measured at `5-collapsed` before the swap).
 
 Measured in a Linux container (headless Chromium with software rendering,
 4× CPU): `pnpm e2e e2e/perf.spec.ts` several times, once and with
@@ -773,8 +821,8 @@ thread waits 30–50 ms in its commit for that compositor. The page's own
 task among them is the panel settling into `open` after the motion's last
 frame (~45–55 ms at 4×: the focus, and the work the open panel lets go).
 Idle, both pages ran 0 frame callbacks, 0 animations, 0 style recalcs and
-0 layouts, with 0.0–0.4 ms of tasks in 2 s. Initial JS: box 31.0 KB,
-editor 201.0 KB. On the Windows smoke run the idle working set of the
+0 layouts, with 0.0–0.4 ms of tasks in 2 s. Initial JS: box 31.2 KB,
+editor 201.1 KB. On the Windows smoke run the idle working set of the
 process tree has been ~370 MB.
 
 What gets the open ready before its motion (the Edit view with an item):

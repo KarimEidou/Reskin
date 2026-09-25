@@ -39,6 +39,59 @@ const NOTHING_USABLE = 'None of these items can be reskinned';
  */
 const settleMs = (message: string) => errorLifetime(message, ERROR_HOLD_MS) + 2000;
 
+type Region = { x: number; y: number; width: number; height: number };
+
+/** A capture of `region` of a (transparent) window, without a background. */
+async function capture(page: Page, region: Region): Promise<PNG> {
+  return PNG.sync.read(await page.screenshot({ clip: region, omitBackground: true }));
+}
+
+/** How many pixels of a capture are painted. */
+function paintedIn(png: PNG): number {
+  let painted = 0;
+  for (let i = 3; i < png.data.length; i += 4) if (png.data[i]! > 0) painted++;
+  return painted;
+}
+
+/** How many pixels differ between two captures of the same region. */
+function differing(a: PNG, b: PNG): number {
+  let count = 0;
+  for (let i = 0; i < a.data.length; i += 4) {
+    const d = Math.max(...[0, 1, 2, 3].map((c) => Math.abs(a.data[i + c]! - b.data[i + c]!)));
+    if (d > 8) count++;
+  }
+  return count;
+}
+
+/**
+ * Emits `event` to the box with its frames held back, and tells whether
+ * the box still painted once its handler waited for a frame (then lets
+ * the frames go).
+ */
+function paintedUntilItsFrame(page: Page, event: string, payload: unknown): Promise<boolean> {
+  return page.evaluate(
+    async ([name, data]) => {
+      const raf = window.requestAnimationFrame.bind(window);
+      const held: FrameRequestCallback[] = [];
+      window.requestAnimationFrame = (callback) => {
+        held.push(callback);
+        return 0;
+      };
+      try {
+        await window.__e2e!.emit(name, data);
+        const deadline = performance.now() + 100;
+        while (held.length === 0 && performance.now() < deadline) await new Promise((r) => setTimeout(r, 0));
+        if (held.length === 0) throw new Error(`the box did not wait for a frame on ${name}`);
+        return getComputedStyle(document.querySelector('main.box-page')!).opacity === '1';
+      } finally {
+        window.requestAnimationFrame = raf;
+        for (const callback of held) raf(callback);
+      }
+    },
+    [event, payload] as const,
+  );
+}
+
 test.describe('drag and drop', () => {
   test('drag enter arms the box, shows the count and inspects immediately', async ({ openBox, page }) => {
     const box = await openBox();
@@ -327,7 +380,10 @@ test.describe('events from Rust', () => {
     await box.expectState('hover');
   });
 
-  test('the close handoff: the hidden box takes over the proxy picture, then confirms it', async ({ openBox, page }) => {
+  test('the close handoff: the hidden box takes over the proxy picture held, confirms it, and paints it on the swap', async ({
+    openBox,
+    page,
+  }) => {
     const box = await openBox();
     // Handed over to the editor: frozen on the dropped icon.
     const [dropped] = await makeItems(page, [SAMPLE_PATHS.steam]);
@@ -335,9 +391,10 @@ test.describe('events from Rust', () => {
     await waitForCall(page, 'open_editor');
     await expect(box.icon).toHaveAttribute('src', dropped!.icon!);
 
-    // Rust, with the box still hidden: the proxy collapsed carrying the new icon.
+    // Rust, with the box still hidden: the proxy collapsed carrying the new
+    // icon, which it paints over the place the box comes back to.
     const [applied] = await makeItems(page, [SAMPLE_PATHS.notes]);
-    await emit(page, 'box:collapse', { session: 7, then: 'fly', icon: applied!.icon });
+    await emit(page, 'box:collapse', { session: 7, then: 'fly', icon: applied!.icon, held: true });
     await expect(box.icon).toHaveAttribute('src', applied!.icon!);
     await box.expectState('idle');
     await expect(box.badge).toHaveCount(0);
@@ -345,9 +402,17 @@ test.describe('events from Rust', () => {
     await page.waitForTimeout(100);
     expect(await calls(page, 'box_painted')).toHaveLength(0);
 
-    // Shown under the editor: it keeps the picture and confirms it.
+    // Shown under the editor's proxy: it holds the picture — laid out, its
+    // icon decoded, painting nothing — and confirms that frame.
     await emit(page, 'box:shown', null);
     await waitForCall(page, 'box_painted', { session: 7 });
+    await expect(box.root).toHaveCSS('opacity', '0');
+    await page.waitForTimeout(100);
+    await expect(box.root).toHaveCSS('opacity', '0');
+    // The swap (the editor stops painting the proxy): it paints the picture.
+    await emit(page, 'box:reveal', { session: 8 });
+    await waitForCall(page, 'box_painted', { session: 8 });
+    await expect(box.root).toHaveCSS('opacity', '1');
     await expect(box.icon).toHaveAttribute('src', applied!.icon!);
     // Still frozen until the flight carries the icon on.
     await box.hit.hover();
@@ -393,7 +458,11 @@ test.describe('events from Rust', () => {
     await box.expectState('hover');
   });
 
-  test("the box shows exactly the picture the editor's proxy collapsed onto", async ({ openBox, page, context }) => {
+  test("the close's swap: the box paints exactly the picture the editor's proxy collapsed onto, never both at once", async ({
+    openBox,
+    page,
+    context,
+  }) => {
     const box = await openBox();
     const [applied] = await makeItems(page, [SAMPLE_PATHS.notes]);
     const m = metricsFor('medium');
@@ -413,22 +482,24 @@ test.describe('events from Rust', () => {
       morph: true,
     });
     expect(await waitForAck(editor, session, 'collapsed')).toBe(true);
-    const proxy = PNG.sync.read(await editor.screenshot({ clip: region, omitBackground: true }));
+    const proxy = await capture(editor, region);
+    expect(paintedIn(proxy)).toBeGreaterThan(m.visual * m.visual * 0.5);
 
-    const back = await simulateBoxReturn(page, 'celebrate', applied!.icon);
-    expect(back.painted).toBe(true);
+    // The box comes back under the proxy holding that picture: it paints
+    // nothing.
+    await emit(page, 'box:collapse', { session: 1, then: 'celebrate', icon: applied!.icon, held: true });
+    await emit(page, 'box:shown', null);
+    await waitForCall(page, 'box_painted', { session: 1 });
+    expect(paintedIn(await capture(page, region))).toBe(0);
+
+    // The swap: the editor clears as the box paints the very same picture.
+    await pushEditorCmd(editor, { type: 'clear', session });
+    await emit(page, 'box:reveal', { session: 2 });
+    expect(await waitForAck(editor, session, 'cleared')).toBe(true);
+    await waitForCall(page, 'box_painted', { session: 2 });
+    expect(paintedIn(await capture(editor, region))).toBe(0);
     await box.expectStatic();
-    const shown = PNG.sync.read(await page.screenshot({ clip: region, omitBackground: true }));
-
-    let differing = 0;
-    let painted = 0;
-    for (let i = 0; i < proxy.data.length; i += 4) {
-      const d = Math.max(...[0, 1, 2, 3].map((c) => Math.abs(proxy.data[i + c]! - shown.data[i + c]!)));
-      if (d > 8) differing++;
-      if (shown.data[i + 3]! > 0) painted++;
-    }
-    expect(painted).toBeGreaterThan(m.visual * m.visual * 0.5);
-    expect(differing).toBe(0);
+    expect(differing(proxy, await capture(page, region))).toBe(0);
     await editor.close();
   });
 
@@ -456,7 +527,8 @@ test.describe('events from Rust', () => {
     await box.expectState('idle');
     await box.pointerAway();
     await box.expectStatic();
-    const shown = PNG.sync.read(await page.screenshot({ clip: region, omitBackground: true }));
+    const shown = await capture(page, region);
+    expect(paintedIn(shown)).toBeGreaterThan(m.visual * m.visual * 0.5);
 
     await pushEditorCmd(editor, {
       type: 'prepare',
@@ -468,18 +540,38 @@ test.describe('events from Rust', () => {
       morph: true,
     });
     expect(await waitForAck(editor, 1, 'prepared')).toBe(true);
-    const proxy = PNG.sync.read(await editor.screenshot({ clip: region, omitBackground: true }));
+    // On screen over the box, the editor paints nothing until the swap.
+    expect(paintedIn(await capture(editor, region))).toBe(0);
 
-    let differing = 0;
-    let painted = 0;
-    for (let i = 0; i < proxy.data.length; i += 4) {
-      const d = Math.max(...[0, 1, 2, 3].map((c) => Math.abs(proxy.data[i + c]! - shown.data[i + c]!)));
-      if (d > 8) differing++;
-      if (shown.data[i + 3]! > 0) painted++;
-    }
-    expect(painted).toBeGreaterThan(m.visual * m.visual * 0.5);
-    expect(differing).toBe(0);
+    // The swap: the editor paints its proxy as the box stops painting.
+    await pushEditorCmd(editor, { type: 'reveal', session: 1 });
+    await emit(page, 'box:conceal', { session: 5 });
+    expect(await waitForAck(editor, 1, 'revealed')).toBe(true);
+    await waitForCall(page, 'box_painted', { session: 5 });
+    expect(paintedIn(await capture(page, region))).toBe(0);
+    expect(differing(shown, await capture(editor, region))).toBe(0);
     await editor.close();
+  });
+
+  test('each half of a swap with the proxy lands on the next frame', async ({ openBox, page }) => {
+    const box = await openBox();
+    await emit(page, 'box:handoff', { session: 1, icon: null, count: 0 });
+    await waitForCall(page, 'box_painted', { session: 1 });
+    // box:conceal (the editor paints its proxy on its next frame): painted
+    // until the box's next frame, then not.
+    expect(await paintedUntilItsFrame(page, 'box:conceal', { session: 2 })).toBe(true);
+    await waitForCall(page, 'box_painted', { session: 2 });
+    await expect(box.root).toHaveCSS('opacity', '0');
+    // Back under the proxy, holding its picture.
+    await emit(page, 'box:collapse', { session: 3, then: 'hide', icon: null, held: true });
+    await emit(page, 'box:shown', null);
+    await waitForCall(page, 'box_painted', { session: 3 });
+    // box:reveal (the editor stops painting on its next frame): blank
+    // until the box's next frame, then painted.
+    expect(await paintedUntilItsFrame(page, 'box:reveal', { session: 4 })).toBe(false);
+    await waitForCall(page, 'box_painted', { session: 4 });
+    await expect(box.root).toHaveCSS('opacity', '1');
+    await box.expectState('idle');
   });
 
   test('a drop still being absorbed when an open from elsewhere starts joins that editor', async ({ openBox, page }) => {
@@ -499,22 +591,95 @@ test.describe('events from Rust', () => {
     expect(await calls(page, 'open_editor')).toHaveLength(1);
   });
 
-  test('the first-run welcome opens over the plain box: the hint gives way, and returns after', async ({ openBox, page }) => {
+  test('the first-run welcome opens over the plain box: the hint gives way, and fades in again after the swap', async ({
+    openBox,
+    page,
+  }) => {
     const box = await openBox({ firstRun: true });
     const hint = box.visual.locator('.hint');
     await expect(hint).toHaveText(FIRST_RUN_HINT);
     // Rust opens the welcome: the box takes on the picture of the welcome's
-    // proxy — the empty box, without a hint — and confirms it.
+    // proxy — the empty box, without a hint — confirms it, and gives it to
+    // the proxy.
     await startFakeEditor(page);
     const open = await simulateOpen(page, [], 'welcome');
-    expect(open.boxPainted).toBe(true);
+    expect(open).toMatchObject({ boxPainted: true, boxConcealed: true });
     await expect(hint).toHaveCount(0);
     await expect(box.icon).toHaveCount(0);
-    // "Got it" collapses the welcome back into the box: the hint is back.
-    await simulateClose(page);
-    const back = await simulateBoxReturn(page, 'hide');
-    expect(back.painted).toBe(true);
+    // When the box paints again, and when (and how) the hint comes back:
+    // where the mark is then, and where it starts from as the hint appears.
+    type Rect = { x: number; y: number; w: number; h: number };
+    interface Watched {
+      paintedAt: number | null;
+      hintAt: number | null;
+      hintOpacity: string | null;
+      /** The mark as the box paints again, and as the hint appears. */
+      mark: Rect | null;
+      markFrom: Rect | null;
+    }
+    type Watch = { __watch?: Watched };
+    await page.evaluate(() => {
+      const root = document.querySelector('main.box-page')!;
+      const mark = (): Rect => {
+        const r = root.querySelector('.glyphs')!.getBoundingClientRect();
+        return { x: r.x, y: r.y, w: r.width, h: r.height };
+      };
+      const watch: Watched = { paintedAt: null, hintAt: null, hintOpacity: null, mark: null, markFrom: null };
+      (window as Watch).__watch = watch;
+      new MutationObserver(() => {
+        if (watch.paintedAt === null && !root.classList.contains('veiled')) {
+          watch.paintedAt = performance.now();
+          watch.mark = mark();
+        }
+        const shown = root.querySelector('.hint');
+        if (shown && watch.hintAt === null) {
+          watch.hintAt = performance.now();
+          watch.hintOpacity = getComputedStyle(shown).opacity;
+          watch.markFrom = mark();
+        }
+      }).observe(root, { subtree: true, childList: true, attributes: true, attributeFilter: ['class'] });
+    });
+    // "Got it" collapses the welcome back into the box, which takes the
+    // picture over from the proxy — exactly the proxy's: no hint yet.
+    const close = await simulateClose(page);
+    expect(close.box).toMatchObject({ painted: true, revealed: true });
     await expect(hint).toHaveText(FIRST_RUN_HINT);
+    const watch = (await page.evaluate(() => (window as Watch).__watch))!;
+    expect(watch.paintedAt).not.toBeNull();
+    // It comes a moment later, fading in, and the mark moves up out of its
+    // way from where it was rather than jumping there.
+    expect(watch.hintAt! - watch.paintedAt!).toBeGreaterThanOrEqual(200);
+    expect(Number(watch.hintOpacity)).toBeLessThan(1);
+    for (const k of ['x', 'y', 'w', 'h'] as const) {
+      expect(Math.abs(watch.markFrom![k] - watch.mark![k])).toBeLessThanOrEqual(0.5);
+    }
+    await box.expectStatic();
+    const markTo = await box.visual.locator('.glyphs').boundingBox();
+    expect(markTo!.width).toBeLessThan(watch.mark!.w * 0.8);
+  });
+
+  test('an error message giving way to the hint leaves the mark where the message put it', async ({ openBox, page }) => {
+    const box = await openBox({ firstRun: true, settings: { animationSpeed: 2 } });
+    await box.expectStatic();
+    const lifted = (await box.visual.locator('.glyphs').boundingBox())!;
+    await emit(page, 'box:flight', { phase: 'error', icon: null, durationMs: 480, message: 'Nope' });
+    await box.expectState('error');
+    // Every frame until the hint is back: the mark never drops back to the
+    // middle to move up again (it is 38 / 28 as large there).
+    await page.evaluate(() => {
+      const w = window as unknown as { __markWidths: number[] };
+      w.__markWidths = [];
+      const frame = () => {
+        w.__markWidths.push(document.querySelector('.glyphs')!.getBoundingClientRect().width);
+        requestAnimationFrame(frame);
+      };
+      requestAnimationFrame(frame);
+    });
+    await box.expectState('idle', 15000);
+    await expect(box.visual.locator('.hint')).toHaveText(FIRST_RUN_HINT);
+    await box.expectStatic();
+    const widths = await page.evaluate(() => (window as unknown as { __markWidths: number[] }).__markWidths);
+    expect(Math.max(...widths)).toBeLessThan(lifted.width * 1.1);
   });
 
   test('a hotkey another app holds at start-up: the box says so once, and its description while it lasts', async ({ openBox, page }) => {
@@ -552,8 +717,7 @@ test.describe('events from Rust', () => {
     await simulateOpen(page, [], 'welcome');
     await expect(hint).toHaveCount(0);
     await page.waitForTimeout(3600);
-    await simulateClose(page);
-    expect((await simulateBoxReturn(page, 'hide')).painted).toBe(true);
+    expect((await simulateClose(page)).box).toMatchObject({ painted: true, revealed: true });
     await expect(hint).toHaveText(FIRST_RUN_HINT);
     await expect(hint).toHaveText('Ctrl+Alt+Shift+R is taken — change it in Settings', { timeout: 6000 });
     await expect(hint).toHaveCount(0, { timeout: 6000 });
@@ -823,19 +987,50 @@ test.describe('fake backend', () => {
     await openBox();
     await startFakeEditor(page);
     const open = await simulateOpen(page, [SAMPLE_PATHS.steam], 'edit');
-    expect(open).toEqual({ session: 1, morph: true, preparedInTime: true, boxPainted: true, timedOut: [] });
+    expect(open).toEqual({ session: 1, morph: true, preparedInTime: true, boxPainted: true, boxConcealed: true, timedOut: [] });
     // The box took on the picture first: the item's icon, confirmed by box_painted.
     const [steam] = await makeItems(page, [SAMPLE_PATHS.steam]);
     const handoffs = await page.evaluate(() => window.__e2e!.emitted.filter((e) => e.event === 'box:handoff').map((e) => e.payload));
     expect(handoffs).toEqual([{ session: 1, icon: steam!.icon, count: 1 }]);
     await waitForCall(page, 'box_painted', { session: 1 });
     expect(await editorState(page)).toEqual({ session: 1, phase: 'open', visible: true, morph: true, destroyed: false });
-    const close = await simulateClose(page, 'fly', { icon: 'data:image/png;base64,AAAA' });
-    expect(close).toEqual({ session: 1, timedOut: [] });
+    const icon = 'data:image/png;base64,AAAA';
+    const close = await simulateClose(page, 'fly', { icon });
+    expect(close).toEqual({ session: 1, timedOut: [], box: { session: 3, painted: true, revealed: true } });
     expect(await seenByEditor(page)).toEqual(['prepare', 'reveal', 'expand', 'collapse', 'clear']);
+    // The box's side: the picture, its half of the open's swap, the picture
+    // it comes back to (held under the proxy), its half of the close's swap.
+    const boxEvents = await page.evaluate(() =>
+      window.__e2e!.emitted.filter((e) => e.event.startsWith('box:')).map((e) => [e.event, e.payload]),
+    );
+    expect(boxEvents).toEqual([
+      ['box:handoff', { session: 1, icon: steam!.icon, count: 1 }],
+      ['box:conceal', { session: 2 }],
+      ['box:collapse', { session: 3, then: 'fly', icon, held: true }],
+      ['box:shown', null],
+      ['box:reveal', { session: 4 }],
+    ]);
     expect(await editorState(page)).toMatchObject({ phase: 'closed', visible: false });
     const acks = await page.evaluate(() => window.__e2e!.acks.map((a) => `${a.session}:${a.stage}`));
     expect(acks).toEqual(['1:prepared', '1:revealed', '1:expanded', '1:collapsed', '1:cleared']);
+  });
+
+  test('a crossfade swaps on open; on close nothing covers the box, which paints at once', async ({ openBox, page }) => {
+    const box = await openBox();
+    await startFakeEditor(page);
+    // Shown, the box takes part in the open's swap whatever the motion: the
+    // editor's proxy crossfades into the panel from where it took over.
+    const open = await simulateOpen(page, [], 'start', { morph: false });
+    expect(open).toMatchObject({ morph: false, boxPainted: true, boxConcealed: true });
+    await expect(box.root).toHaveCSS('opacity', '0');
+    // The panel faded out: nothing to swap with, the box comes back painted.
+    const close = await simulateClose(page, 'hide');
+    expect(close.box).toEqual({ session: 3, painted: true, revealed: null });
+    const events = await page.evaluate(() => window.__e2e!.emitted.map((e) => e.event).filter((e) => e.startsWith('box:')));
+    expect(events).toEqual(['box:handoff', 'box:conceal', 'box:collapse', 'box:shown']);
+    await expect(box.root).toHaveCSS('opacity', '1');
+    await box.hit.hover();
+    await box.expectState('hover');
   });
 
   test('a late prepared ack falls back to a crossfade, like Rust', async ({ openBox, page }) => {
@@ -845,8 +1040,9 @@ test.describe('fake backend', () => {
     expect(open).toMatchObject({ session: 1, morph: false, preparedInTime: false, timedOut: ['prepared'] });
     expect((await editorState(page)).morph).toBe(false);
     const log = await fakeEditorLog(page);
-    // Rust's fallback does not wait for `revealed`: Reveal and a crossfade
-    // Expand are queued back to back, so the editor gets them together.
+    // Rust's fallback does not wait for `revealed`: the crossfade's Expand
+    // follows Reveal as soon as the box paints nothing, while the late
+    // editor still prepares, so it gets them together.
     expect(log.batches).toContainEqual(['reveal', 'expand']);
     expect(log.expands).toEqual([{ session: 1, morph: false }]);
   });

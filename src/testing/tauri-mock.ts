@@ -29,7 +29,7 @@
  *   "AppsFolder" or "Store App" is a Store app's: in place, or a classic
  *   new shortcut).
  * - open_editor: validates that every id was inspected (else rejects).
- * - box_painted: recorded (simulateBoxReturn waits for it).
+ * - box_painted: recorded (the simulated handoffs wait for it).
  * - apply_icon: returns `setApplyOutcome(o)` verbatim when set; otherwise
  *   journals a HistoryEntry and returns `{type:'applied', landed:true}`. In
  *   the editor, a flourish apply while the editor is open first runs the
@@ -77,14 +77,20 @@
  * - simulateOpen(items | paths, view = 'edit', opts): Rust's open FSM —
  *   (box page, box shown: `box:handoff` with the first item's icon, and
  *   wait ≤ 300 ms for its `box_painted`) Prepare → wait 'prepared'
- *   (400 ms) → Reveal → wait 'revealed' → Expand{morph} → wait
- *   'expanded'. A late 'prepared' takes Rust's fallback: Reveal and
- *   Expand{morph: false} (crossfade) back to back, without waiting for
- *   'revealed'.
+ *   (400 ms) → the swap: Reveal (+ box page: `box:conceal`) → wait
+ *   'revealed' (+ the box's `box_painted`, 300 ms) → Expand{morph} → wait
+ *   'expanded'. A late 'prepared' takes Rust's fallback: Expand{morph:
+ *   false} (crossfade) follows Reveal without waiting for 'revealed' (only
+ *   for the box's `box_painted`).
  * - simulateClose(then = 'hide', opts): Collapse → wait 'collapsed' →
- *   Clear → wait 'cleared'. `editor` shows the FSM phase.
- * - simulateBoxReturn(then = 'hide', icon) (box page): `box:collapse` to the
- *   hidden box, then `box:shown`, then wait 300 ms for `box_painted`.
+ *   (box page: `box:collapse` to the hidden box, held when the collapse
+ *   morphs, `box:shown`, wait 300 ms for its `box_painted`) → the swap:
+ *   Clear (+ held: `box:reveal`) → wait 'cleared' (+ its `box_painted`).
+ *   `editor` shows the FSM phase.
+ * - simulateBoxReturn(then = 'hide', icon) (box page): the box's part of a
+ *   morph's close alone — `box:collapse` (held) to the hidden box, then
+ *   `box:shown`, then wait 300 ms for `box_painted`; then `box:reveal`,
+ *   and wait 300 ms for its `box_painted`.
  * - knobs: setApplyOutcome, setInspectOverride, setInspectDelay,
  *   setBoxDragResult, failNext(cmd, message), setExportPath, setPickFiles,
  *   setProject, setApplyCollapses, setHeartbeatMs, setAccent,
@@ -378,7 +384,11 @@ export function install(kind: 'box' | 'editor'): E2EApi {
 
   // ---- handoff FSM (mirrors src-tauri windows/morph.rs) ---------------------
   const fsm: E2EEditorState = { session: 0, phase: 'closed', visible: false, morph: false, destroyed: false };
-  /** Pictures handed to the box (`box:handoff`, `box:collapse`), numbered apart from the editor's sessions. */
+  /**
+   * Pictures handed to the box (`box:handoff`, `box:collapse`) and the box's
+   * halves of the swaps (`box:conceal`, `box:reveal`), numbered apart from
+   * the editor's sessions.
+   */
   let boxSession = 0;
 
   /** The picture `box_painted` confirms for box session `session`, within Rust's 300 ms. */
@@ -387,6 +397,31 @@ export function install(kind: 'box' | 'editor'): E2EApi {
       () => true,
       () => false,
     );
+  }
+
+  /**
+   * Box page: the box's half of a swap with the editor's proxy
+   * (`box:conceal` / `box:reveal`, sent together with Reveal / Clear);
+   * resolves with its confirmation within Rust's 300 ms.
+   */
+  async function swapBox(event: 'box:conceal' | 'box:reveal'): Promise<boolean> {
+    const session = ++boxSession;
+    await emitEvent(event, { session });
+    return boxPainted(session);
+  }
+
+  /**
+   * Box page: the box coming back as the editor closes (morph.rs
+   * close_inner, after `collapsed`): `box:collapse` to the hidden box —
+   * `held` under the editor's proxy — then `box:shown` and its
+   * `box_painted`.
+   */
+  async function returnBox(then: CollapseThen, icon: string | null, held: boolean): Promise<{ session: number; painted: boolean }> {
+    const session = ++boxSession;
+    await emitEvent('box:collapse', { session, then, icon, held });
+    boxVisible = true;
+    await emitEvent('box:shown', null);
+    return { session, painted: await boxPainted(session) };
   }
 
   function defaultBoxRect(s: Settings): Rect {
@@ -418,14 +453,18 @@ export function install(kind: 'box' | 'editor'): E2EApi {
     const session = ++fsm.session;
 
     // The visible box takes on the picture the editor's proxy draws first.
+    const boxTakesPart = kind === 'box' && boxVisible;
     let painted: Promise<boolean | null> = Promise.resolve(null);
-    if (kind === 'box' && boxVisible) {
+    if (boxTakesPart) {
       const picture = ++boxSession;
       await emitEvent('box:handoff', { session: picture, icon: items[0]?.icon ?? null, count: items.length });
       painted = boxPainted(picture);
     }
 
     fsm.phase = 'preparing';
+    // A transparent editor shows as it prepares, painting nothing yet
+    // (rules.rs shows_while_preparing); an opaque one once prepared.
+    if (!snapshot.compatibilityMode) fsm.visible = true;
     pushEditorCmd({
       type: 'prepare',
       session,
@@ -444,10 +483,13 @@ export function install(kind: 'box' | 'editor'): E2EApi {
 
     fsm.phase = 'revealing';
     fsm.visible = true;
+    // The swap: the editor paints its proxy, and the box stops painting.
     pushEditorCmd({ type: 'reveal', session });
+    const concealed = boxTakesPart ? swapBox('box:conceal') : Promise.resolve(null);
     // Like morph.rs: the swap waits for the proxy only when it was prepared
-    // in time; the fallback hides the box and crossfades right away.
+    // in time; the fallback crossfades once the box paints nothing.
     if (preparedInTime && !(await waitForAck(session, 'revealed', ackTimeout))) timedOut.push('revealed');
+    const boxConcealed = await concealed;
 
     fsm.phase = 'expanding';
     boxVisible = false;
@@ -456,7 +498,7 @@ export function install(kind: 'box' | 'editor'): E2EApi {
 
     fsm.phase = 'open';
     fsm.morph = morph;
-    return { session, morph, preparedInTime, boxPainted: boxPaintedInTime, timedOut };
+    return { session, morph, preparedInTime, boxPainted: boxPaintedInTime, boxConcealed, timedOut };
   }
 
   async function simulateClose(
@@ -469,20 +511,28 @@ export function install(kind: 'box' | 'editor'): E2EApi {
     const timedOut: AckStage[] = [];
 
     fsm.phase = 'collapsing';
+    const icon = opts.icon ?? null;
+    const morph = opts.morph ?? fsm.morph;
     pushEditorCmd({
       type: 'collapse',
       session,
       boxRect: opts.boxRect ?? defaultBoxRect(settings),
       then,
-      icon: opts.icon ?? null,
-      morph: opts.morph ?? fsm.morph,
+      icon,
+      morph,
     });
     if (!(await waitForAck(session, 'collapsed', ackTimeout))) timedOut.push('collapsed');
 
     fsm.phase = 'clearing';
     boxVisible = true;
+    // The box comes back under the editor, holding the picture while the
+    // proxy shows it (rules.rs box_return).
+    const back = kind === 'box' ? await returnBox(then, icon, morph) : null;
+    // The swap: the editor stops painting its proxy, and the box paints.
     pushEditorCmd({ type: 'clear', session });
+    const revealed = back && morph ? swapBox('box:reveal') : Promise.resolve(null);
     if (!(await waitForAck(session, 'cleared', ackTimeout))) timedOut.push('cleared');
+    const box = back ? { ...back, revealed: await revealed } : null;
 
     fsm.phase = 'closed';
     fsm.visible = false;
@@ -490,15 +540,12 @@ export function install(kind: 'box' | 'editor'): E2EApi {
       if (then === 'hide') fsm.destroyed = true;
       else destroyWhenSettled = true;
     }
-    return { session, timedOut };
+    return { session, timedOut, box };
   }
 
   async function simulateBoxReturn(then: CollapseThen = 'hide', icon: string | null = null): Promise<SimulateBoxReturnResult> {
-    const session = ++boxSession;
-    await emitEvent('box:collapse', { session, then, icon });
-    boxVisible = true;
-    await emitEvent('box:shown', null);
-    return { session, painted: await boxPainted(session) };
+    const back = await returnBox(then, icon, true);
+    return { ...back, revealed: await swapBox('box:reveal') };
   }
 
   // ---- items ------------------------------------------------------------------

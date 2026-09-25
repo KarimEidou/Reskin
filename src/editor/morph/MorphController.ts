@@ -15,6 +15,11 @@
 //   step that overruns is abandoned and the ack is sent anyway.
 // * A failing step is reported and still acked: the ack means "I am done
 //   with this stage", and Rust's timeouts are the only other way out.
+// * Nothing is painted before Reveal (Prepare holds the proxy), and the two
+//   swaps with the box — Reveal paints the proxy, Clear stops painting —
+//   happen on the page's next frame: Rust sends the box its half at the
+//   same moment, the box makes its change on its next frame too, and both
+//   windows follow the same display, so the two land in one composed frame.
 //
 // Pure TypeScript (no DOM); the surface, ack and timer are injected so the
 // ordering / timeout / stale-session logic is unit tested.
@@ -32,9 +37,9 @@ export type MorphPhase =
   /** Nothing prepared yet (fresh page). */
   | 'idle'
   | 'preparing'
-  /** Proxy drawn, window still hidden. */
+  /** Proxy laid out and held (nothing painted); the window may be on screen. */
   | 'prepared'
-  /** Window visible, proxy over the real box. */
+  /** Window visible, proxy painted over the (no longer painted) box. */
   | 'revealed'
   | 'expanding'
   | 'open'
@@ -47,14 +52,24 @@ export type MorphPhase =
 
 /** What the controller drives: App's proxy + panel. */
 export interface MorphSurface {
-  /** Resets for a new open and draws the box proxy; resolves once its image is decoded. */
+  /**
+   * Resets for a new open and lays out the box proxy, held (not painted
+   * until `reveal`); resolves once its image is decoded.
+   */
   prepare(cmd: PrepareCmd): Promise<void> | void;
+  /** Paints the held proxy. */
+  reveal(): Promise<void> | void;
   /** Proxy → panel (FLIP morph, or a crossfade when `morph` is false). */
   expand(morph: boolean): Promise<void> | void;
   /** Panel → proxy at `cmd.boxRect` (or a fade out when `cmd.morph` is false). */
   collapse(cmd: CollapseCmd): Promise<void> | void;
   /** Paints nothing at all. */
   clear(): Promise<void> | void;
+  /**
+   * Waits for the next frame (its rAF callback, time-boxed): a change made
+   * right then is in that frame.
+   */
+  nextFrame(timeoutMs: number): Promise<unknown>;
   /** Waits until the current DOM state is on screen (double rAF, time-boxed). */
   frames(timeoutMs: number): Promise<unknown>;
 }
@@ -62,8 +77,16 @@ export interface MorphSurface {
 export interface MorphTimeouts {
   /** Drawing the proxy incl. decoding its icon (Rust falls back to a crossfade after 400 ms). */
   prepare: number;
-  /** Frames after preparing (the window is hidden, so rAF may never come). */
+  /**
+   * Frames after preparing (a hidden window runs no rAF, and one just shown
+   * none for a moment).
+   */
   prepareFrames: number;
+  /**
+   * The frame a swap with the box happens in (the window is on screen: the
+   * next frame is due within a vsync).
+   */
+  swapFrame: number;
   /** Frames after Reveal. */
   reveal: number;
   /** The whole expand animation. */
@@ -77,6 +100,7 @@ export interface MorphTimeouts {
 export const DEFAULT_TIMEOUTS: Readonly<MorphTimeouts> = Object.freeze({
   prepare: 700,
   prepareFrames: 120,
+  swapFrame: 100,
   reveal: 400,
   expand: 2400,
   collapse: 1700,
@@ -194,6 +218,11 @@ export class MorphController {
       return 'repeated';
     }
     if (this._phase !== 'prepared') return 'stale';
+    // The swap: the proxy shows from the frame the box stops painting in.
+    await this.swapFrame(cmd.session);
+    if (!this.live(cmd.session)) return 'stale';
+    await this.step(cmd.session, 'reveal', () => this.surface.reveal(), this.timeouts.reveal);
+    if (!this.live(cmd.session)) return 'stale';
     await this.settle(cmd.session, this.timeouts.reveal);
     if (!this.live(cmd.session)) return 'stale';
     this.setPhase('revealed');
@@ -244,6 +273,9 @@ export class MorphController {
       return 'repeated';
     }
     this.setPhase('clearing');
+    // The swap: nothing shows from the frame the box paints its picture in.
+    await this.swapFrame(cmd.session);
+    if (!this.live(cmd.session)) return 'stale';
     await this.step(cmd.session, 'clear', () => this.surface.clear(), this.timeouts.settle);
     if (!this.live(cmd.session)) return 'stale';
     await this.settle(cmd.session, this.timeouts.settle);
@@ -282,6 +314,18 @@ export class MorphController {
   ): Promise<void> {
     const outcome = await race(run, timeoutMs, this.delay);
     if (outcome.kind !== 'ok') this.onIssue?.({ session, step, ...outcome });
+  }
+
+  /**
+   * Waits for the frame a swap with the box happens in, time-boxed; never
+   * throws. The step that follows makes its change right then, before
+   * anything else runs, so it is in that frame.
+   */
+  private async swapFrame(session: number): Promise<void> {
+    const timeoutMs = this.timeouts.swapFrame;
+    // As in settle, the race is a backstop for nextFrame's own timeout.
+    const outcome = await race(() => this.surface.nextFrame(timeoutMs), timeoutMs + 100, this.delay);
+    if (outcome.kind !== 'ok') this.onIssue?.({ session, step: 'frames', ...outcome });
   }
 
   /** Waits for the picture to reach the screen, time-boxed; never throws. */

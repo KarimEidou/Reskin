@@ -853,7 +853,9 @@ pub struct BoxHandoff {
 /// `box:collapse`: sent to the still hidden box once the editor has
 /// collapsed onto its proxy. The box takes on the proxy's final picture
 /// (the empty box after `Hide`, `icon` after `Fly` / `Celebrate`) so that it
-/// is shown under an identical picture, then confirms with `box_painted`.
+/// is shown under an identical picture, then confirms with `box_painted`
+/// once it is shown and that picture is on screen — `held`, without
+/// painting it.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "ts", derive(TS), ts(export))]
 #[serde(rename_all = "camelCase")]
@@ -863,6 +865,27 @@ pub struct BoxCollapse {
     pub then: CollapseThen,
     /// Data URL of the icon the box carries (as in `EditorCmd::Collapse`).
     pub icon: Option<String>,
+    /// The editor's proxy shows this picture over the box: the box takes
+    /// it without painting it (laid out, its icon decoded) until
+    /// `box:reveal` swaps the two. False when nothing covers the box (the
+    /// editor faded out): it paints the picture as soon as it is shown.
+    pub held: bool,
+}
+
+/// `box:conceal` / `box:reveal`: the box's half of a swap with the
+/// editor's proxy, which draws the same picture over it — at every moment
+/// exactly one of the two windows paints it. `box:conceal` (open, sent with
+/// `EditorCmd::Reveal`) stops painting the box, which is hidden next;
+/// `box:reveal` (close, sent with `EditorCmd::Clear`) paints the picture it
+/// holds since `box:collapse`. Both pages make their change on their next
+/// frame, so the two land in the same composed frame. The box confirms with
+/// `box_painted(session)` once its change is on screen.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(TS), ts(export))]
+#[serde(rename_all = "camelCase")]
+pub struct BoxSwap {
+    /// Box session (see `BoxHandoff::session`).
+    pub session: u32,
 }
 
 // ---------------------------------------------------------------------------
@@ -890,8 +913,10 @@ pub enum CollapseThen {
     rename_all_fields = "camelCase"
 )]
 pub enum EditorCmd {
-    /// Draw the box proxy at `box_rect` (editor CSS px), load items, then
-    /// ack `Prepared`. The window is still hidden.
+    /// Lay out the box proxy at `box_rect` (editor CSS px) and decode its
+    /// icon, held — not painted until `Reveal` — start loading the items,
+    /// then ack `Prepared` after a double rAF. The window may be on screen
+    /// meanwhile, painting nothing.
     Prepare {
         session: u32,
         /// Where the box is; `None` while it is hidden: no proxy, the panel
@@ -904,8 +929,10 @@ pub enum EditorCmd {
         /// false = crossfade (reduced motion, user setting or fallback).
         morph: bool,
     },
-    /// The window is now visible on top of the box: ack `Revealed` after a
-    /// double rAF so Rust can hide the real box.
+    /// The window is on screen over the box: paint the held proxy on the
+    /// next frame — the swap with the box, which stops painting on its next
+    /// frame (`box:conceal`) — and ack `Revealed` after a double rAF, so
+    /// Rust can hide the (transparent) box.
     Reveal {
         session: u32,
     },
@@ -927,7 +954,10 @@ pub enum EditorCmd {
         /// hidden, or reduced motion).
         morph: bool,
     },
-    /// The box is visible again: clear to transparent, ack `Cleared`.
+    /// The box is on screen under the window: clear to transparent on the
+    /// next frame — the swap with the box, which paints the picture it held
+    /// on its next frame (`box:reveal`) — and ack `Cleared` after a double
+    /// rAF.
     Clear {
         session: u32,
     },
@@ -1056,10 +1086,15 @@ mod tests {
             session: 2,
             then: CollapseThen::Celebrate,
             icon: None,
+            held: true,
         };
         assert_eq!(
             serde_json::to_string(&b).unwrap(),
-            r#"{"session":2,"then":"celebrate","icon":null}"#
+            r#"{"session":2,"then":"celebrate","icon":null,"held":true}"#
+        );
+        assert_eq!(
+            serde_json::to_string(&BoxSwap { session: 5 }).unwrap(),
+            r#"{"session":5}"#
         );
         let h = BoxHandoff {
             session: 3,

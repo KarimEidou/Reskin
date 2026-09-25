@@ -51,6 +51,14 @@ function acks(page: Page): Promise<string[]> {
   return page.evaluate(() => window.__e2e!.acks.map((a) => `${a.session}:${a.stage}`));
 }
 
+/** How many pixels the (transparent) window paints. */
+async function paintedPixels(page: Page): Promise<number> {
+  const png = PNG.sync.read(await page.screenshot({ omitBackground: true }));
+  let painted = 0;
+  for (let i = 3; i < png.data.length; i += 4) if (png.data[i]! > 0) painted++;
+  return painted;
+}
+
 async function prepare(page: Page, session: number, boxRect: Rect, paths: string[] = [SAMPLE_PATHS.steam]) {
   const items = paths.length ? await makeItems(page, paths) : [];
   const cmd: EditorCmd = {
@@ -130,6 +138,22 @@ test.describe('prepare', () => {
     await expectPanelTransparent(page);
   });
 
+  test('the window paints nothing until Reveal, which paints the proxy', async ({ openEditor, page }) => {
+    await openEditor();
+    const m = metricsFor('medium');
+    await prepare(page, 1, { x: 40, y: 40, w: m.window, h: m.window });
+    // Prepared: the proxy is laid out and its icon decoded, but held — the
+    // window, shown over the box meanwhile, paints nothing at all.
+    await expect(frame(page)).toHaveAttribute('data-mode', 'proxy');
+    await expect(proxy(page)).toHaveCSS('opacity', '0');
+    expect(await paintedPixels(page)).toBe(0);
+    // Reveal: the swap with the box (which stops painting at the same time).
+    await pushEditorCmd(page, { type: 'reveal', session: 1 });
+    expect(await waitForAck(page, 1, 'revealed')).toBe(true);
+    await expect(proxy(page)).toHaveCSS('opacity', '1');
+    expect(await paintedPixels(page)).toBeGreaterThan(m.visual * m.visual * 0.5);
+  });
+
   test('a batch shows the count badge like the box', async ({ openEditor, page }) => {
     await openEditor();
     await prepare(page, 1, { x: 40, y: 40, w: 148, h: 148 }, [SAMPLE_PATHS.steam, SAMPLE_PATHS.site, SAMPLE_PATHS.folder]);
@@ -151,13 +175,13 @@ test.describe('handoff protocol', () => {
   test('acks follow the protocol for one session: open, then close', async ({ openEditor, page }) => {
     await openEditor();
     const open = await simulateOpen(page, [SAMPLE_PATHS.steam], 'edit');
-    expect(open).toEqual({ session: 1, morph: true, preparedInTime: true, boxPainted: null, timedOut: [] });
+    expect(open).toEqual({ session: 1, morph: true, preparedInTime: true, boxPainted: null, boxConcealed: null, timedOut: [] });
     await expect(frame(page)).toHaveAttribute('data-mode', 'open');
     await expect(page.locator('html')).toHaveAttribute('data-phase', 'open');
     expect(await acks(page)).toEqual(['1:prepared', '1:revealed', '1:expanded']);
 
     const close = await simulateClose(page, 'hide');
-    expect(close).toEqual({ session: 1, timedOut: [] });
+    expect(close).toEqual({ session: 1, timedOut: [], box: null });
     expect(await acks(page)).toEqual(['1:prepared', '1:revealed', '1:expanded', '1:collapsed', '1:cleared']);
     await expect(frame(page)).toHaveAttribute('data-mode', 'hidden');
 
@@ -188,6 +212,8 @@ test.describe('handoff protocol', () => {
     await pushEditorCmd(page, { type: 'collapse', session, boxRect, then: 'fly', icon: item!.icon, morph: true });
     expect(await waitForAck(page, session, 'collapsed')).toBe(true);
     await expect(frame(page)).toHaveAttribute('data-mode', 'proxy');
+    // Painted: the box comes back under it holding the picture.
+    await expect(proxy(page)).toHaveCSS('opacity', '1');
     await expect(proxy(page).locator('img.icon')).toHaveAttribute('src', item!.icon!);
     const bb = (await proxy(page).locator('.bv').boundingBox())!;
     expect(Math.abs(bb.x - boxRect.x)).toBeLessThanOrEqual(1);
@@ -240,10 +266,7 @@ test.describe('handoff protocol', () => {
     await page.evaluate(() => (window as unknown as { __reskinSession: { saveToLibrary(): Promise<unknown> } }).__reskinSession.saveToLibrary());
     await expect(page.getByRole('status').filter({ hasText: 'Saved' })).toBeVisible();
     await simulateClose(page, 'hide');
-    const png = PNG.sync.read(await page.screenshot({ omitBackground: true }));
-    let painted = 0;
-    for (let i = 3; i < png.data.length; i += 4) if (png.data[i]! > 0) painted++;
-    expect(painted).toBe(0);
+    expect(await paintedPixels(page)).toBe(0);
   });
 
   test('a modal scrim never paints the transparent shadow margin', async ({ openEditor, page }) => {
@@ -736,9 +759,9 @@ test.describe('morph gallery', () => {
         morph: true,
       });
       await waitForAck(page, 1, 'prepared');
-      await shoot(page, `editor-shell-morph-0-proxy${suffix}.png`);
       await pushEditorCmd(page, { type: 'reveal', session: 1 });
       await waitForAck(page, 1, 'revealed');
+      await shoot(page, `editor-shell-morph-0-proxy${suffix}.png`);
       await pushEditorCmd(page, { type: 'expand', session: 1, morph: true });
       // Three moments of the expand — the last as the panel's shadow (a
       // layer of its own) fades in — then let it finish.
