@@ -1,14 +1,16 @@
 <!--
   Renders the toast stack (bottom centre). Mount once per page. Hovering or
-  focusing the stack pauses auto-dismissal. Screen readers hear each toast
-  exactly once: the stack is two persistent live regions (a live region
-  inserted together with its text is often not announced, and one inside
-  another is read twice) — warnings and errors in an alert region on top,
-  info/success toasts in the polite "Notifications" status region below.
-  A toast is announced as it is added to its region; the others are not
-  read again (aria-atomic="false").
+  focusing the stack pauses auto-dismissal; a toast that goes with focus on
+  it hands focus to the next toast, else back to where it came from. Screen
+  readers hear each toast exactly once: the stack is two persistent live
+  regions (a live region inserted together with its text is often not
+  announced, and one inside another is read twice) — warnings and errors
+  in an alert region on top, info/success toasts in the polite
+  "Notifications" status region below. A toast is announced as it is added
+  to its region; the others are not read again (aria-atomic="false").
 -->
 <script lang="ts">
+  import { untrack } from 'svelte';
   import { flip } from 'svelte/animate';
   import { fade, fly } from 'svelte/transition';
   import CircleAlert from '@lucide/svelte/icons/circle-alert';
@@ -39,21 +41,62 @@
     error: CircleAlert,
   };
 
+  let host: HTMLDivElement | undefined = $state();
+  /** Where focus was before it came into the stack. */
+  let returnTo: HTMLElement | null = null;
+  /** The toast that had focus when the list changed, and its place among the shown ones. */
+  let focused: { id: string; el: HTMLElement; index: number } | null = null;
+
+  /** Toasts on screen, top to bottom (not those fading out). */
+  const shown = () => [...(host?.querySelectorAll<HTMLElement>('.toast:not([inert])') ?? [])];
+
   function pauseWhileEngaged(node: HTMLElement) {
+    const enter = (e: FocusEvent) => {
+      pauseToasts();
+      if (!node.contains(e.relatedTarget as Node | null)) returnTo = e.relatedTarget instanceof HTMLElement ? e.relatedTarget : null;
+    };
     const leave = (e: FocusEvent) => {
       if (!node.contains(e.relatedTarget as Node | null)) resumeToasts();
     };
     node.addEventListener('pointerenter', pauseToasts);
     node.addEventListener('pointerleave', resumeToasts);
-    node.addEventListener('focusin', pauseToasts);
+    node.addEventListener('focusin', enter);
     node.addEventListener('focusout', leave);
     return () => {
       node.removeEventListener('pointerenter', pauseToasts);
       node.removeEventListener('pointerleave', resumeToasts);
-      node.removeEventListener('focusin', pauseToasts);
+      node.removeEventListener('focusin', enter);
       node.removeEventListener('focusout', leave);
     };
   }
+
+  // A toast that goes while it has focus (dismissed, its action run, timed
+  // out or pushed out by a newer one) must not drop focus to the page —
+  // where, in the editor, the keys act on the canvas: focus moves to the
+  // Dismiss button of the toast now in its place, else back to where it
+  // came from.
+  $effect.pre(() => {
+    void toasts();
+    untrack(() => {
+      const el = document.activeElement?.closest<HTMLElement>('.toast');
+      focused = el && host?.contains(el) ? { id: el.dataset.toastId!, el, index: shown().indexOf(el) } : null;
+    });
+  });
+  $effect(() => {
+    const list = toasts();
+    untrack(() => {
+      const was = focused;
+      focused = null;
+      if (!was || list.some((t) => t.id === was.id)) return;
+      // Leave focus that moved on (e.g. the action took it). Focus still on
+      // the fading (inert) toast is about to drop to the page.
+      const active = document.activeElement;
+      if (active && active !== document.body && !was.el.contains(active)) return;
+      const rest = shown();
+      const next = rest[Math.min(was.index, rest.length - 1)]?.querySelector<HTMLElement>('[data-toast-dismiss]');
+      (next ?? (returnTo?.isConnected ? returnTo : null))?.focus({ preventScroll: true });
+    });
+  });
 </script>
 
 {#snippet body(t: Toast)}
@@ -63,14 +106,15 @@
   {#if t.action}
     <button type="button" class="action" onclick={() => runToastAction(t.id)}>{t.action.label}</button>
   {/if}
-  <IconButton label="Dismiss notification" icon={X} size="sm" tooltip={false} onclick={() => dismissToast(t.id)} />
+  <IconButton label="Dismiss notification" icon={X} size="sm" tooltip={false} data-toast-dismiss onclick={() => dismissToast(t.id)} />
 {/snippet}
 
-<div class="host" style:bottom={inset} {@attach pauseWhileEngaged}>
+<div class="host" style:bottom={inset} bind:this={host} {@attach pauseWhileEngaged}>
   <div class="stack alerts" role="alert" aria-atomic="false">
     {#each alerts as t (t.id)}
       <div
         class="toast kind-{t.kind}"
+        data-toast-id={t.id}
         animate:flip={{ duration: dur(220) }}
         in:fly={{ y: 14, duration: dur(260), opacity: 0 }}
         out:fade={{ duration: dur(160, 'fade') }}
@@ -83,6 +127,7 @@
     {#each polite as t (t.id)}
       <div
         class="toast kind-{t.kind}"
+        data-toast-id={t.id}
         animate:flip={{ duration: dur(220) }}
         in:fly={{ y: 14, duration: dur(260), opacity: 0 }}
         out:fade={{ duration: dur(160, 'fade') }}

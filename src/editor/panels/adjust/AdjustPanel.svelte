@@ -5,7 +5,8 @@
   thread and shown through an engine layer preview: the canvas follows
   every change, the history does not. Apply records the adjustment as one
   undo step, Cancel restores the layer byte for byte, Reset returns to the
-  defaults. Anything else that changes the design ends the preview (the
+  defaults; their bar stays at the foot of the panel while long settings
+  scroll. Anything else that changes the design ends the preview (the
   engine restores the layer) and closes the settings. Pixel sizes (radii,
   block sizes, offsets) follow the document's size (./scale.ts). The command
   palette opens an adjustment through `panelRequests.adjust`.
@@ -89,6 +90,25 @@
   /** The editor is about to close: move focus out of it first. */
   function park(): void {
     if (editorEl?.contains(document.activeElement)) root?.focus();
+  }
+
+  let actionsEl: HTMLDivElement | undefined = $state();
+
+  /**
+   * A control focused behind the sticky Apply / Cancel bar scrolls up clear
+   * of it: the browser scrolls only for what is outside the panel's view.
+   */
+  function uncover(e: FocusEvent): void {
+    const target = e.target;
+    if (!actionsEl || !(target instanceof Element) || actionsEl.contains(target)) return;
+    const covered = Math.ceil(target.getBoundingClientRect().bottom - actionsEl.getBoundingClientRect().top);
+    if (covered <= 0) return;
+    for (let el = actionsEl.parentElement; el; el = el.parentElement) {
+      if (/auto|scroll/.test(getComputedStyle(el).overflowY)) {
+        el.scrollTop += covered;
+        return;
+      }
+    }
   }
 
   function open(t: AdjustTarget): void {
@@ -257,7 +277,7 @@
 <div class="adjust" data-testid="adjust-panel" tabindex="-1" bind:this={root}>
   {#if editing}
     <!-- svelte-ignore a11y_no_static_element_interactions -->
-    <div class="editor" bind:this={editorEl} onkeydown={onEditorKey} data-testid="adjust-editor">
+    <div class="editor" bind:this={editorEl} onkeydown={onEditorKey} onfocusin={uncover} data-testid="adjust-editor">
       <div class="editor-head">
         <IconButton label="Back to adjustments (cancel)" icon={ChevronLeft} size="sm" class="back" onclick={cancel} />
         <div class="title">
@@ -280,7 +300,7 @@
       {:else}
         <p class="noparams">No settings — the preview shows the result.</p>
       {/if}
-      <div class="actions">
+      <div class="actions" bind:this={actionsEl}>
         <Button size="sm" variant="ghost" icon={RotateCcw} onclick={reset} disabled={editing.params.length === 0}>Reset</Button>
         <span class="grow"></span>
         <Button size="sm" onclick={cancel} data-testid="adjust-cancel">Cancel</Button>
@@ -488,10 +508,21 @@
     color: var(--text-3);
     font-size: var(--text-sm);
   }
+  /*
+   * Apply and Cancel stick to the foot of the panel while long settings
+   * scroll (as the Layers toolbar sticks to its top). The bar reaches the
+   * editor's edges; the spacing around the buttons stays as it was.
+   */
   .actions {
+    position: sticky;
+    bottom: 0;
+    z-index: 1;
     display: flex;
     align-items: center;
     gap: var(--space-1);
+    margin: calc(-1 * var(--space-2)) calc(-1 * var(--space-3)) calc(-1 * var(--space-3));
+    padding: var(--space-2) var(--space-3) var(--space-3);
+    background: var(--surface-1);
   }
   .grow {
     flex: 1;

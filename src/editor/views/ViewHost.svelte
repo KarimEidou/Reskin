@@ -1,10 +1,11 @@
 <!--
   Shows the current view: the Edit workspace (another package's
   <Workspace />), Start, or a lazily loaded page. `data-view-host` marks the
-  element the morph staggers and aims the icon at.
+  element the morph staggers and aims the icon at; it also takes focus
+  that a view change takes away.
 -->
 <script lang="ts">
-  import { untrack } from 'svelte';
+  import { tick, untrack } from 'svelte';
   import Spinner from '$lib/ui/Spinner.svelte';
   import Workspace from '../workspace/Workspace.svelte';
   import { getShell } from '../chrome/shell.svelte';
@@ -32,18 +33,24 @@
 
   // Release focus before the old view is torn down: a focused element that
   // disappears fires focusout mid-update, where a field committing its
-  // draft on blur would write state.
+  // draft on blur would write state. Once the new view is in, focus goes to
+  // the host (unless the view took it): left on the page, it would count as
+  // the canvas in the Edit view, where Delete clears the layer.
   let host: HTMLDivElement | undefined = $state();
   $effect.pre(() => {
     void shown;
     untrack(() => {
       const active = document.activeElement;
-      if (host && active instanceof HTMLElement && host.contains(active)) active.blur();
+      if (!host || active === host || !(active instanceof HTMLElement) || !host.contains(active)) return;
+      active.blur();
+      void tick().then(() => {
+        if (host && (document.activeElement === document.body || document.activeElement === null)) host.focus({ preventScroll: true });
+      });
     });
   });
 </script>
 
-<div class="view-host" data-view-host data-view={shown} bind:this={host}>
+<div class="view-host" data-view-host data-view={shown} tabindex="-1" bind:this={host}>
   {#if shown === 'edit'}
     <Workspace />
   {:else if shown === 'start'}
@@ -73,6 +80,13 @@
     flex-direction: column;
     flex: 1;
     min-height: 0;
+  }
+  .view-host:focus {
+    outline: none;
+  }
+  .view-host:focus-visible {
+    outline: var(--focus-width) solid var(--focus-color);
+    outline-offset: calc(-1 * var(--focus-width));
   }
   .veil {
     position: absolute;

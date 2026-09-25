@@ -1,7 +1,10 @@
 <!--
-  Non-modal popover anchored to an element. Closes on an outside press or
-  Escape (focus then returns to the anchor). Rendered in <body>, so no
-  container can clip it.
+  Non-modal popover anchored to an element. Closes on an outside press, on
+  Escape, and on a Tab or Shift+Tab that would leave it. Escape and
+  Shift+Tab give focus back to what had it when the popover opened (else
+  the anchor); Tab goes on from there to what follows it. Rendered in
+  <body>, so no container can clip it (and a Tab out of it would land at
+  the other end of the page).
     <button bind:this={btn} onclick={() => (open = !open)} aria-expanded={open}>…</button>
     <Popover bind:open anchor={btn} label="Brush options">…</Popover>
 -->
@@ -38,16 +41,46 @@
     children,
   }: Props = $props();
 
-  function close(reason: 'outside' | 'escape'): void {
+  /** What had focus when the popover opened (never the page itself). */
+  let opener: HTMLElement | null = null;
+
+  /**
+   * The popover's Tab stops, in DOM order: not the other options of a
+   * roving-tabindex group (a segmented control's unselected segments).
+   */
+  const tabStops = (node: HTMLElement) => focusableIn(node).filter((el) => el.tabIndex >= 0);
+
+  function close(reason: 'outside' | 'escape' | 'tab'): void {
     open = false;
     onclose?.();
-    if (reason === 'escape') anchor?.focus();
+    // After an outside press, focus is where that press put it.
+    if (reason !== 'outside') (opener?.isConnected ? opener : anchor)?.focus({ preventScroll: true });
   }
 
-  function focusOnOpen(node: HTMLElement) {
-    if (initialFocus === 'none') return;
-    const target = initialFocus === 'first' ? (focusableIn(node)[0] ?? node) : node;
-    queueMicrotask(() => target.focus({ preventScroll: true }));
+  /**
+   * Remembers the opener, moves focus in (`initialFocus`) and closes the
+   * popover on a Tab past its last control or a Shift+Tab past its first
+   * (or from the popover itself). Focus is back on the opener before the
+   * key's default runs: Tab carries on from there; Shift+Tab stops there.
+   */
+  function focusBehaviour(node: HTMLElement) {
+    const active = document.activeElement;
+    opener = active instanceof HTMLElement && active !== document.body && !node.contains(active) ? active : null;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key !== 'Tab' || e.defaultPrevented || e.ctrlKey || e.altKey || e.metaKey) return;
+      const from = document.activeElement;
+      if (!from || !node.contains(from)) return;
+      const onward = e.shiftKey ? Node.DOCUMENT_POSITION_PRECEDING : Node.DOCUMENT_POSITION_FOLLOWING;
+      if (tabStops(node).some((el) => from.compareDocumentPosition(el) & onward)) return;
+      if (e.shiftKey) e.preventDefault();
+      close('tab');
+    };
+    node.addEventListener('keydown', onKey);
+    if (initialFocus !== 'none') {
+      const target = initialFocus === 'first' ? (focusableIn(node)[0] ?? node) : node;
+      queueMicrotask(() => target.focus({ preventScroll: true }));
+    }
+    return () => node.removeEventListener('keydown', onKey);
   }
 </script>
 
@@ -61,7 +94,7 @@
     {@attach portal(() => anchor)}
     {@attach floating({ anchor: () => anchor, placement, offset })}
     {@attach dismissable(close, () => [anchor])}
-    {@attach focusOnOpen}
+    {@attach focusBehaviour}
   >
     {@render children()}
   </div>
