@@ -62,6 +62,8 @@ const RETRY_PAUSE_MS = 2000;
 const IDLE_MS = 2000;
 /** Tasks an idle page may run in IDLE_MS (the test's own probes included). */
 const IDLE_TASKS_MS = 20;
+/** Tiles an open morph may raster per frame it commits (see its test). */
+const MORPH_TILES_PER_FRAME = 16;
 
 // ---- the in-page probe -----------------------------------------------------------
 
@@ -663,6 +665,81 @@ test.describe('the morph frame', () => {
     // to (the compositor re-rasters a layer scaled up by a main-thread
     // animation once); a morph has some 25 frames.
     expect(proxyFrames.size, 'frames that raster the proxy').toBeLessThanOrEqual(2);
+  });
+
+  // The open morph of the Edit view, traced from the moment its animations
+  // play to their end (user-timing marks as the frame sets and clears
+  // `data-transition`, in the page: the ack's round trip to the test would
+  // let the frames after the morph in — the canvas shows again a few frames
+  // after it). Counted, not timed: these hold on any machine.
+  type WorkEvent = { name: string; cat: string; ph: string; ts: number; pid: number; tid: number; args?: { tileData?: unknown } };
+
+  async function traceOpenMorph(page: Page, browser: Browser): Promise<{ motion: WorkEvent[]; frames: number }> {
+    const items = await freshEditor(page, [SAMPLE_PATHS.steam]);
+    const session = 1;
+    await pushEditorCmd(page, { type: 'prepare', session, boxRect: BOX_RECT, items, view: 'edit', settings: await settings(page), morph: true });
+    expect(await waitForAck(page, session, 'prepared')).toBe(true);
+    await pushEditorCmd(page, { type: 'reveal', session });
+    expect(await waitForAck(page, session, 'revealed')).toBe(true);
+    // The Edit view is ready behind the proxy, its canvas drawn.
+    await designLoaded(page);
+    await expect.poll(() => page.getByTestId('canvas').evaluate((el) => el.getBoundingClientRect().width)).toBeGreaterThan(100);
+    await settle(page);
+    await page.evaluate(() => {
+      let playing = false;
+      new MutationObserver((records, observer) => {
+        const set = records.some((r) => r.target instanceof HTMLElement && r.target.dataset.transition);
+        if (!playing && set) {
+          playing = true;
+          performance.mark('perf:from');
+        } else if (playing && !set) {
+          performance.mark('perf:to');
+          observer.disconnect();
+        }
+      }).observe(document, { subtree: true, attributes: true, attributeFilter: ['data-transition'] });
+    });
+    await browser.startTracing(page, { categories: ['blink', 'blink.user_timing', 'devtools.timeline', 'disabled-by-default-devtools.timeline'] });
+    let events: WorkEvent[] = [];
+    try {
+      await pushEditorCmd(page, { type: 'expand', session, morph: true });
+      expect(await waitForAck(page, session, 'expanded')).toBe(true);
+    } finally {
+      events = (JSON.parse((await browser.stopTracing()).toString('utf8')) as { traceEvents: WorkEvent[] }).traceEvents;
+    }
+    const [from, to] = ['perf:from', 'perf:to'].map((name) => events.find((e) => e.name === name));
+    // Without its marks the trace would pass vacuously.
+    expect(from, 'trace marks').toBeDefined();
+    expect(to, 'trace marks').toBeDefined();
+    // The page's own events (its main thread and raster workers) while the morph plays.
+    const motion = events.filter((e) => e.pid === from!.pid && e.ts >= from!.ts && e.ts <= to!.ts);
+    // The frames it committed, on the page's main thread.
+    const frames = motion.filter((e) => e.name === 'Commit' && e.ph === 'X' && e.tid === from!.tid).length;
+    expect(frames, 'frames committed during the morph').toBeGreaterThan(10);
+    return { motion, frames };
+  }
+
+  // A 2D canvas shown on the page is handed to the compositor anew at every
+  // frame the page commits, drawn or not: during a morph, ~3 ms of each
+  // frame's main thread at 4× (a sixth of it). The canvas holds still
+  // instead (stage.hold): a still picture of it, handed over once, before
+  // the motion.
+  test('an open morph never hands the compositor the canvas again', async ({ page, browser }) => {
+    const { motion } = await traceOpenMorph(page, browser);
+    expect(motion.filter((e) => e.cat === 'blink').length, 'blink events traced').toBeGreaterThan(0);
+    const uploads = motion.filter((e) => /^CanvasResource.*::(ProduceCanvasResource|PrepareTransferableResource)$/.test(e.name));
+    expect(uploads.map((e) => e.name)).toEqual([]);
+  });
+
+  // What is redrawn at every frame of the morph: the shell (its radius
+  // changes, until its corners settle) and little else — no mask of a
+  // clip-path, no content repainted under a changing clip. The panel is
+  // ~15 tiles; the base of this guard redrew 21–23 at every frame, today's
+  // morph ~12.
+  test('an open morph redraws few tiles per frame', async ({ page, browser }) => {
+    const { motion, frames } = await traceOpenMorph(page, browser);
+    const tiles = motion.filter((e) => e.name === 'RasterTask' && e.args?.tileData).length;
+    expect(tiles, 'rasters during the morph').toBeGreaterThan(0);
+    expect(tiles / frames, `${tiles} tiles in ${frames} frames`).toBeLessThanOrEqual(MORPH_TILES_PER_FRAME);
   });
 
   test('a morphing panel takes neither the pointer nor the focus, without going inert', async ({ page }) => {

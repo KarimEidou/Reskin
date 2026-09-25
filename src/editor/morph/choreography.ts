@@ -4,19 +4,29 @@
 // speed 1) sampled into WAAPI keyframes, so the panel's shell, the fading
 // proxy and the icon that settles onto the canvas move in step. What the
 // icon lands on (the document, drawn before the morph starts) shows only as
-// the icon settles: the two cross-fade there, never side by side. Only
-// transform, opacity, border-radius and the content's clip-path are
-// animated; the shell's radius is counter-scaled per frame so its corners
-// stay round while it stretches.
+// the icon settles: the two cross-fade there, never side by side. The
+// shell's radius is counter-scaled per frame so its corners stay round
+// while it stretches.
 //
 // Cost per frame (docs/ARCHITECTURE.md, "Performance"): the shell is
-// repainted every frame (its radius changes), so it carries no blurred
-// shadow — the panel's drop shadow is a layer of its own that only fades,
-// once the shell is in place. The content's clip is animated only while the
-// content shows. The regions enter by fading only: a region that moved
-// would make every layer painted above it a layer of its own for its whole
-// entrance (the compositor assumes they overlap), and each frame would
-// commit them all.
+// repainted every frame its radius changes, so it carries no blurred shadow
+// — the panel's drop shadow is a layer of its own that only fades, once the
+// shell is in place — and once its corners are round to a fraction of a
+// pixel with their radius at rest, they keep it: as it settles the shell
+// only moves. The content is revealed by a rounded clip laid out on the
+// shell's rect, and stays in place inside it (moved by the opposite of the
+// clip's offset): a clip-path painted a mask, and the content with it, at
+// every frame. The clip moves only while the content shows. The content
+// fades in by a custom property: an animated `opacity` keeps the whole
+// content drawn apart, in a pass of its own, for as long as the animation
+// lasts, even while opaque (the collapse's short fade-out is an `opacity`:
+// once transparent the content is not drawn at all). The canvas holds
+// still meanwhile (MorphFrame, `stage.hold`), and so does what is
+// transparent (the proxy once it has faded, what the icon lands on until
+// it shows): what does not change costs a frame nothing. The regions enter
+// by fading only: a region that moved would make every layer painted above
+// it a layer of its own for its whole entrance (the compositor assumes they
+// overlap), and each frame would commit them all.
 
 import type { Rect } from '$lib/ipc/types';
 import { clamp, EASE, lerp } from '$lib/motion/easing';
@@ -40,7 +50,9 @@ export interface MorphParts {
   shell: HTMLElement;
   /** The panel's drop shadow (never moved or scaled: it only fades). */
   shadow: HTMLElement;
-  /** Everything drawn on the panel (title bar, view). */
+  /** The rounded clip of everything drawn on the panel: laid out on the shell's rect while it morphs. */
+  clip: HTMLElement;
+  /** Everything drawn on the panel (title bar, view): panel-sized inside `clip`, kept in place. */
   content: HTMLElement;
   /** Content regions that enter one after another. */
   regions: readonly HTMLElement[];
@@ -63,12 +75,22 @@ const CONTENT_OUT_MS = 110;
 /** Fraction of the open timeline after which the content fades in. */
 const CONTENT_IN = 0.22;
 const FRAME_MS = 1000 / 60;
+/**
+ * How far (CSS px on screen) the shell's corners may be from round as it
+ * settles, where they keep their radius at rest (see shellFrame): a
+ * fraction of a pixel on the curve of a corner, as its last frames grow
+ * the panel by a few pixels.
+ */
+const SETTLED_RADIUS_PX = 0.5;
+
+/** The content's opacity while it morphs (a custom property registered in MorphFrame, see the file comment). */
+export const CONTENT_OPACITY = '--morph-content-o';
 
 /**
- * The shell animates border-radius and the content clip-path, which run on
- * the main thread. Pure transform/opacity animations would run on the
- * compositor and drift ahead of them whenever the main thread is busy (a
- * slow machine; an item that took longer than the open waits for it). A
+ * The shell animates border-radius and the content's clip its size, which
+ * run on the main thread. Pure transform/opacity animations would run on
+ * the compositor and drift ahead of them whenever the main thread is busy
+ * (a slow machine; an item that took longer than the open waits for it). A
  * constant, invisible non-compositable property keeps every part of the
  * morph on one clock.
  */
@@ -81,14 +103,21 @@ const smooth = (x: number) => {
 };
 const round = (v: number) => Math.round(v * 1000) / 1000;
 
+/** One frame of the timeline: spring progress `p` (may overshoot slightly), time fraction `t`, keyframe offset. */
+interface Sample {
+  p: number;
+  t: number;
+  offset: number;
+}
+
 interface Timeline {
   duration: number;
   /**
-   * Frame builder: spring progress p (0..1, may overshoot slightly) and
-   * time fraction t, sampled once per frame over the part of the timeline
-   * from `from` to `to` (fractions; offsets relative to that part — play it
-   * with `span(from, to)`).
+   * One sample per frame over the part of the timeline from `from` to `to`
+   * (fractions; offsets relative to that part — play it with `span(from, to)`).
    */
+  samples(from?: number, to?: number): Sample[];
+  /** Keyframes rendered from `samples(from, to)`. */
   keyframes(render: (p: number, t: number) => Keyframe, from?: number, to?: number): Keyframe[];
   /** Duration and delay that play the part of the timeline from `from` to `to`. */
   span(from: number, to: number): { duration: number; delay: number };
@@ -100,47 +129,62 @@ export function morphTimeline(): Timeline {
   const settle = spring.settleTime();
   const duration = settle * 1000 / motion.speed;
   const progress = (t: number) => (t >= 1 ? 1 : spring.position(t * settle));
+  const samples = (from = 0, to = 1): Sample[] => {
+    const count = Math.max(2, Math.ceil(((to - from) * duration) / FRAME_MS) + 1);
+    return Array.from({ length: count }, (_, i) => {
+      const offset = i / (count - 1);
+      const t = i === count - 1 ? to : from + (to - from) * offset;
+      return { p: progress(t), t, offset };
+    });
+  };
   return {
     duration,
-    keyframes: (render, from = 0, to = 1) => {
-      const count = Math.max(2, Math.ceil(((to - from) * duration) / FRAME_MS) + 1);
-      return Array.from({ length: count }, (_, i) => {
-        const offset = i / (count - 1);
-        const t = i === count - 1 ? to : from + (to - from) * offset;
-        return { ...render(progress(t), t), offset };
-      });
-    },
+    samples,
+    keyframes: (render, from, to) => samples(from, to).map((s) => ({ ...render(s.p, s.t), offset: s.offset })),
     span: (from, to) => ({ duration: (to - from) * duration, delay: from * duration }),
   };
 }
 
-/** Shell frame at spring progress p (0 = box, 1 = panel). */
+/**
+ * Shell frame at spring progress p (0 = box, 1 = panel). Once its corners
+ * are within SETTLED_RADIUS_PX of their radius at rest, scaled as they are,
+ * they keep it: from there on the shell only moves, and is not painted again.
+ */
 export function shellFrame(g: MorphGeometry, p: number): Keyframe {
   const m = mixFlip(flipTransform(g.box, g.panel), p);
   const r = lerp(g.boxRadius, g.panelRadius, clamp(p, 0, 1));
-  return {
-    transform: flipCss(m),
-    borderRadius: `${round(r / m.scale.x)}px / ${round(r / m.scale.y)}px`,
-  };
+  const off = Math.max(Math.abs(r - g.panelRadius * m.scale.x), Math.abs(r - g.panelRadius * m.scale.y));
+  const [rx, ry] = off <= SETTLED_RADIUS_PX ? [g.panelRadius, g.panelRadius] : [r / m.scale.x, r / m.scale.y];
+  return { transform: flipCss(m), borderRadius: `${round(rx)}px / ${round(ry)}px` };
 }
 
 /**
- * Clip of the panel content at spring progress p: the shell's rect and
- * radius, so text is revealed by the growing shell instead of floating
- * outside it (and never distorted by the shell's scale).
+ * The content's clip at spring progress p, relative to the panel: the
+ * shell's rect and radius (the panel at most: an overshooting shell never
+ * shows more of the content), so text is revealed by the growing shell
+ * instead of floating outside it (and never distorted by the shell's scale).
  */
-export function clipFrame(g: MorphGeometry, p: number): Keyframe {
+export function clipAt(g: MorphGeometry, p: number) {
   const k = clamp(p, 0, 1);
-  const x = lerp(g.box.x, g.panel.x, k);
-  const y = lerp(g.box.y, g.panel.y, k);
-  const w = lerp(g.box.w, g.panel.w, k);
-  const h = lerp(g.box.h, g.panel.h, k);
-  const top = round(Math.max(0, y - g.panel.y));
-  const left = round(Math.max(0, x - g.panel.x));
-  const right = round(Math.max(0, g.panel.x + g.panel.w - (x + w)));
-  const bottom = round(Math.max(0, g.panel.y + g.panel.h - (y + h)));
-  const r = round(lerp(g.boxRadius, g.panelRadius, k));
-  return { clipPath: `inset(${top}px ${right}px ${bottom}px ${left}px round ${r}px)` };
+  return {
+    x: round(lerp(g.box.x, g.panel.x, k) - g.panel.x),
+    y: round(lerp(g.box.y, g.panel.y, k) - g.panel.y),
+    w: round(lerp(g.box.w, g.panel.w, k)),
+    h: round(lerp(g.box.h, g.panel.h, k)),
+    r: round(lerp(g.boxRadius, g.panelRadius, k)),
+  };
+}
+
+/** The content's clip at spring progress p (see clipAt): moved to its place and laid out at its size. */
+export function clipFrame(g: MorphGeometry, p: number): Keyframe {
+  const c = clipAt(g, p);
+  return { transform: `translate(${c.x}px, ${c.y}px)`, width: `${c.w}px`, height: `${c.h}px`, borderRadius: `${c.r}px` };
+}
+
+/** The content inside its clip at spring progress p: moved by the opposite of the clip's offset, it stays in place. */
+export function contentFrame(g: MorphGeometry, p: number): Keyframe {
+  const c = clipAt(g, p);
+  return { transform: `translate(${-c.x}px, ${-c.y}px)`, ...MAIN_THREAD };
 }
 
 /** The proxy drifts toward the panel's centre and grows while it fades. */
@@ -164,6 +208,60 @@ function animate(el: Element, keyframes: Keyframe[], options: KeyframeAnimationO
   return el.animate(keyframes, { easing: 'linear', fill: 'both', ...options });
 }
 
+/**
+ * Animates `render` (with an `opacity`) over the timeline, but only for as
+ * long as the element shows: transparent before and after, it holds still
+ * (the fill), and those frames cost it nothing.
+ */
+function whileShown(el: Element, tl: Timeline, render: (p: number, t: number) => Keyframe): Animation {
+  const samples = tl.samples();
+  const frames = samples.map((s) => render(s.p, s.t));
+  const hidden = (i: number) => frames[i]!.opacity === 0;
+  let from = 0;
+  while (from < frames.length - 2 && hidden(from) && hidden(from + 1)) from++;
+  let to = frames.length - 1;
+  while (to > from + 1 && hidden(to) && hidden(to - 1)) to--;
+  const part = frames.slice(from, to + 1).map((f, i) => ({ ...f, offset: i / (to - from) }));
+  return animate(el, part, tl.span(samples[from]!.t, samples[to]!.t));
+}
+
+/**
+ * The shell following spring progress `at(p)` over the whole timeline,
+ * fading as `fade(p)`, and the content's clip following it from
+ * `content.from` to `content.to` (fractions of the timeline: while the
+ * content shows).
+ */
+function moveShell(
+  parts: MorphParts,
+  g: MorphGeometry,
+  tl: Timeline,
+  at: (p: number) => number,
+  fade: (p: number) => number,
+  content: { from: number; to: number },
+): Animation[] {
+  const shown = tl.samples(content.from, content.to);
+  const timing = tl.span(content.from, content.to);
+  return [
+    animate(parts.shell, tl.keyframes((p) => ({ ...shellFrame(g, at(p)), opacity: round(fade(p)) })), { duration: tl.duration }),
+    animate(parts.clip, shown.map((s) => ({ ...clipFrame(g, at(s.p)), offset: s.offset })), timing),
+    animate(parts.content, shown.map((s) => ({ ...contentFrame(g, at(s.p)), offset: s.offset })), timing),
+  ];
+}
+
+/** The content's fade of a morph: its CONTENT_OPACITY from `from` to `to`. */
+function fadeContent(content: HTMLElement, from: number, to: number, options: KeyframeAnimationOptions): Animation {
+  return animate(content, [{ [CONTENT_OPACITY]: String(from) }, { [CONTENT_OPACITY]: String(to) }], options);
+}
+
+/** The crossfade: the panel's parts fade from `from` to `to` together (and the proxy the other way). */
+function crossfade(parts: MorphParts, from: number, to: number): Animation[] {
+  const d = dur(CROSSFADE_MS, 'fade');
+  const fade = (el: HTMLElement, a: number, b: number) => animate(el, [{ opacity: a }, { opacity: b }], { duration: d });
+  const out = [fade(parts.shadow, from, to), fade(parts.shell, from, to), fade(parts.clip, from, to)];
+  if (parts.proxy) out.push(fade(parts.proxy, to, from));
+  return out;
+}
+
 /** Staggered entrance of the panel regions (a fade each), starting at `delay` ms. */
 function enterRegions(regions: readonly HTMLElement[], delay: number): Animation[] {
   return regions.map((el, i) =>
@@ -181,45 +279,20 @@ function enterRegions(regions: readonly HTMLElement[], delay: number): Animation
  * (panel visible, proxy at the box). Returns every animation started.
  */
 export function playExpand(parts: MorphParts, g: MorphGeometry, morph: boolean): Animation[] {
-  if (!morph || motion.reduced) {
-    const d = dur(CROSSFADE_MS, 'fade');
-    const out = [
-      animate(parts.shadow, [{ opacity: 0 }, { opacity: 1 }], { duration: d }),
-      animate(parts.shell, [{ opacity: 0 }, { opacity: 1 }], { duration: d }),
-      animate(parts.content, [{ opacity: 0 }, { opacity: 1 }], { duration: d }),
-    ];
-    if (parts.proxy) out.push(animate(parts.proxy, [{ opacity: 1 }, { opacity: 0 }], { duration: d }));
-    return out;
-  }
+  if (!morph || motion.reduced) return crossfade(parts, 0, 1);
   const tl = morphTimeline();
   const shadowIn = Math.min(1, dur(SHADOW_FADE_MS, 'fade') / tl.duration);
   const out: Animation[] = [
-    animate(
-      parts.shell,
-      tl.keyframes((p) => ({ ...shellFrame(g, p), opacity: round(smooth(p / 0.3)) })),
-      { duration: tl.duration },
-    ),
+    // The shell fades in as it leaves the box; the content is revealed by
+    // it once it shows (transparent before, so not drawn at all).
+    ...moveShell(parts, g, tl, (p) => p, (p) => smooth(p / 0.3), { from: CONTENT_IN, to: 1 }),
     // The shadow comes as the shell settles in place.
     animate(parts.shadow, [{ opacity: 0, ...MAIN_THREAD }, { opacity: 1, ...MAIN_THREAD }], tl.span(1 - shadowIn, 1)),
-    // Content is revealed by the growing shell and fades in once it is
-    // about two-thirds open (invisible before: nothing to clip).
-    animate(parts.content, tl.keyframes((p) => clipFrame(g, p), CONTENT_IN, 1), tl.span(CONTENT_IN, 1)),
-    animate(parts.content, [{ opacity: 0 }, { opacity: 1 }], {
-      duration: dur(160, 'fade'),
-      delay: tl.duration * CONTENT_IN,
-      easing: EASE.standard,
-    }),
+    // The content fades in once the shell is about two-thirds open.
+    fadeContent(parts.content, 0, 1, { duration: dur(160, 'fade'), delay: tl.duration * CONTENT_IN, easing: EASE.standard }),
     ...enterRegions(parts.regions, tl.duration * CONTENT_IN),
   ];
-  if (parts.proxy) {
-    out.push(
-      animate(
-        parts.proxy,
-        tl.keyframes((p) => ({ ...proxyFrame(g, p), opacity: round(1 - smooth(p / 0.5)) })),
-        { duration: tl.duration },
-      ),
-    );
-  }
+  if (parts.proxy) out.push(whileShown(parts.proxy, tl, (p) => ({ ...proxyFrame(g, p), opacity: round(1 - smooth(p / 0.5)) })));
   const flyer = parts.flyer;
   if (flyer) {
     // The icon fades out over the second half as it settles, and what it
@@ -231,9 +304,7 @@ export function playExpand(parts: MorphParts, g: MorphGeometry, morph: boolean):
         tl.keyframes((p, t) => ({ ...flyerFrame(flyer.from, flyer.to, p), opacity: round(1 - settle(t)) })),
         { duration: tl.duration },
       ),
-      ...(flyer.landing ?? []).map((el) =>
-        animate(el, tl.keyframes((_p, t) => ({ opacity: round(settle(t)), ...MAIN_THREAD })), { duration: tl.duration }),
-      ),
+      ...(flyer.landing ?? []).map((el) => whileShown(el, tl, (_p, t) => ({ opacity: round(settle(t)), ...MAIN_THREAD }))),
     );
   }
   return out;
@@ -244,40 +315,20 @@ export function playExpand(parts: MorphParts, g: MorphGeometry, morph: boolean):
  * its open place and the proxy (if any) at the box.
  */
 export function playCollapse(parts: MorphParts, g: MorphGeometry, morph: boolean): Animation[] {
-  if (!morph || motion.reduced) {
-    const d = dur(CROSSFADE_MS, 'fade');
-    const out = [
-      animate(parts.shadow, [{ opacity: 1 }, { opacity: 0 }], { duration: d }),
-      animate(parts.shell, [{ opacity: 1 }, { opacity: 0 }], { duration: d }),
-      animate(parts.content, [{ opacity: 1 }, { opacity: 0 }], { duration: d }),
-    ];
-    if (parts.proxy) out.push(animate(parts.proxy, [{ opacity: 0 }, { opacity: 1 }], { duration: d }));
-    return out;
-  }
+  if (!morph || motion.reduced) return crossfade(parts, 1, 0);
   const tl = morphTimeline();
   const fadeOut = dur(CONTENT_OUT_MS, 'fade');
   // The content is gone after `fadeOut`: its clip follows the shell until then.
   const contentOut = Math.min(1, fadeOut / tl.duration);
   const out: Animation[] = [
     animate(parts.shadow, [{ opacity: 1, ...MAIN_THREAD }, { opacity: 0, ...MAIN_THREAD }], { duration: fadeOut }),
+    // Transparent once faded (so not drawn at all): its own opacity costs a
+    // pass only while it shows.
     animate(parts.content, [{ opacity: 1 }, { opacity: 0 }], { duration: fadeOut, easing: EASE.accelerate }),
-    animate(parts.content, tl.keyframes((q) => clipFrame(g, 1 - q), 0, contentOut), tl.span(0, contentOut)),
     // q = travel towards the box; the shell melts into the proxy at the end.
-    animate(
-      parts.shell,
-      tl.keyframes((q) => ({ ...shellFrame(g, 1 - q), opacity: round(1 - smooth((q - 0.72) / 0.28)) })),
-      { duration: tl.duration },
-    ),
+    ...moveShell(parts, g, tl, (q) => 1 - q, (q) => 1 - smooth((q - 0.72) / 0.28), { from: 0, to: contentOut }),
   ];
-  if (parts.proxy) {
-    out.push(
-      animate(
-        parts.proxy,
-        tl.keyframes((q) => ({ ...proxyFrame(g, 1 - q), opacity: round(smooth((q - 0.55) / 0.4)) })),
-        { duration: tl.duration },
-      ),
-    );
-  }
+  if (parts.proxy) out.push(whileShown(parts.proxy, tl, (q) => ({ ...proxyFrame(g, 1 - q), opacity: round(smooth((q - 0.55) / 0.4)) })));
   return out;
 }
 

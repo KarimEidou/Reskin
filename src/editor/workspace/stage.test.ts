@@ -47,6 +47,29 @@ describe('stage', () => {
     expect(log).toHaveLength(6);
   });
 
+  it('holds the canvas still through the mounted stage, and holds nothing without one', async () => {
+    const log: string[] = [];
+    const free = await stage.hold();
+    free();
+    const detach = stage.attach({
+      ...controller(log),
+      hold: async () => {
+        log.push('hold');
+        return () => log.push('let go');
+      },
+    });
+    const letGo = await stage.hold();
+    expect(log).toEqual(['hold']);
+    letGo();
+    expect(log).toEqual(['hold', 'let go']);
+    detach();
+    // A stage that cannot hold (no canvas to hold) holds nothing.
+    const detachPlain = stage.attach(controller(log));
+    (await stage.hold())();
+    expect(log).toEqual(['hold', 'let go']);
+    detachPlain();
+  });
+
   it('a stale detach does not unhook a newer stage', () => {
     const first: string[] = [];
     const second: string[] = [];

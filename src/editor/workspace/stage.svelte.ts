@@ -6,6 +6,7 @@
 //   stage.fit(); stage.actualSize(); stage.zoomIn(); stage.toggleKeylines();
 //   stage.zoom      → current zoom (1 = 100 %), reactive
 //   stage.docRect() → the document's client rect on screen (or null)
+//   stage.hold()    → a still picture of the canvas until released (the morph)
 //
 // The CanvasStage component registers the live controller while mounted;
 // without it the actions are no-ops and `docRect()` returns null.
@@ -22,6 +23,12 @@ export interface StageController {
    * so no focus ring shows (the ring is for keyboard focus).
    */
   focus(pointer?: boolean): void;
+  /**
+   * Shows a still picture of the canvas instead of the canvas until the
+   * returned function is called (see `StageState.hold`); resolves once the
+   * picture is in place.
+   */
+  hold?(): Promise<() => void>;
 }
 
 class StageState {
@@ -85,6 +92,20 @@ class StageState {
 
   focusCanvas(opts: { pointer?: boolean } = {}): void {
     this.controller?.focus(opts.pointer);
+  }
+
+  /**
+   * Holds the canvas still while the panel morphs around it: a still
+   * picture of it shows instead, which the compositor draws from the one
+   * copy it has, where the live canvas would be copied again at every frame
+   * the page commits (its picture is not re-drawn, but it is handed over
+   * anew). Nothing changes on screen: the picture is the canvas's. Redraws
+   * asked for meanwhile wait until the returned function lets the canvas
+   * go, which draws them before the canvas shows again. Without a canvas
+   * (another view, nothing to edit) it holds nothing.
+   */
+  async hold(): Promise<() => void> {
+    return (await this.controller?.hold?.()) ?? (() => {});
   }
 }
 
