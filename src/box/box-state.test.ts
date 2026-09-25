@@ -138,7 +138,7 @@ describe('boxReducer', () => {
     expect(s).toEqual({ ...initialBoxState, epoch: 1 });
   });
 
-  describe('the close handoff (box:collapse, then box:shown)', () => {
+  describe('the close handoff (box:collapse, box:shown, then box:released)', () => {
     /** The box handed over a dropped icon to the editor (frozen on it). */
     const handedOver = run([{ type: 'drop', count: 2 }, { type: 'inspectDone', icon: 'data:dropped', count: 2 }, { type: 'openRequested' }]);
     /** Nothing covers the box (the editor faded out): it paints at once. */
@@ -162,15 +162,24 @@ describe('boxReducer', () => {
       expect(collapse('hide', 'data:new')).toMatchObject({ icon: null, count: 0 });
     });
 
-    it('box:shown keeps the picture: a plain close rests on it', () => {
+    it('box:shown keeps the picture, frozen until the close releases it: a plain close then rests on it', () => {
       const shown = boxReducer(collapse('hide', null), { type: 'shown' });
-      expect(shown).toMatchObject({ name: 'idle', icon: null, count: 0, handoff: false, collapsed: null });
-      expect(boxReducer(shown, { type: 'pointerEnter' }).name).toBe('hover');
+      // The editor may still paint over it: nothing of the box's own yet.
+      expect(shown).toMatchObject({ name: 'idle', icon: null, count: 0, handoff: true, collapsed: 'hide' });
+      expect(run([{ type: 'pointerEnter' }, { type: 'dragEnter', count: 1 }], shown)).toMatchObject({ name: 'idle', handoff: true });
+      const released = boxReducer(shown, { type: 'released' });
+      expect(released).toMatchObject({ name: 'idle', icon: null, count: 0, handoff: false, collapsed: null, veiled: false });
+      expect(boxReducer(released, { type: 'pointerEnter' }).name).toBe('hover');
+      // Nothing to release outside a close.
+      expect(boxReducer(released, { type: 'released' })).toBe(released);
+      expect(boxReducer(initialBoxState, { type: 'released' })).toBe(initialBoxState);
     });
 
     it('box:shown keeps the new icon, frozen until the flight carries it on', () => {
       const shown = boxReducer(collapse('fly', 'data:new'), { type: 'shown' });
       expect(shown).toMatchObject({ name: 'idle', icon: 'data:new', handoff: true });
+      // The close's end does not unfreeze it: the flight comes next.
+      expect(boxReducer(shown, { type: 'released' })).toBe(shown);
       expect(run([{ type: 'pointerEnter' }, { type: 'dragEnter', count: 1 }], shown)).toMatchObject({ name: 'idle', icon: 'data:new' });
       const depart = boxReducer(shown, { type: 'flight', phase: 'depart', icon: 'data:new' });
       expect(depart).toMatchObject({ name: 'flying', icon: 'data:new', handoff: false });
@@ -219,16 +228,27 @@ describe('boxReducer', () => {
       const shown = boxReducer(s, { type: 'shown' });
       expect(shown).toBe(s);
       expect(run([{ type: 'pointerEnter' }, { type: 'dragEnter', count: 1 }], shown)).toMatchObject({ name: 'idle', veiled: true });
-      // The swap: it paints the very picture the proxy showed, and rests on it.
+      // The swap: it paints the very picture the proxy showed — frozen on
+      // it while the editor's proxy may still be there…
       const revealed = boxReducer(shown, { type: 'reveal' });
-      expect(revealed).toMatchObject({ name: 'idle', icon: null, count: 0, handoff: false, collapsed: null, veiled: false });
-      expect(boxReducer(revealed, { type: 'pointerEnter' }).name).toBe('hover');
+      expect(revealed).toMatchObject({ name: 'idle', icon: null, count: 0, handoff: true, collapsed: 'hide', veiled: false });
+      expect(boxReducer(revealed, { type: 'pointerEnter' }).name).toBe('idle');
       // A second reveal changes nothing.
       expect(boxReducer(revealed, { type: 'reveal' })).toBe(revealed);
+      // …and rests on it once the close released it.
+      const released = boxReducer(revealed, { type: 'released' });
+      expect(released).toMatchObject({ name: 'idle', icon: null, count: 0, handoff: false, collapsed: null, veiled: false });
+      expect(boxReducer(released, { type: 'pointerEnter' }).name).toBe('hover');
+    });
+
+    it('a release before the swap landed leaves the picture unpainted until box:reveal', () => {
+      const released = run([{ type: 'shown' }, { type: 'released' }], held('hide', null));
+      expect(released).toMatchObject({ handoff: false, collapsed: null, veiled: true });
+      expect(boxReducer(released, { type: 'reveal' })).toMatchObject({ name: 'idle', handoff: false, veiled: false });
     });
 
     it('after an apply the revealed icon stays frozen until the flight carries it on', () => {
-      const revealed = run([{ type: 'shown' }, { type: 'reveal' }], held('fly', 'data:new'));
+      const revealed = run([{ type: 'shown' }, { type: 'reveal' }, { type: 'released' }], held('fly', 'data:new'));
       expect(revealed).toMatchObject({ name: 'idle', icon: 'data:new', handoff: true, collapsed: 'fly', veiled: false });
       expect(boxReducer(revealed, { type: 'flight', phase: 'depart', icon: null })).toMatchObject({
         name: 'flying',

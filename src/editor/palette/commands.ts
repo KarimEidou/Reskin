@@ -59,8 +59,15 @@ export interface CommandContext {
   restoreAll(): Promise<void>;
   refreshIcons(): Promise<void>;
   openReleases(): Promise<void>;
-  /** Saves the design to the Library (and refreshes views listing it). */
+  /**
+   * Saves the design to the Library as a new one; a design linked to a
+   * Library design opens the form that names it instead.
+   */
   saveToLibrary(): Promise<unknown>;
+  /** Switches view; `about` is the About section of Settings. */
+  navigate(view: EditorView): void;
+  /** Closes the editor, asking first when unsaved work would be lost. */
+  requestClose(): Promise<void>;
 }
 
 export interface Command {
@@ -666,7 +673,7 @@ export function createCommands(tools: ToolInfo): Command[] {
       keys,
       keywords,
       when: (c) => c.session.view !== view,
-      run: (c) => c.session.navigate(view),
+      run: (c) => c.navigate(view),
     });
   }
 
@@ -823,7 +830,7 @@ export function createCommands(tools: ToolInfo): Command[] {
       label: 'Close the editor',
       group: 'App',
       keywords: ['hide', 'back to box', 'exit'],
-      run: (c) => c.session.requestClose(),
+      run: (c) => c.requestClose(),
     },
   );
 

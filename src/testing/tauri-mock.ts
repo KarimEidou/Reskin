@@ -85,12 +85,12 @@
  * - simulateClose(then = 'hide', opts): Collapse → wait 'collapsed' →
  *   (box page: `box:collapse` to the hidden box, held when the collapse
  *   morphs, `box:shown`, wait 300 ms for its `box_painted`) → the swap:
- *   Clear (+ held: `box:reveal`) → wait 'cleared' (+ its `box_painted`).
- *   `editor` shows the FSM phase.
+ *   Clear (+ held: `box:reveal`) → wait 'cleared' (+ its `box_painted`)
+ *   (→ box page: `box:released`). `editor` shows the FSM phase.
  * - simulateBoxReturn(then = 'hide', icon) (box page): the box's part of a
  *   morph's close alone — `box:collapse` (held) to the hidden box, then
  *   `box:shown`, then wait 300 ms for `box_painted`; then `box:reveal`,
- *   and wait 300 ms for its `box_painted`.
+ *   wait 300 ms for its `box_painted`, then `box:released`.
  * - knobs: setApplyOutcome, setInspectOverride, setInspectDelay,
  *   setBoxDragResult, failNext(cmd, message), setExportPath, setPickFiles,
  *   setProject, setApplyCollapses, setHeartbeatMs, setAccent,
@@ -533,6 +533,8 @@ export function install(kind: 'box' | 'editor'): E2EApi {
     const revealed = back && morph ? swapBox('box:reveal') : Promise.resolve(null);
     if (!(await waitForAck(session, 'cleared', ackTimeout))) timedOut.push('cleared');
     const box = back ? { ...back, revealed: await revealed } : null;
+    // The editor's proxy is gone: the box's picture is its own again.
+    if (back) await emitEvent('box:released', null);
 
     fsm.phase = 'closed';
     fsm.visible = false;
@@ -545,7 +547,9 @@ export function install(kind: 'box' | 'editor'): E2EApi {
 
   async function simulateBoxReturn(then: CollapseThen = 'hide', icon: string | null = null): Promise<SimulateBoxReturnResult> {
     const back = await returnBox(then, icon, true);
-    return { ...back, revealed: await swapBox('box:reveal') };
+    const revealed = await swapBox('box:reveal');
+    await emitEvent('box:released', null);
+    return { ...back, revealed };
   }
 
   // ---- items ------------------------------------------------------------------

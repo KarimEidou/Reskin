@@ -21,19 +21,24 @@
 //                                proxy; the hidden box takes that picture
 //                                over (see collapseItems) before it is shown
 //                                — held (veiled) under the proxy
-//   veiled → idle                box:reveal: the box takes the picture over
-//                                from the proxy
+//   veiled → idle (handoff)      box:reveal: the box paints the picture it
+//                                took over from the proxy, still frozen
 //   * → idle                     box:shown (the editor closed) keeps the
-//                                picture taken over from the editor, else
-//                                resets; the window was hidden, or a handoff
-//                                Rust never followed up on (unfreeze), resets
-//                                (so it never reappears on a stale picture)
+//                                picture taken over from the editor, frozen,
+//                                else resets; the window was hidden, or a
+//                                handoff Rust never followed up on
+//                                (unfreeze), resets (so it never reappears on
+//                                a stale picture)
+//   handoff → idle               box:released: the close is over, the
+//                                editor's proxy gone — after a plain close
+//                                the picture is the box's own again
 //
 // "handoff": the box is frozen on a picture the other window reproduces —
 // after asking the editor to open, the one the editor's proxy will draw
 // (see handoffProps); after box:collapse, the one the proxy ended on. It
-// ignores pointer/drag input until it is shown again (a plain close) or,
-// after an apply, until its flight takes over (depart / celebrate).
+// ignores pointer/drag input, and shows nothing of its own (the hint, the
+// Undo chip), until the close released it (a plain close) or, after an
+// apply, until its flight takes over (depart / celebrate).
 //
 // "veiled": the box paints nothing, because the editor's proxy paints its
 // picture over it (both windows are translucent: never both at once). Set
@@ -85,6 +90,7 @@ export type BoxEvent =
   | { type: 'collapse'; then: CollapseThen; icon: string | null; held: boolean }
   | { type: 'reveal' }
   | { type: 'shown' }
+  | { type: 'released' }
   | { type: 'hidden' }
   | { type: 'unfreeze' }
   | { type: 'error'; message?: string }
@@ -107,9 +113,9 @@ export const initialBoxState: BoxState = Object.freeze({
 const rest = (s: BoxState): BoxStateName => (s.hovering ? 'hover' : 'idle');
 
 /**
- * The box shows the picture it took over from the editor's collapse: after
- * a plain close it rests on it; after an apply it holds the new icon
- * (frozen) until its flight carries it on.
+ * The close released the box: after a plain close it rests on the picture
+ * it took over from the editor's collapse; after an apply it holds the new
+ * icon (frozen) until its flight carries it on.
  */
 const showCollapsed = (s: BoxState): BoxState => (s.collapsed === 'hide' ? { ...s, handoff: false, collapsed: null } : s);
 
@@ -267,13 +273,16 @@ export function boxReducer(s: BoxState, e: BoxEvent): BoxState {
 
     case 'reveal':
       if (!s.veiled) return s;
-      return showCollapsed({ ...s, veiled: false });
+      return { ...s, veiled: false };
 
     case 'shown':
-      // Held under the editor's proxy, it waits for box:reveal.
-      if (s.collapsed && s.veiled) return s;
-      if (s.collapsed) return showCollapsed(s);
+      // Back from the editor's collapse: frozen on its picture (held under
+      // the proxy, unpainted until box:reveal) until the close releases it.
+      if (s.collapsed) return s;
       return { ...initialBoxState, epoch: s.epoch };
+
+    case 'released':
+      return showCollapsed(s);
 
     case 'hidden':
       // A concealed box stays blank until it is told what to show.

@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { Engine, TOOL_META, TOOL_ORDER, type ToolId } from '$engine/index';
-import type { Settings } from '$lib/ipc/types';
+import type { EditorView, Settings } from '$lib/ipc/types';
 import { defaultSettings } from '$lib/settings/defaults';
 import type { EditorSession } from '../state/session.svelte';
 import { STAGE_KEYS } from '../workspace/keys';
@@ -42,7 +42,6 @@ interface FakeSession {
   copyToClipboard: ReturnType<typeof vi.fn>;
   applyStyleToAll: ReturnType<typeof vi.fn>;
   newBlank: ReturnType<typeof vi.fn>;
-  requestClose: ReturnType<typeof vi.fn>;
 }
 
 let session: FakeSession;
@@ -81,7 +80,6 @@ function fakeSession(): FakeSession {
     copyToClipboard: vi.fn(async () => true),
     applyStyleToAll: vi.fn(async () => ({ applied: 0, failed: 0 })),
     newBlank: vi.fn(),
-    requestClose: vi.fn(async () => {}),
   };
   return s;
 }
@@ -113,6 +111,11 @@ beforeEach(() => {
     refreshIcons: vi.fn(async () => {}),
     openReleases: vi.fn(async () => {}),
     saveToLibrary: vi.fn(async () => null),
+    // Like the shell: About is a section of Settings.
+    navigate: vi.fn((v: EditorView) => {
+      session.view = v === 'about' ? 'settings' : v;
+    }),
+    requestClose: vi.fn(async () => {}),
   };
   commands = createCommands(session.engine.tools);
 });
@@ -155,6 +158,32 @@ describe('registry', () => {
     byId('tool.brush').run(ctx);
     expect(session.engine.selectedToolId).toBe('brush');
     expect(session.navigate).toHaveBeenCalledWith('edit');
+  });
+
+  it('goes to a view through the shell, About to its section of Settings', () => {
+    byId('go.about').run(ctx);
+    expect(ctx.navigate).toHaveBeenCalledWith('about');
+    expect(session.view).toBe('settings');
+    // Listed in Settings too: the About section is not the top of it.
+    expect(availableCommands(commands, ctx).map((c) => c.id)).toContain('go.about');
+    byId('go.library').run(ctx);
+    expect(ctx.navigate).toHaveBeenLastCalledWith('library');
+    byId('go.settings').run(ctx);
+    expect(ctx.navigate).toHaveBeenLastCalledWith('settings');
+    expect(session.navigate).not.toHaveBeenCalled();
+  });
+
+  it('closes the editor through the close that asks about unsaved work', async () => {
+    await byId('app.close').run(ctx);
+    expect(ctx.requestClose).toHaveBeenCalledTimes(1);
+  });
+
+  it('saves to the Library from any view through the shell (which may open the form)', async () => {
+    session.view = 'history';
+    expect(availableCommands(commands, ctx).map((c) => c.id)).toContain('library.save');
+    await byId('library.save').run(ctx);
+    expect(ctx.saveToLibrary).toHaveBeenCalledTimes(1);
+    expect(session.saveToLibrary).not.toHaveBeenCalled();
   });
 
   it('hides design commands until a design exists', () => {

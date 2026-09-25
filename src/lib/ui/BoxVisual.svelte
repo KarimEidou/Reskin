@@ -222,6 +222,9 @@
     --bv-shadow-lift: 0 10px 14px -6px rgb(0 0 0 / 0.46), 0 3px 7px -2px rgb(0 0 0 / 0.28);
     --bv-inset: inset 0 1px 0.5px rgb(255 255 255 / 0.55), inset 0 -14px 22px -14px rgb(0 0 0 / 0.38),
       inset 0 0 0 1px rgb(255 255 255 / 0.06);
+    /* Behind the caption: the wallpaper shows through translucent glass,
+       and the plate keeps the ink readable on any of them. */
+    --bv-plate: rgb(14 16 22 / 0.62);
 
     position: relative;
     width: var(--bv-win);
@@ -399,6 +402,11 @@
     color: var(--bv-ink);
     text-shadow: 0 1px 2px rgb(0 0 0 / 0.35);
     text-wrap: balance;
+    /* The plate reaches past the text by a spread, not a padding, which
+       would uncover a clamped fourth line. */
+    background: var(--bv-plate);
+    box-shadow: 0 0 0 0.25em var(--bv-plate);
+    border-radius: 0.5em;
   }
   /* An error message may run longer than the hint: smaller, from higher up. */
   .hint.message {
@@ -439,6 +447,7 @@
     /* Frosted white glass: engraved dark ink instead of white. */
     --bv-ink: rgb(22 30 56 / 0.78);
     --bv-ink-soft: rgb(22 30 56 / 0.46);
+    --bv-plate: rgb(255 255 255 / 0.66);
     --bv-shadow: 0 7px 12px -5px rgb(20 24 40 / 0.3), 0 2px 5px -1px rgb(20 24 40 / 0.16);
     --bv-shadow-lift: 0 10px 14px -6px rgb(20 24 40 / 0.34), 0 3px 7px -2px rgb(20 24 40 / 0.18);
   }
@@ -467,6 +476,7 @@
 
   /* Neon: dark core, vivid accent rim with a second hue, scanlines. */
   .skin-neon {
+    --bv-plate: transparent;
     --bv-ink: rgb(var(--bv-glow-rgb) / 1);
     --bv-ink-soft: rgb(var(--bv-glow-rgb) / 0.9);
     --bv-rim: conic-gradient(
@@ -503,6 +513,7 @@
 
   /* Minimal: flat surface, hairline border, no gloss. */
   .skin-minimal {
+    --bv-plate: transparent;
     --bv-ink: var(--text, #f2f3f6);
     --bv-ink-soft: rgb(var(--text-rgb, 242 243 246) / 0.5);
     --bv-rim: linear-gradient(rgb(255 255 255 / 0.13), rgb(255 255 255 / 0.13));
@@ -543,6 +554,7 @@
       rgb(255 255 255 / 0.45) 100%
     );
     --bv-ink-soft: rgb(255 255 255 / 0.86);
+    --bv-plate: rgb(14 16 30 / 0.45);
   }
   .skin-aurora .fill {
     inset: -30%;
@@ -568,6 +580,11 @@
   .compat {
     background: var(--bg, #0e1014);
     border-radius: 8px;
+  }
+  /* No wallpaper shows through behind the caption: no plate, whatever the
+     skin and theme say. */
+  .bv.compat {
+    --bv-plate: transparent;
   }
   .compat.skin-glass .fill {
     background:

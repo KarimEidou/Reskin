@@ -258,4 +258,81 @@ test.describe('Export menu', () => {
       [v2, 'Mono v2'],
     ].sort());
   });
+
+  test('"Save as new" under the linked design\'s own name adds a copy, not a second design of that name', async ({ page }) => {
+    await openWorkspace(page);
+    const names = () => page.evaluate(() => window.__e2e!.library.map((l) => l.name).sort());
+    const lastSave = async () => (await calls(page, 'library_save')).at(-1)!.args.entry as { id: string | null; name: string };
+    const form = page.getByRole('dialog', { name: 'Save to Library' });
+    await page.getByTestId('save-library').click();
+    await form.getByRole('textbox').fill('Mono');
+    await form.getByRole('button', { name: 'Save', exact: true }).click();
+    await expect(form).toBeHidden();
+
+    await page.getByTestId('save-library').click();
+    await expect(form.getByRole('textbox', { name: 'Name' })).toHaveValue('Mono');
+    await form.getByRole('button', { name: 'Save as new' }).click();
+    await expect(form).toBeHidden();
+    expect(await lastSave()).toMatchObject({ id: null, name: 'Mono copy' });
+    await expect.poll(names).toEqual(['Mono', 'Mono copy']);
+    // The design goes by the copy now.
+    await page.getByTestId('save-library').click();
+    await expect(form.getByTestId('library-link')).toHaveText('Updates "Mono copy" in your Library.');
+  });
+
+  test('Ctrl+S and the palette save a new design at once, but open the form over a linked one', async ({ page }) => {
+    await openWorkspace(page);
+    const saves = () => calls(page, 'library_save');
+    const form = page.getByRole('dialog', { name: 'Save to Library' });
+    const name = form.getByRole('textbox', { name: 'Name' });
+    const notice = form.getByTestId('library-link');
+    const workspace = page.getByTestId('workspace');
+
+    // Not linked to a Library design: Ctrl+S adds one, no questions asked.
+    await page.keyboard.press('Control+s');
+    await expect.poll(async () => (await saves()).length).toBe(1);
+    expect((await saves())[0]!.args.entry).toMatchObject({ id: null, name: 'Steam' });
+    await expect(form).toBeHidden();
+    const [steam] = await page.evaluate(() => window.__e2e!.library.map((l) => l.id));
+
+    // Linked now: Ctrl+S never saves over it unseen — the form that names
+    // it opens, the name ready to type over.
+    await page.keyboard.press('Control+s');
+    await expect(form).toBeVisible();
+    await expect(notice).toHaveText('Updates "Steam" in your Library.');
+    await expect(name).toHaveValue('Steam');
+    await expect(name).toBeFocused();
+    await expect(page.getByTestId('save-library')).toHaveAttribute('aria-expanded', 'true');
+    await page.waitForTimeout(150);
+    expect(await saves()).toHaveLength(1);
+    await page.keyboard.press('Escape');
+    await expect(form).toBeHidden();
+    await expect(page.getByTestId('save-library')).toHaveAttribute('aria-expanded', 'false');
+
+    // From another view: the form opens in the Edit view, where it lives.
+    await page.locator('header.titlebar').getByRole('button', { name: 'Library' }).click();
+    await expect(workspace).toHaveCount(0);
+    await page.keyboard.press('Control+s');
+    await expect(workspace).toBeVisible();
+    await expect(form).toBeVisible();
+    await expect(name).toHaveValue('Steam');
+    await page.keyboard.press('Escape');
+    await expect(form).toBeHidden();
+
+    // The palette's "Save to Library" asks the same way, from any view.
+    await page.locator('header.titlebar').getByRole('button', { name: 'History' }).click();
+    await expect(workspace).toHaveCount(0);
+    await page.keyboard.press('Control+k');
+    await expect(page.getByRole('combobox', { name: 'Search commands' })).toBeFocused();
+    await page.keyboard.type('Save to Library');
+    await page.keyboard.press('Enter');
+    await expect(form).toBeVisible();
+    await expect(notice).toHaveText('Updates "Steam" in your Library.');
+    expect(await saves()).toHaveLength(1);
+    // Saved over only from the form that named it.
+    await name.fill('Steam — dusk');
+    await name.press('Enter');
+    await expect(form).toBeHidden();
+    expect((await saves()).at(-1)!.args.entry).toMatchObject({ id: steam, name: 'Steam — dusk' });
+  });
 });

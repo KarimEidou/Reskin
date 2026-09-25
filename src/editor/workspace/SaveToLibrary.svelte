@@ -1,20 +1,25 @@
 <!--
-  "Save to Library": asks for a name, then session.saveToLibrary(name). A
-  design linked to a Library design (it came from it or was saved as it)
-  says so: Save changes updates that design — the notice names it, and
-  says so when the typed name renames it — and "Save as new" adds another.
+  "Save to Library": asks for a name, then saves under it. A design linked
+  to a Library design (it came from it or was saved as it) says so: Save
+  changes updates that design — the notice names it, and says so when the
+  typed name renames it — and "Save as new" adds another (under the name
+  typed, or "<name> copy" when it is still the linked design's). Open while
+  `shell.saveFormOpen` is: its button toggles it, and Ctrl+S / the palette
+  open it for a linked design (shell.requestSaveToLibrary).
 -->
 <script lang="ts">
   import BookmarkPlus from '@lucide/svelte/icons/bookmark-plus';
+  import { untrack } from 'svelte';
   import Button from '$lib/ui/Button.svelte';
   import Popover from '$lib/ui/Popover.svelte';
   import Tooltip from '$lib/ui/Tooltip.svelte';
+  import { getShell } from '../chrome/shell.svelte';
   import { getSession } from '../state/context';
   import { commitPendingWork } from './stage.svelte';
 
   const session = getSession();
+  const shell = getShell();
 
-  let open = $state(false);
   let anchor: HTMLElement | undefined = $state();
   let name = $state('');
   /** Which save runs: over the linked Library design, or as a new one. */
@@ -25,17 +30,34 @@
   const linked = $derived(session.libraryId !== null ? session.libraryName : null);
   const typed = $derived(name.trim());
 
+  /** The name the form starts with: the linked design's, else the design's own. */
+  function prefill(): void {
+    const docName = session.engine.doc.meta.name?.trim();
+    name = linked ?? (docName && docName !== 'Untitled' ? docName : (session.item?.name ?? 'My icon'));
+  }
+
+  // The name is filled in as the form opens, however it opens (also as
+  // this mounts with the form asked for: Ctrl+S from another view) and
+  // before the field is laid out, so it starts selected.
+  let wasOpen = false;
+  $effect.pre(() => {
+    const open = shell.saveFormOpen;
+    if (open && !wasOpen) untrack(prefill);
+    wasOpen = open;
+  });
+
+  // The form belongs to the Edit view: leaving it closes the form.
+  $effect(() => () => {
+    shell.saveFormOpen = false;
+  });
+
   function toggle(): void {
-    if (!open) {
-      const docName = session.engine.doc.meta.name?.trim();
-      name = linked ?? (docName && docName !== 'Untitled' ? docName : (session.item?.name ?? 'My icon'));
-    }
-    open = !open;
+    shell.saveFormOpen = !shell.saveFormOpen;
   }
 
   /** Closes the form and gives focus back to the button that opened it. */
   function close(): void {
-    open = false;
+    shell.saveFormOpen = false;
     anchor?.querySelector('button')?.focus({ preventScroll: true });
   }
 
@@ -43,8 +65,10 @@
     if (!typed || saving) return;
     saving = asNew ? 'new' : 'update';
     commitPendingWork(session.engine);
+    // A new design never takes the linked one's name as it is.
+    const saveAs = asNew && linked !== null && typed === linked ? `${linked} copy` : typed;
     try {
-      if ((await session.saveToLibrary(typed, { asNew })) && open) close();
+      if ((await shell.saveToLibrary(saveAs, { asNew })) && shell.saveFormOpen) close();
     } finally {
       saving = null;
     }
@@ -68,7 +92,7 @@
       icon={BookmarkPlus}
       aria-label="Save to Library"
       aria-haspopup="dialog"
-      aria-expanded={open}
+      aria-expanded={shell.saveFormOpen}
       disabled={!session.hasDesign}
       data-testid="save-library"
       onclick={toggle}
@@ -79,7 +103,7 @@
 </span>
 
 <Popover
-  bind:open
+  bind:open={shell.saveFormOpen}
   anchor={anchor?.querySelector('button')}
   label="Save to Library"
   placement="top-end"

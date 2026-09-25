@@ -658,6 +658,51 @@ test.describe('events from Rust', () => {
     expect(markTo!.width).toBeLessThan(watch.mark!.w * 0.8);
   });
 
+  test('back from the editor the box shows nothing of its own until the close released it', async ({ openBox, page }) => {
+    const box = await openBox({ firstRun: true });
+    const hint = box.visual.locator('.hint');
+    await expect(hint).toHaveText(FIRST_RUN_HINT);
+    let session = 0;
+    /** The editor opens over the box: it gives its picture to the proxy. */
+    const handOver = async () => {
+      await emit(page, 'box:handoff', { session: ++session, icon: null, count: 0 });
+      await waitForCall(page, 'box_painted', { session });
+      await emit(page, 'box:conceal', { session: ++session });
+      await waitForCall(page, 'box_painted', { session });
+      await expect(hint).toHaveCount(0);
+    };
+    /** Longer than the hint takes to come back once the box is on its own. */
+    const aWhile = () => page.waitForTimeout(600);
+
+    // A faded-out editor: nothing covers the box, which paints at once…
+    await handOver();
+    await emit(page, 'box:collapse', { session: ++session, then: 'hide', icon: null, held: false });
+    await emit(page, 'box:shown', null);
+    await waitForCall(page, 'box_painted', { session });
+    await aWhile();
+    // …but the close is not over (the editor may still show): no hint yet.
+    await expect(hint).toHaveCount(0);
+    await box.hit.hover();
+    await box.expectState('idle');
+    await emit(page, 'box:released', null);
+    await expect(hint).toHaveText(FIRST_RUN_HINT);
+    await box.pointerAway();
+
+    // A morph: the box takes the picture over from the proxy, and still
+    // waits for the proxy to be gone.
+    await handOver();
+    await emit(page, 'box:collapse', { session: ++session, then: 'hide', icon: null, held: true });
+    await emit(page, 'box:shown', null);
+    await waitForCall(page, 'box_painted', { session });
+    await emit(page, 'box:reveal', { session: ++session });
+    await waitForCall(page, 'box_painted', { session });
+    await expect(box.root).toHaveCSS('opacity', '1');
+    await aWhile();
+    await expect(hint).toHaveCount(0);
+    await emit(page, 'box:released', null);
+    await expect(hint).toHaveText(FIRST_RUN_HINT);
+  });
+
   test('an error message giving way to the hint leaves the mark where the message put it', async ({ openBox, page }) => {
     const box = await openBox({ firstRun: true, settings: { animationSpeed: 2 } });
     await box.expectStatic();
@@ -999,7 +1044,8 @@ test.describe('fake backend', () => {
     expect(close).toEqual({ session: 1, timedOut: [], box: { session: 3, painted: true, revealed: true } });
     expect(await seenByEditor(page)).toEqual(['prepare', 'reveal', 'expand', 'collapse', 'clear']);
     // The box's side: the picture, its half of the open's swap, the picture
-    // it comes back to (held under the proxy), its half of the close's swap.
+    // it comes back to (held under the proxy), its half of the close's swap,
+    // and the close's end (the proxy is gone).
     const boxEvents = await page.evaluate(() =>
       window.__e2e!.emitted.filter((e) => e.event.startsWith('box:')).map((e) => [e.event, e.payload]),
     );
@@ -1009,6 +1055,7 @@ test.describe('fake backend', () => {
       ['box:collapse', { session: 3, then: 'fly', icon, held: true }],
       ['box:shown', null],
       ['box:reveal', { session: 4 }],
+      ['box:released', null],
     ]);
     expect(await editorState(page)).toMatchObject({ phase: 'closed', visible: false });
     const acks = await page.evaluate(() => window.__e2e!.acks.map((a) => `${a.session}:${a.stage}`));
@@ -1027,7 +1074,7 @@ test.describe('fake backend', () => {
     const close = await simulateClose(page, 'hide');
     expect(close.box).toEqual({ session: 3, painted: true, revealed: null });
     const events = await page.evaluate(() => window.__e2e!.emitted.map((e) => e.event).filter((e) => e.startsWith('box:')));
-    expect(events).toEqual(['box:handoff', 'box:conceal', 'box:collapse', 'box:shown']);
+    expect(events).toEqual(['box:handoff', 'box:conceal', 'box:collapse', 'box:shown', 'box:released']);
     await expect(box.root).toHaveCSS('opacity', '1');
     await box.hit.hover();
     await box.expectState('hover');
@@ -1250,6 +1297,62 @@ test.describe('fake backend', () => {
       reused: 'unknown or expired ticket',
     });
   });
+});
+
+// ---------------------------------------------------------------------------
+// The caption over any wallpaper: translucent glass lets the desktop show
+// through, so the ink must hold its contrast over a wallpaper as bright as
+// light ink, as dark as dark ink, or halfway (where frosted light glass is
+// at its greyest).
+// ---------------------------------------------------------------------------
+
+/** WCAG relative luminance of an sRGB pixel. */
+function luminance(r: number, g: number, b: number): number {
+  const lin = (c: number) => {
+    const s = c / 255;
+    return s <= 0.04045 ? s / 12.92 : ((s + 0.055) / 1.055) ** 2.4;
+  };
+  return 0.2126 * lin(r) + 0.7152 * lin(g) + 0.0722 * lin(b);
+}
+
+/**
+ * The contrast of the caption's ink with what is behind it, as it shows on
+ * screen: the plate (most of its pixels) against the strongest ink.
+ */
+async function captionContrast(page: Page): Promise<number> {
+  const png = PNG.sync.read(await page.locator('.bv .hint').screenshot({ animations: 'disabled' }));
+  const lums: number[] = [];
+  for (let i = 0; i < png.data.length; i += 4) lums.push(luminance(png.data[i]!, png.data[i + 1]!, png.data[i + 2]!));
+  lums.sort((a, b) => a - b);
+  const at = (q: number) => lums[Math.min(lums.length - 1, Math.floor(q * lums.length))]!;
+  const ground = at(0.5);
+  // Light ink is the brightest there is, dark ink the darkest.
+  const ink = at(0.995) - ground > ground - at(0.005) ? at(0.995) : at(0.005);
+  return (Math.max(ink, ground) + 0.05) / (Math.min(ink, ground) + 0.05);
+}
+
+test.describe('caption legibility', () => {
+  test.use({ deviceScaleFactor: 2 });
+
+  for (const [skin, tone, wall] of [
+    ['glass', 'dark', '#ffffff'],
+    ['glass', 'light', '#000000'],
+    ['glass', 'light', '#808080'],
+    ['aurora', 'dark', '#ffffff'],
+  ] as const) {
+    test(`${skin} (${tone}): the hint and an error message read at 4.5:1 over a ${wall} wallpaper`, async ({ openBox, page }) => {
+      const box = await openBox({ firstRun: true, settings: { boxSkin: skin, theme: tone }, accent: '#0078d4' });
+      await page.addStyleTag({ content: `html, body { background: ${wall} !important; }` });
+      await expect(box.visual.locator('.hint')).toHaveText(FIRST_RUN_HINT);
+      await box.expectStatic();
+      expect(await captionContrast(page)).toBeGreaterThanOrEqual(4.5);
+
+      await box.flight('error', null, 'Access denied');
+      await expect(box.visual.locator('.hint.message')).toHaveText('Access denied');
+      await box.expectStatic();
+      expect(await captionContrast(page)).toBeGreaterThanOrEqual(4.5);
+    });
+  }
 });
 
 // ---------------------------------------------------------------------------

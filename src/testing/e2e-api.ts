@@ -197,7 +197,7 @@ export interface E2EApi {
    * Runs Rust's close handoff: Collapse → collapsed → (box page: the box
    * comes back, see simulateBoxReturn, held when the collapse morphs) → the
    * swap: Clear (+ held: `box:reveal`) → cleared (+ the box's
-   * `box_painted`).
+   * `box_painted`) → (box page: `box:released`).
    */
   simulateClose(then?: CollapseThen, opts?: SimulateCloseOptions): Promise<SimulateCloseResult>;
   /**
@@ -205,7 +205,7 @@ export interface E2EApi {
    * (morph.rs close_inner, after `collapsed`): `box:collapse` to the hidden
    * box, held under the editor's proxy, then show it (`box:shown`) and wait
    * up to 300 ms for its `box_painted`; then `box:reveal` and up to 300 ms
-   * for its `box_painted`.
+   * for its `box_painted`; then `box:released` (the proxy is gone).
    */
   simulateBoxReturn(then?: CollapseThen, icon?: string | null): Promise<SimulateBoxReturnResult>;
   setHeartbeatMs(ms: number): void;

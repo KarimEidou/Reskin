@@ -149,7 +149,8 @@ fn webview2_missing(smoke: bool, why: &str) {
 }
 
 /// Run as administrator: starts Reskin again, unelevated, through Explorer
-/// and returns true (this instance then quits). Elevated, Windows would
+/// and returns true (this instance then quits, having written nothing: the
+/// new start's log line says `relaunched=true`). Elevated, Windows would
 /// drop every drag from Explorer onto the box (UIPI), and shell writes
 /// would bypass the elevated helper's checks. When that fails Reskin warns
 /// and carries on.
@@ -169,10 +170,7 @@ fn restarted_unelevated(argv: &[String]) -> bool {
             })
     };
     match restarted {
-        Ok(()) => {
-            log::line("started as administrator: restarted unelevated through Explorer");
-            true
-        }
+        Ok(()) => true,
         Err(e) => {
             log::line(&format!("running as administrator: {e}"));
             message_box(
@@ -217,6 +215,17 @@ fn journal_problem(e: &reskin_core::Error, path: &std::path::Path) -> String {
     }
 }
 
+/// The log's first line of a start: version, build, the arguments, and
+/// whether an instance run as administrator made this start (`RELAUNCHED`).
+fn start_line(args: &AppArgs, argv: &[String]) -> String {
+    format!(
+        "Reskin {} starting ({}) args={args:?} relaunched={}",
+        env!("CARGO_PKG_VERSION"),
+        build_label(),
+        argv.iter().any(|a| a == RELAUNCHED)
+    )
+}
+
 /// The first-run welcome (due until it was finished) opens at this start:
 /// not under `--smoke-test`, and not when Windows starts Reskin at sign-in —
 /// it waits for a start by the user rather than pop up over the desktop.
@@ -229,17 +238,15 @@ fn welcome_due(first_run: bool, args: &AppArgs) -> bool {
 pub fn run(argv: &[String]) -> i32 {
     let args = AppArgs::parse(argv);
     let smoke = args.smoke;
-    log::rotate();
-    log::line(&format!(
-        "Reskin {} starting ({}) args={args:?}",
-        env!("CARGO_PKG_VERSION"),
-        build_label()
-    ));
-    install_panic_hook(!smoke);
-    // The smoke test's exit code is its result: it never hands over.
+    // Started as administrator, Reskin hands over to an unelevated start
+    // before it writes anything, the log included. The smoke test's exit
+    // code is its result: it never hands over.
     if !smoke && restarted_unelevated(argv) {
         return 0;
     }
+    log::rotate();
+    log::line(&start_line(&args, argv));
+    install_panic_hook(!smoke);
     if let Err(e) = selftest::webview2_version() {
         webview2_missing(smoke, &e);
         return EXIT_CANNOT_START;
@@ -436,6 +443,24 @@ mod tests {
         assert_eq!(final_exit_code(0), 3);
         EXIT_CODE.store(0, Ordering::SeqCst);
         assert_eq!(final_exit_code(2), 2);
+    }
+
+    #[test]
+    fn the_start_line_says_whether_an_administrator_start_handed_over() {
+        let argv = |extra: &[&str]| -> Vec<String> {
+            ["reskin.exe"]
+                .iter()
+                .chain(extra)
+                .map(|a| a.to_string())
+                .collect()
+        };
+        let plain = argv(&["--autostart"]);
+        let line = start_line(&AppArgs::parse(&plain), &plain);
+        assert!(line.contains("relaunched=false"), "{line}");
+        assert!(line.contains("autostart: true"), "{line}");
+        let relaunched = argv(&["--autostart", RELAUNCHED]);
+        let line = start_line(&AppArgs::parse(&relaunched), &relaunched);
+        assert!(line.contains("relaunched=true"), "{line}");
     }
 
     #[test]
