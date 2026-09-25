@@ -77,7 +77,7 @@
   ]);
 
   function close(): void {
-    session.requestClose().catch((e: unknown) => {
+    shell.requestClose().catch((e: unknown) => {
       toast({ message: `Could not close the editor: ${errorText(e)}`, kind: 'error' });
     });
   }

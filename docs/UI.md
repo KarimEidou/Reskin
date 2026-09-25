@@ -48,7 +48,14 @@ The visual and interaction contract for the box and the editor. Tokens live in
   ("1/3" when several are queued; its menu lists the queue), the view tabs
   (Edit only while a design is open), the command palette button and Close.
   Close (✕) runs the collapse handoff (`editor_close('user')`); Esc does the
-  same when no popover/dialog/tool operation is active.
+  same when no popover/dialog/tool operation is active, and so does the
+  palette's "Close the editor". Over unsaved work — the open design's, or
+  any other queued design's — Close first asks "Close the editor?" (naming
+  the design, or counting them; **Close anyway** / Cancel), and work closed
+  anyway is gone at the next open. A close Reskin starts itself (the
+  hotkey, the tray) asks nothing and keeps that work: the next open without
+  new items comes back to it (items dropped on the box start over with
+  them).
 * **Tool rail** (`workspace/tool-groups.ts`), four clusters separated by
   hairlines:
   * transform & select — Move (V); selection tools: rectangle (M), ellipse
@@ -113,13 +120,15 @@ The visual and interaction contract for the box and the editor. Tokens live in
   size; **Save to Library** (a design that came from or was saved as a
   Library design names it — Updates "Mono" in your Library — and says so
   when a new name renames it; **Save changes** updates it, **Save as new**
-  adds another); **Export ▾** (.ico / .png / copy to clipboard / .reskin
-  project); and the primary **Save & Apply ▾** (dropdown: mode — Change in
-  place / New desktop shortcut / Personal copy — disabled when not in
-  `item.modes`; the item's notes; "Also update Start menu and taskbar
-  pins"). The main part uses the item's preferred mode (New desktop shortcut
-  for Store app shortcuts, whose own icon Windows ignores). Apply shows a
-  ring while working.
+  adds another, as "Mono copy" when the name was left as it is; Ctrl+S and
+  the palette save any other design as new at once, but for a linked one
+  open this form, in the Edit view); **Export ▾** (.ico / .png / copy to
+  clipboard / .reskin project); and the primary **Save & Apply ▾** (dropdown:
+  mode — Change in place / New desktop shortcut / Personal copy — disabled
+  when not in `item.modes`; the item's notes; "Also update Start menu and
+  taskbar pins"). The main part uses the item's preferred mode (New desktop
+  shortcut for Store app shortcuts, whose own icon Windows ignores). Apply
+  shows a ring while working.
 * **Queue completion**: only *targets* count — items Save & Apply can change
   (shortcuts, folders, system icons, programs and other files), not design
   sources such as images or projects. While another target still waits,
@@ -217,15 +226,17 @@ opacity set for rest; it never animates while idle. States: idle, hover
 (squash & stretch as the icon falls in), busy (progress ring), flying
 (tilt/stretch in flight), celebrate (sparkle ripple), error (shake; a short
 message inside the box says why, up to three lines, and stays until it has
-been read). After an apply it shows an **Undo** chip for 6 s (`box:undo`):
-the box celebrates when the icon is back, or shakes saying why not. A saved
-hotkey Windows won't register at start-up (another app holds it) is said
-once, in the hint for a few seconds on screen ("Ctrl+Alt+Shift+R is taken —
-change it in Settings"; after the first-run hint, and gone as soon as the
-hotkey works); the box's tooltip and accessible description say it for as
-long as it doesn't work. When the editor opens from elsewhere
-(tray, menu, Explorer, first run), the box first takes on the picture the
-editor's proxy draws — never the other way round.
+been read). A caption in the box (a hint, an error message) sits on a
+rounded plate on the translucent skins — dark under light ink, frosted white
+under dark — so it reads over any wallpaper. After an apply it shows an
+**Undo** chip for 6 s (`box:undo`): the box celebrates when the icon is back,
+or shakes saying why not. A saved hotkey Windows won't register at start-up
+(another app holds it) is said once, in the hint for a few seconds on screen
+("Ctrl+Alt+Shift+R is taken — change it in Settings"; after the first-run
+hint, and gone as soon as the hotkey works); the box's tooltip and accessible
+description say it for as long as it doesn't work. When the editor opens from
+elsewhere (tray, menu, Explorer, first run), the box first takes on the
+picture the editor's proxy draws — never the other way round.
 
 * **Pointer and keyboard**: a click (or Enter / Space on the focused box)
   opens the editor's Start view; a drag moves the box (4 px separate a

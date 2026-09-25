@@ -36,7 +36,7 @@ src-tauri/                      the Tauri app (windows, animator, mailbox, comma
   the message string.
 * Rust → box: events in `src/lib/ipc/events.ts` (`box:flight`, `box:progress`,
   `box:handoff`, `box:conceal`, `box:collapse`, `box:reveal`, `box:shown`,
-  `settings:changed`, `box:undo`).
+  `box:released`, `settings:changed`, `box:undo`).
 * `inspect_paths(paths)` inspects at most the first 64 paths (each costs
   shell work on the STA and a ≤256 px preview, while the user is still
   dragging); the first returned item's optional `skipped` says how many
@@ -158,14 +158,20 @@ Rust: show box right under the (topmost) editor — until it paints it shows
 Rust: the swap: Clear{session} + (held) box:reveal{session: box session}
    editor: on its next frame clears to fully transparent; double rAF →
            editor_ack(session,'cleared')
-   box:    on its next frame paints the picture it holds; double rAF →
-           box_painted(session). What only the box shows — the hint, the
-           Undo chip — is not in the proxy: it comes 250 ms after the box
-           shows its picture on its own again, fading in (the mark moves
-           up out of the hint's way from where the proxy had it)
+   box:    on its next frame paints the picture it holds, still frozen;
+           double rAF → box_painted(session)
 Rust: waits for cleared (1 s) and the box's box_painted (300 ms from
-      box:reveal); hide editor, box back to the top of the topmost band
-      (+ low-memory: destroy the editor); glide box home if needed.
+      box:reveal); hide editor, box back to the top of the topmost band +
+      box:released (+ low-memory: destroy the editor); glide box home if
+      needed — its saved home while the box, at that monitor's scale, fits
+      there on a monitor still connected, else where it is
+      (`monitors::resting_home`)
+   box: box:released → the box unfreezes (a pending hint shows now): the
+        proxy is gone, so after a plain close the picture is its own again.
+        What only the box shows — the hint, the Undo chip — is never in the
+        proxy nor over it: it comes 250 ms after the box shows its picture
+        on its own again, fading in (the mark moves up out of the hint's
+        way from where the proxy had it)
 ```
 Box sessions number the pictures handed to the box (`box:handoff`,
 `box:collapse`) and the box's halves of the swaps (`box:conceal`,
@@ -181,7 +187,8 @@ they could reach an opening editor before its `Prepare` or a closing one on
 its way out — else it opens the editor. A close handoff that fails (a
 window went missing) still ends in the closed state (`morph::close`): the
 editor hidden, not topmost, without a taskbar button, memory low; the box on
-the empty picture (`box:collapse` hide + `box:shown`) when it may show.
+the empty picture (`box:collapse` hide + `box:shown` + `box:released`) when
+it may show.
 
 The box at rest is shown exactly when it may be (`rules::box_allowed`): the
 user has not hidden it (tray / menu / hotkey / Settings) and no fullscreen
@@ -206,9 +213,9 @@ over an identical picture (the editor over the box at open; the box under
 the editor's proxy at close), and exactly one window paints the box's
 picture at every moment: the one that shows over the other paints nothing
 until the two swap. Acks for an old session are ignored.
-After a plain close the box rests on the picture it took over; after an
-apply it stays frozen on the new icon until its flight (`depart` /
-`celebrate`) carries it on (or 8 s pass without one).
+After a plain close the box rests on the picture it took over, frozen until
+`box:released`; after an apply it stays frozen on the new icon until its
+flight (`depart` / `celebrate`) carries it on (or 8 s pass without either).
 
 `then` on Collapse: `hide` (plain close), `fly` (the box will fly to the
 desktop icon carrying `icon`), `celebrate` (in-place celebration). The apply
@@ -233,8 +240,10 @@ Restore all runs; `done == total` clears it), `box:handoff`
 (`BoxCollapse{session, then, icon, held}`, see the close handoff) and the
 box's halves of the swaps, `box:conceal` / `box:reveal`
 (`BoxSwap{session}`), all answered with `box_painted(session)`,
-`box:shown` (keeps a picture taken over with `box:collapse`, else resets
-the box), `settings:changed`, and `box:undo`
+`box:shown` (keeps a picture taken over with `box:collapse`, frozen, else
+resets the box), `box:released` (the close is over, the editor's proxy
+gone: after a plain close that picture is the box's own again),
+`settings:changed`, and `box:undo`
 (payload: history entry id) — after a successful apply the box shows an
 **Undo** chip for 6 s; clicking it calls `restore({type:'entry', id})`, then
 celebrates, or shakes saying why the icon is not back (a failed entry, or
@@ -342,10 +351,15 @@ one switches the sidebar tab and asks the panel through
   (kept per queue entry too, and through renames in the Library view): the
   design goes by it. A Library design is only ever saved over from a form
   that names it — Save to Library says "Updates …" (Save changes / Save as
-  new); without that notice it saves as new, and the Library view's "Save
-  current design" adds a new design when the linked one is not on the page
-  — so no design is overwritten unseen. Opening a Library design over
-  unsaved changes asks first (`shell.openLibraryDesign`).
+  new); without that notice it saves as new: Ctrl+S and the palette's Save
+  to Library save an unlinked design as new at once (pressed again while
+  that save runs, they join it) and open that form for a linked one
+  (`shell.requestSaveToLibrary`, the form's open state is
+  `shell.saveFormOpen`), and the Library view's "Save current design" adds
+  a new design when the linked one is not on the page — so no design is
+  overwritten unseen. "Save as new" under the linked design's own name
+  saves "<name> copy". Opening a Library design over unsaved changes asks
+  first (`shell.openLibraryDesign`).
 * **Autosave.** A design is *unsaved* when it came with unsaved changes (a
   recovered draft) or its history moved since it was loaded, applied,
   saved to the Library or exported as a project (`engine.currentEntryId`,
@@ -354,10 +368,17 @@ one switches the sidebar tab and asks the panel through
   editing goes on, before another design opens and when the editor
   closes — also a close Rust starts (the hotkey, the tray, an apply): the
   collapse calls `flushAutosave` with the design as it is then, so an open
-  right after (whose Prepare resets the session) cannot cancel it, and
+  right after (whose Prepare may reset the session) cannot cancel it, and
   Clear waits (time-boxed) for that write before the editor may be
-  destroyed. The JSON is encoded off the main thread (`ProjectEncoder`: the
-  page only copies the layer pixels). Once the open design is safe the
+  destroyed. The autosave keeps one design, so closing never drops unsaved
+  work unasked: Close (✕, Esc, the palette: `shell.requestClose`) over
+  unsaved changes — the open design's or another queued one's — asks
+  first, and work closed anyway (`shell.discardOnReopen`) is reset at the
+  next Prepare; a close Rust starts asks nothing, and while unsaved work
+  is open the next Prepare without items keeps the session (its view as
+  asked, Edit included) instead of resetting it. A Prepare with items
+  starts over. The JSON is encoded off the main thread (`ProjectEncoder`:
+  the page only copies the layer pixels). Once the open design is safe the
   live slot takes another queued unsaved design, or empties
   (`autosave('')`). Rust keeps two slots (`AutosaveSlots`): each launch
   first turns what the previous one left live into the recovery offer
@@ -522,14 +543,22 @@ Windows (`win/`, `#[cfg(windows)]`, type-checked on Linux with
 
 * `main.rs` handles `--elevated-apply`, `--restore-all [--quiet]`, `--self-test`
   before building Tauri; otherwise exits with `reskin_lib::run(argv)`.
-* `lib.rs` `run`: panic hook (`reskin.log`, and an error box: release builds
-  abort on panic); started as administrator (`is_uac_elevated`) it restarts
-  unelevated through Explorer (`--relaunched`) and returns; no WebView2
-  Runtime → an error box offering Microsoft's download, exit 1; a history
-  that cannot be loaded → an error box saying which of three it is (another
-  Reskin process holds the journal lock, `Error::Busy`: try again in a
-  moment; a journal a newer Reskin wrote; a file it cannot read, or cannot
-  set aside when it is damaged), exit 1. Builder: single-instance first (a
+  `--self-test` run as administrator (`is_uac_elevated`) only reads: it
+  leaves out the checks that write the app data (`app-data`, `journal`,
+  `icon-store`) and its log line, reports a failed `elevation` check and
+  exits 1.
+* `lib.rs` `run`: started as administrator (`is_uac_elevated`) it first
+  restarts unelevated through Explorer (`--relaunched`) and returns, having
+  written nothing (not even `reskin.log`: the new start's first log line
+  says `relaunched=true`); only then the log is rotated and started, and
+  the panic hook installed (`reskin.log`, and an error box: release builds
+  abort on panic). When that restart fails it carries on, and once the log
+  is started it logs why and warns. No WebView2 Runtime → an error box
+  offering Microsoft's download, exit 1; a history that cannot be loaded →
+  an error box saying which of three it is (another Reskin process holds
+  the journal lock, `Error::Busy`: try again in a moment; a journal a newer
+  Reskin wrote; a file it cannot read, or cannot set aside when it is
+  damaged), exit 1. Builder: single-instance first (a
   second start with `--edit` paths opens them, without paths
   `actions::bring_forward`: the open editor to the front, else *Show
   box*), then dialog, opener, global-shortcut; `setup` creates the box

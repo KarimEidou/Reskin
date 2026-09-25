@@ -48,6 +48,19 @@ export class Shell {
   libraryEpoch = $state(0);
   /** Asked by the import popover, or null (see askImport). */
   importQuestion = $state.raw<ImportQuestion | null>(null);
+  /**
+   * The Save to Library form is open: from its button, or from Ctrl+S / the
+   * palette on a design linked to a Library design (see requestSaveToLibrary).
+   */
+  saveFormOpen = $state(false);
+  /** The save as new Ctrl+S / the palette started, while it runs (see requestSaveToLibrary). */
+  private quickSave: Promise<LibraryEntry | null> | null = null;
+  /**
+   * The user closed the editor over unsaved work ("Close anyway", see
+   * requestClose): the next open starts over instead of coming back to it.
+   * App's Prepare reads and clears it.
+   */
+  discardOnReopen = false;
 
   /**
    * An autosaved design offered for recovery (the Start banner and the
@@ -252,6 +265,72 @@ export class Shell {
     const entry = await this.session.saveToLibrary(name, opts);
     if (entry) this.libraryEpoch += 1;
     return entry;
+  }
+
+  /**
+   * Ctrl+S and the palette's "Save to Library". A design linked to a
+   * Library design is only ever saved over from the form that names it, so
+   * the form opens (in the Edit view, where it lives); any other design is
+   * saved as a new one at once.
+   */
+  async requestSaveToLibrary(): Promise<LibraryEntry | null> {
+    // Pressed again while that save runs: the same save, not a second design.
+    if (this.quickSave) return this.quickSave;
+    if (this.session.libraryId === null) {
+      this.quickSave = this.saveToLibrary().finally(() => {
+        this.quickSave = null;
+      });
+      return this.quickSave;
+    }
+    this.navigate('edit');
+    this.saveFormOpen = true;
+    return null;
+  }
+
+  /**
+   * The designs whose changes a close would drop: the open design and
+   * every other queued one changed since it was last applied, saved or
+   * exported.
+   */
+  private unsavedDesigns(): string[] {
+    const { session } = this;
+    const queued = session.queue
+      .filter((q, i) => i !== session.currentIndex && q.unsaved)
+      .map((q) => `${q.info.name}'s design`);
+    if (!session.unsaved) return queued;
+    return [session.item ? `${session.item.name}'s design` : 'the current design', ...queued];
+  }
+
+  /** Some design has changes a close would drop (see unsavedDesigns). */
+  get hasUnsavedWork(): boolean {
+    return this.unsavedDesigns().length > 0;
+  }
+
+  /**
+   * Close (✕, Esc, the palette). Over unsaved work it asks first; closed
+   * anyway, that work is dropped at the next open (discardOnReopen). The
+   * session's close keeps the open design in the autosave as it goes.
+   */
+  async requestClose(): Promise<void> {
+    const unsaved = this.unsavedDesigns();
+    if (unsaved.length > 0) {
+      const what = unsaved.length === 1 ? unsaved[0]! : `${unsaved.length} designs`;
+      const ok = await confirm({
+        title: 'Close the editor?',
+        message: `Your changes to ${what} will be lost. Apply them or save them to the Library first to keep them.`,
+        confirmLabel: 'Close anyway',
+        danger: true,
+      });
+      if (!ok) return;
+    }
+    this.discardOnReopen = unsaved.length > 0;
+    try {
+      await this.session.requestClose();
+    } catch (e) {
+      // Still open: nothing is dropped.
+      this.discardOnReopen = false;
+      throw e;
+    }
   }
 
   async openReleases(): Promise<void> {

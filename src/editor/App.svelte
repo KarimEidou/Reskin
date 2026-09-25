@@ -136,7 +136,9 @@
     },
     refreshIcons: () => shell.refreshIcons('notify'),
     openReleases: () => shell.openReleases(),
-    saveToLibrary: () => shell.saveToLibrary(),
+    saveToLibrary: () => shell.requestSaveToLibrary(),
+    navigate: (view) => shell.navigate(view),
+    requestClose: () => shell.requestClose(),
   };
 
   // ---- the handoff surface --------------------------------------------------------
@@ -145,6 +147,7 @@
   function closeTransient(): void {
     shell.paletteOpen = false;
     shell.shortcutsOpen = false;
+    shell.saveFormOpen = false;
     shell.dragging = false;
     recoveryDraft = null;
     answerConfirm(false);
@@ -156,10 +159,15 @@
   async function prepare(cmd: PrepareCmd): Promise<void> {
     closeTransient();
     applySettingsFromMailbox(cmd.settings);
-    session.reset();
+    // A close Rust started (the hotkey, the tray) left unsaved work open: an
+    // open that brings nothing new comes back to it. After "Close anyway",
+    // or with new items, the editor starts over.
+    const keep = cmd.items.length === 0 && !shell.discardOnReopen && shell.hasUnsavedWork;
+    shell.discardOnReopen = false;
+    if (!keep) session.reset();
     shell.openEpoch += 1;
     // Items open in Edit; "edit" without anything to edit is the Start page.
-    const view = cmd.items.length > 0 ? 'edit' : cmd.view === 'edit' ? 'start' : cmd.view;
+    const view = cmd.items.length > 0 ? 'edit' : cmd.view === 'edit' && !keep ? 'start' : cmd.view;
     shell.navigate(view);
     // The items load in the background; only the proxy must be ready.
     if (cmd.items.length > 0) void shell.openItems(cmd.items, { replace: true });
@@ -181,7 +189,7 @@
     closeTransient();
     // A close Rust started (the hotkey, the tray, an apply) did not come
     // through requestClose: keep the last edit now, as it is — the next
-    // open's Prepare resets the session and would cancel a save still due.
+    // open's Prepare may reset the session and would cancel a save still due.
     closingSave = session.flushAutosave();
     // Plain close: the box comes back empty; after an apply it carries the
     // new icon. The box takes this very picture over (box:collapse).
@@ -319,7 +327,7 @@
       preview.cancel();
       return;
     }
-    void session.requestClose().catch((err: unknown) => console.error('[editor] close failed', err));
+    void shell.requestClose().catch((err: unknown) => console.error('[editor] close failed', err));
   }
 
   /**

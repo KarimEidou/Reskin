@@ -29,7 +29,7 @@ type SessionView = {
   hasDesign: boolean;
   view: string;
   unsaved: boolean;
-  queue: Array<{ info: { name: string; kind: string } }>;
+  queue: Array<{ info: { name: string; kind: string }; unsaved: boolean }>;
   engine: {
     doc: { layers: unknown[]; meta: { name: string } };
     activeLayer: { id: string };
@@ -530,6 +530,27 @@ test.describe('settings', () => {
     await waitForCall(page, 'open_external', { link: 'releases' });
   });
 
+  test("the palette's About goes to the About section, and Settings back to the top", async ({ openEditor, page }) => {
+    await openEditor();
+    await simulateOpen(page, [], 'start');
+    const version = page.getByTestId('about-version');
+    const runCommand = async (query: string) => {
+      await page.keyboard.press('Control+k');
+      await expect(page.getByRole('combobox', { name: 'Search commands' })).toBeFocused();
+      await page.keyboard.type(query);
+      await page.keyboard.press('Enter');
+      await expect(page.getByTestId('command-palette')).toBeHidden();
+    };
+    await runCommand('About Reskin');
+    await expect(page.getByTestId('settings-view')).toBeVisible();
+    await expect(version).toBeInViewport();
+    await runCommand('Go to Start page');
+    await expect(page.getByTestId('settings-view')).toHaveCount(0);
+    await runCommand('Go to Settings');
+    await expect(page.getByRole('heading', { name: 'Appearance' })).toBeInViewport();
+    await expect(version).not.toBeInViewport();
+  });
+
   test('hotkey recorder validates and saves', async ({ openEditor, page }) => {
     await openEditor();
     await simulateOpen(page, [], 'settings');
@@ -583,6 +604,114 @@ test.describe('settings', () => {
 /** This launch's autosaved draft (the fake backend's live slot). */
 const liveDraft = (page: Page) => page.evaluate(() => window.__e2e!.autosaveSlots.live);
 
+/** The question a close over unsaved work asks. */
+const closeQuestion = (page: Page) => page.getByRole('dialog', { name: 'Close the editor?' });
+
+/** Answers the close's question with "Close anyway". */
+async function closeAnyway(page: Page): Promise<void> {
+  await closeQuestion(page).getByRole('button', { name: 'Close anyway' }).click();
+  await expect(closeQuestion(page)).toBeHidden();
+}
+
+/** Switches to queued item `name` from the title bar's queue menu; resolves once its design is in. */
+async function switchTo(page: Page, name: string): Promise<void> {
+  await titleBar(page).getByRole('button', { name: /queued$/ }).click();
+  await page.getByRole('menuitemcheckbox', { name: new RegExp(`^${name}`) }).click();
+  await page.waitForFunction((n) => {
+    const s = (window as unknown as { __reskinSession: SessionView & { switching: number } }).__reskinSession;
+    return s.switching === 0 && s.hasDesign && s.engine.doc.meta.name === n;
+  }, name);
+}
+
+/** Where each open design stands: its name and whether it has unsaved changes. */
+const unsavedWork = (page: Page) =>
+  page.evaluate(() => {
+    const s = (window as unknown as Win).__reskinSession;
+    return {
+      view: s.view,
+      open: s.hasDesign ? s.engine.doc.meta.name : null,
+      unsaved: s.unsaved,
+      queue: s.queue.map((q) => [q.info.name, q.unsaved] as const),
+    };
+  });
+
+test.describe('closing over unsaved work', () => {
+  test('✕ and Esc ask first; "Close anyway" closes, and the next open starts over', async ({ openEditor, page }) => {
+    await openEditor();
+    await simulateOpen(page, [SAMPLE_PATHS.steam, SAMPLE_PATHS.notes], 'edit');
+    await hasDesign(page);
+    await paint(page);
+    // Nothing to lose yet in Notes: one design would be lost, by name.
+    await page.keyboard.press('Escape');
+    const question = closeQuestion(page);
+    await expect(question).toBeVisible();
+    await expect(question).toContainText("Your changes to Steam's design will be lost.");
+    await question.getByRole('button', { name: 'Cancel' }).click();
+    await expect(question).toBeHidden();
+    await page.waitForTimeout(150);
+    expect(await calls(page, 'editor_close')).toHaveLength(0);
+    expect((await editorState(page)).phase).toBe('open');
+
+    // Both queued designs edited: the question counts them.
+    await switchTo(page, 'Notes');
+    await paint(page);
+    await page.getByRole('button', { name: 'Close editor' }).click();
+    await expect(question).toContainText('Your changes to 2 designs will be lost.');
+    await closeAnyway(page);
+    await waitForCall(page, 'editor_close', { reason: 'user' });
+    await expect.poll(async () => (await editorState(page)).phase).toBe('closed');
+
+    // Dropped: the next open does not come back to them.
+    await simulateOpen(page, [], 'start');
+    expect(await unsavedWork(page)).toEqual({ view: 'start', open: null, unsaved: false, queue: [] });
+  });
+
+  test('a close without unsaved work asks nothing', async ({ openEditor, page }) => {
+    await openEditor();
+    await simulateOpen(page, [SAMPLE_PATHS.steam], 'edit');
+    await hasDesign(page);
+    await page.getByRole('button', { name: 'Close editor' }).click();
+    await waitForCall(page, 'editor_close', { reason: 'user' });
+    await expect(closeQuestion(page)).toHaveCount(0);
+  });
+
+  test('a close Rust starts keeps unsaved work: an open without new items comes back to it', async ({ openEditor, page }) => {
+    await openEditor();
+    await simulateOpen(page, [SAMPLE_PATHS.steam, SAMPLE_PATHS.notes], 'edit');
+    await hasDesign(page);
+    await paint(page);
+    await switchTo(page, 'Notes');
+    await paint(page);
+    const edited = {
+      open: 'Notes',
+      unsaved: true,
+      queue: [
+        ['Steam', true],
+        ['Notes', false],
+      ],
+    };
+    expect(await unsavedWork(page)).toMatchObject(edited);
+
+    // The hotkey closes the editor (no question: Rust closes it), and opens it again.
+    await simulateClose(page);
+    await simulateOpen(page, [], 'edit');
+    expect(await unsavedWork(page)).toEqual({ view: 'edit', ...edited });
+    await expect(page.getByTestId('workspace')).toBeVisible();
+    // A click on the box opens the Start page, the work still open behind it.
+    await simulateClose(page);
+    await simulateOpen(page, [], 'start');
+    expect(await unsavedWork(page)).toEqual({ view: 'start', ...edited });
+    await expect(titleBar(page).getByRole('button', { name: 'Edit', exact: true })).toBeVisible();
+    expect(await calls(page, 'editor_close')).toHaveLength(0);
+
+    // Items dropped on the box start over with them.
+    await simulateClose(page);
+    await simulateOpen(page, [SAMPLE_PATHS.site], 'edit');
+    await hasDesign(page);
+    expect(await queueNames(page)).toEqual(['Docs Portal']);
+  });
+});
+
 test.describe('autosave', () => {
   test('keeps only unsaved changes: an item opened and closed leaves nothing to recover', async ({ openEditor, page }) => {
     await openEditor();
@@ -594,11 +723,12 @@ test.describe('autosave', () => {
     expect(await calls(page, 'autosave')).toEqual([]);
     await expect.poll(async () => (await editorState(page)).phase).toBe('closed');
 
-    // An edit is kept when the editor closes…
+    // An edit is kept when the editor closes (anyway, over unsaved work)…
     await simulateOpen(page, [SAMPLE_PATHS.notes], 'edit');
     await hasDesign(page);
     await paint(page);
     await page.getByRole('button', { name: 'Close editor' }).click();
+    await closeAnyway(page);
     await expect.poll(async () => (await calls(page, 'editor_close')).length).toBe(2);
     const [kept] = await calls(page, 'autosave');
     expect(JSON.parse(kept!.args.data as string).meta.source.path).toBe(SAMPLE_PATHS.notes);
@@ -767,6 +897,7 @@ test.describe('recovery', () => {
     await hasDesign(page);
     await paint(page);
     await page.getByRole('button', { name: 'Close editor' }).click();
+    await closeAnyway(page);
     await expect.poll(async () => (await editorState(page)).phase).toBe('closed');
     expect(JSON.parse((await liveDraft(page))!).meta.source.path).toBe(SAMPLE_PATHS.notes);
     // The first Start page still offers the earlier launch's design.

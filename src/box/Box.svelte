@@ -13,7 +13,7 @@
   to held on `box:collapse`, and paints it on `box:reveal` — each change on
   its next frame, confirmed with `box_painted`. What only the box shows
   (the hint, the Undo chip) is never part of the swap: it comes back a
-  moment later.
+  moment after `box:released`, once the editor's proxy is gone.
 -->
 <script lang="ts">
   import { onMount, tick, untrack } from 'svelte';
@@ -427,6 +427,7 @@
           collapsePicture = null;
           if (picture) void confirmPainted(picture);
         }),
+        on('box:released', () => send({ type: 'released' })),
         on('box:undo', (id) => (undoId = id)),
         getCurrentWebview().onDragDropEvent(({ payload }) => {
           switch (payload.type) {

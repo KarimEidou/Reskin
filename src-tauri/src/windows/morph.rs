@@ -15,7 +15,8 @@
 //! Every picture the box takes on for a handoff, and each half of a swap,
 //! comes the same way: `box:handoff` (open), `box:conceal`, `box:collapse`
 //! (close) or `box:reveal` with a box session number, confirmed with
-//! `box_painted` once it is on screen.
+//! `box_painted` once it is on screen. A close ends with `box:released`:
+//! the editor's proxy is gone, the box's picture its own again.
 //!
 //! Outside a handoff the box follows `box_allowed`: shown unless the user
 //! hid it or a fullscreen app runs (`settle_box`).
@@ -26,8 +27,8 @@ use std::time::{Duration, Instant};
 
 use reskin_core::geom;
 use reskin_core::model::{
-    AckStage, BoxCollapse, BoxHandoff, BoxSwap, CollapseThen, EditorCmd, EditorView, ItemInfo,
-    MotionPref, OpenStyle, Rect, Settings, editor_size,
+    AckStage, BoxCollapse, BoxHandoff, BoxMetrics, BoxSwap, CollapseThen, EditorCmd, EditorView,
+    ItemInfo, MotionPref, OpenStyle, Rect, Settings, editor_size,
 };
 use tauri::{AppHandle, Emitter, Manager, PhysicalPosition, PhysicalSize, Runtime, WebviewWindow};
 
@@ -215,15 +216,22 @@ fn box_hwnd<R: Runtime>(app: &AppHandle<R>) -> isize {
         .unwrap_or(0)
 }
 
-/// The box's resting rect (physical px): its saved home, else where it is.
+/// The box's resting rect (physical px): its saved home while that is on a
+/// screen, else where it is (see `monitors::resting_home`).
 pub fn box_home<R: Runtime>(app: &AppHandle<R>) -> Option<Rect> {
-    let state = app.state::<AppState>();
     let current = raw::rect(box_hwnd(app))?;
-    let settings = state.settings();
-    Some(match settings.box_position {
-        Some(p) => Rect::new(p.x as f64, p.y as f64, current.w, current.h),
-        None => current,
-    })
+    let settings = app.state::<AppState>().settings();
+    let saved = settings
+        .box_position
+        .as_ref()
+        .map(|p| (f64::from(p.x), f64::from(p.y)));
+    let side = BoxMetrics::for_size(settings.box_size).window;
+    Some(monitors::resting_home(
+        saved,
+        current,
+        side,
+        &monitors::all(app),
+    ))
 }
 
 /// The box may be on screen outside a handoff (see `rules::box_allowed`).
@@ -600,8 +608,11 @@ fn close_inner<R: Runtime>(
     crate::smoke::probe(app, "6-cleared");
     let _ = editor.hide();
     if show_box {
-        // Back on top of the topmost band, where it lives.
+        // Back on top of the topmost band, where it lives — and its own
+        // again: the editor's proxy is gone, so what only the box shows
+        // (the hint, the Undo chip) may come back.
         raw::set_topmost(bh, true);
+        let _ = app.emit_to(box_window::LABEL, "box:released", ());
     }
     finish_close(app, &editor, &settings, then);
     tray::refresh(app);
@@ -678,6 +689,7 @@ fn rest_closed<R: Runtime>(app: &AppHandle<R>, then: CollapseThen) {
         raw::show_no_activate(bh);
         raw::set_topmost(bh, true);
         let _ = app.emit_to(box_window::LABEL, "box:shown", ());
+        let _ = app.emit_to(box_window::LABEL, "box:released", ());
     } else {
         raw::hide(bh);
     }

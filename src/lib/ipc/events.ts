@@ -34,6 +34,11 @@ export const EVENTS = {
   reveal: 'box:reveal',
   /** The box was shown again (after the editor collapsed / hotkey). */
   shown: 'box:shown',
+  /**
+   * The close is over, the editor's proxy gone: after a plain close the
+   * picture taken over with `box:collapse` is the box's own again.
+   */
+  released: 'box:released',
   /** Settings changed anywhere; payload is the full settings. */
   settings: 'settings:changed',
   /** An apply succeeded: show the Undo chip; payload is the history entry id. */
@@ -54,6 +59,7 @@ export interface EventPayloads {
   'box:collapse': BoxCollapse;
   'box:reveal': BoxSwap;
   'box:shown': null;
+  'box:released': null;
   'settings:changed': Settings;
   'box:undo': string;
   'system:changed': null;
