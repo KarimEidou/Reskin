@@ -4,7 +4,7 @@
 
 use std::collections::HashMap;
 
-use reskin_core::grpicon::{GroupEntry, parse_group, rebuild_ico};
+use reskin_core::grpicon::{GroupEntry, MAX_GROUP_ENTRIES, parse_group, rebuild_ico};
 use reskin_core::ico::{build_ico, parse_ico};
 use reskin_core::model::ICO_SIZES;
 use reskin_core::pixels::Rgba;
@@ -59,7 +59,7 @@ fn rebuild_is_byte_identical_and_parses_the_same_frames() {
     let ico = all_sizes_ico();
     let ids: Vec<u16> = (1..=ICO_SIZES.len() as u16).collect();
     let (group, blobs) = to_group(&ico, &ids);
-    let rebuilt = rebuild_ico(&group, |id| blobs.get(&id).cloned()).unwrap();
+    let rebuilt = rebuild_ico(&group, |id| blobs.get(&id).map(Vec::as_slice)).unwrap();
     assert_eq!(rebuilt, ico);
 
     let original = parse_ico(&ico).unwrap();
@@ -96,7 +96,7 @@ fn arbitrary_resource_ids_are_followed() {
         }
     );
     assert_eq!(entries[2].width, 0, "256 px is stored as 0");
-    let rebuilt = rebuild_ico(&group, |id| blobs.get(&id).cloned()).unwrap();
+    let rebuilt = rebuild_ico(&group, |id| blobs.get(&id).map(Vec::as_slice)).unwrap();
     assert_eq!(rebuilt, ico);
 }
 
@@ -105,7 +105,7 @@ fn missing_images_are_skipped() {
     let ico = build_ico(&[sample(16), sample(32), sample(48)]).unwrap();
     let (group, mut blobs) = to_group(&ico, &[1, 2, 3]);
     blobs.remove(&2);
-    let rebuilt = rebuild_ico(&group, |id| blobs.get(&id).cloned()).unwrap();
+    let rebuilt = rebuild_ico(&group, |id| blobs.get(&id).map(Vec::as_slice)).unwrap();
     assert_eq!(u16_at(&rebuilt, 4), 2);
     let parsed = parse_ico(&rebuilt).unwrap();
     let sizes: Vec<u32> = parsed.iter().map(|f| f.image.w).collect();
@@ -125,7 +125,7 @@ fn missing_images_are_skipped() {
 fn malformed_groups_error_without_panicking() {
     let ico = build_ico(&[sample(16), sample(32)]).unwrap();
     let (group, blobs) = to_group(&ico, &[1, 2]);
-    let get = |id: u16| blobs.get(&id).cloned();
+    let get = |id: u16| blobs.get(&id).map(Vec::as_slice);
 
     // truncated anywhere: header or entries
     for len in 0..group.len() {
@@ -145,11 +145,12 @@ fn malformed_groups_error_without_panicking() {
         bad[2] = kind;
         assert!(rebuild_ico(&bad, get).is_err(), "idType {kind}");
     }
-    // a count far larger than the data
-    let mut huge = group.clone();
-    huge[4] = 0xFF;
-    huge[5] = 0xFF;
-    assert!(rebuild_ico(&huge, get).is_err());
+    // a count larger than the data, within the entry limit and far past it
+    for count in [MAX_GROUP_ENTRIES as u16, u16::MAX] {
+        let mut huge = group.clone();
+        huge[4..6].copy_from_slice(&count.to_le_bytes());
+        assert!(rebuild_ico(&huge, get).is_err(), "{count} entries");
+    }
 }
 
 #[test]
@@ -172,6 +173,7 @@ fn random_bytes_never_panic() {
             bytes[5] = 0;
         }
         let _ = parse_group(&bytes);
-        let _ = rebuild_ico(&bytes, |id| (id % 3 != 0).then(|| vec![id as u8; 3]));
+        let blob = [len as u8; 3];
+        let _ = rebuild_ico(&bytes, |id| (id % 3 != 0).then_some(&blob[..]));
     }
 }

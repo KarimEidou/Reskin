@@ -7,9 +7,17 @@ The visual and interaction contract for the box and the editor. Tokens live in
 
 * **Mood:** calm, glassy, precise. Dark theme first (light theme equally
   polished). The brand gradient from the logo (violet `#7c5cff` → blue
-  `#4f7dff` → cyan `#1fc8e3`) is used sparingly: the primary **Save & Apply**
-  button, the box rim when armed, focus rings. When "Use Windows accent" is on,
-  the accent replaces the brand violet.
+  `#4f7dff` → cyan `#1fc8e3`) is used sparingly: the box rim when armed,
+  focus rings. The primary **Save & Apply** button shades the accent's fill
+  into its pressed shade. When "Use Windows accent" is on, the accent
+  replaces the brand violet.
+* **Contrast** (WCAG AA, `lib/theme/contrast.test.ts`): the text tokens keep
+  4.5:1 on every surface, inside controls, and on the editor panel over any
+  wallpaper. Any Windows accent is adjusted (lighter on dark, darker on
+  light; same hue) to 3:1 for fills and 4.5:1 for accent text and the focus
+  ring on those surfaces — accent text also on the accent's tints of them
+  (selected rows, soft badges) — and text on accent fills keeps 4.5:1 on
+  the fill, hover and pressed shades.
 * **Type:** `"Segoe UI Variable Text", "Segoe UI", system-ui` 13 px base;
   `"Segoe UI Variable Display"` for view titles (20–28 px, weight 600).
   Numbers in panels use `font-variant-numeric: tabular-nums`.
@@ -79,6 +87,12 @@ The visual and interaction contract for the box and the editor. Tokens live in
   a tool chosen another way in between (rail, palette) starts over. Tool keys,
   undo / redo, layer commands and Save & Apply fire from the keyboard only in
   the Edit view.
+* **Canvas keys** (arrows, Enter, Delete / Backspace) reach the canvas while
+  it has focus — also after a press on empty space or a disabled control in
+  the panels and bars around it, which focuses the canvas. A view change
+  from the keyboard leaves focus on the view itself (the page's main
+  landmark, named after the view), where they do nothing until the canvas
+  has focus again.
 * **Tool options bar**: context options for the active tool (size, hardness,
   flow, opacity, smoothing, tolerance, contiguous, shape kind, fill/stroke,
   font, spray density and **Reshuffle**, retouch strength and exposure, the
@@ -141,7 +155,8 @@ The visual and interaction contract for the box and the editor. Tokens live in
   cannot be switched or removed while a job runs or an item loads (the strip
   and the title bar's queue menu alike show them disabled). Removing an item
   whose design has unsaved changes asks first; once it is gone, crash
-  recovery no longer offers them.
+  recovery no longer offers them. Focus on a removed item's × moves to the
+  thumbnail taking its place (the next item's, else the previous one's).
 
 ## Views
 
@@ -212,10 +227,22 @@ The visual and interaction contract for the box and the editor. Tokens live in
 * **Shortcuts overlay** (`?`): grouped keyboard map — every command's keys,
   the tool keys with "Next tool of the group (press again)", and the
   canvas's own keys.
+* **Dialogs** are modal: Tab stays inside, and focus goes back to where it
+  was when they close. Escape, their ✕ and a click on the backdrop dismiss
+  the dismissible ones — except a backdrop click within 300 ms of opening,
+  the rest of the (double-)click that opened it.
+* **Popovers** (apply options, import, colour, More options, Save to
+  Library) are not modal: an outside press closes them. Escape, and Tab
+  past the last control or Shift+Tab past the first, close them and give
+  focus back to the opener — Tab then carries on to what follows it. Menus
+  close on Escape and Tab, focus back on their button.
 * **Toasts**: bottom-centre stack; success/info/error; optional action
-  (e.g. Undo); auto-dismiss 4–6 s. Screen readers hear each toast once:
-  the stack is two persistent live regions, warnings/errors (an alert
-  region, on top) and info/success (a polite status region below).
+  (e.g. Undo); auto-dismiss 4–6 s (paused while the pointer or focus is on
+  the stack). Screen readers hear each toast once: the stack is two
+  persistent live regions, warnings/errors (an alert region, on top) and
+  info/success (a polite status region below). A toast that leaves with
+  focus on it hands focus to the next toast, else back to where it came
+  from.
 
 ## Box
 

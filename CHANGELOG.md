@@ -6,14 +6,7 @@ All notable changes to Reskin are documented here. The format follows
 
 ## [Unreleased]
 
-### Fixed
-
-- Opening and closing the editor no longer shows the box twice for a
-  moment — darker glass, the box's first-run hint under the editor's
-  picture of the box: the two windows now hand the box's picture over in a
-  single frame. The hint (and the Undo chip) fades back in just after.
-
-## [1.0.0] - 2026-09-24
+## [1.0.0] - 2026-09-25
 
 The first release: a small glass box that floats on your Windows desktop.
 Drop a desktop item onto it, redesign its icon in a full editor, and Save &
@@ -27,7 +20,9 @@ Apply changes the real icon — every change journaled and undoable.
   sizes, with adjustable opacity at rest. It stays perfectly still while
   idle.
 - Drag it anywhere: it follows the pointer, can be flung, snaps to screen
-  edges and corners, and remembers its place.
+  edges and corners, and remembers its place. Unplugging a monitor never
+  strands it: it stays on a screen you have, and its place on that monitor
+  counts again once the monitor is back.
 - It reacts to what you do: lifts on hover, swells with a count badge while
   you drag items over it, swallows the dropped icon, shows a progress ring
   during Restore all, and shakes with a short message saying why when
@@ -42,17 +37,24 @@ Apply changes the real icon — every change journaled and undoable.
   box hides while a full-screen app runs (optional); **Show box** in the
   tray brings it back over one.
 - A first-run welcome, and a hint on the box when the saved shortcut is
-  taken by another app.
+  taken by another app. Its hints and messages stay readable over any
+  wallpaper.
 
 #### Opening and closing the editor
 
 - The box grows into the editor with a morph, and the editor folds back
   into the box when you close it — or they crossfade: if you prefer it,
   with reduced motion, in compatibility mode, or when the editor needs a
-  moment longer. The icon you dropped lands right on the canvas, and the
-  two windows hand over without a flicker.
+  moment longer. The icon you dropped lands right on the canvas.
+- The two windows hand the box's picture over in a single frame, so the box
+  never shows twice or flickers on the way; its hint and Undo chip fade
+  back in just after.
 - The editor opens from the box, the tray and box menus, the Explorer entry
   *Reskin this icon*, or a second start of Reskin with a path.
+- Closing the editor over unsaved work asks first (**Close anyway** /
+  Cancel). When Reskin closes it — the global shortcut, the tray — nothing
+  is asked and the work is kept: the next open without new items comes
+  back to it.
 
 #### Editor
 
@@ -112,11 +114,14 @@ Apply changes the real icon — every change journaled and undoable.
   the clipboard, or a `.reskin` project.
 - **Library:** save designs to reuse them on other icons; save changes to
   the design you opened, or save it as new; rename, delete, and apply a
-  saved design to the item you are editing.
+  saved design to the item you are editing. Ctrl+S on a design opened from
+  the Library (or saved there) opens the save form, which names that
+  design, instead of saving over it.
 - **Queue:** drop several items at once and design them one by one; each
-  keeps its own design. **Apply style to all** gives every other queued
-  icon the current look — preset, backdrop, adjustments, helpers and
-  effects, scaled to each icon — and applies them in one go.
+  keeps its own design, and removing one with unsaved changes asks first.
+  **Apply style to all** gives every other queued icon the current look —
+  preset, backdrop, adjustments, helpers and effects, scaled to each
+  icon — and applies them in one go.
 - **Autosave and recovery:** unsaved designs are saved in the background
   and offered again after a crash.
 - **Command palette** (Ctrl+K) with every command, adjustment, icon helper,
@@ -134,7 +139,9 @@ Apply changes the real icon — every change journaled and undoable.
 - Public Desktop shortcuts: change them with administrator approval, or
   make a personal copy on your own desktop.
 - Optionally also updates the Start-menu and taskbar-pin shortcuts of the
-  same app, undone together with the icon.
+  same app, undone together with the icon — once the icon itself is back,
+  so declining the approval to undo a Public Desktop change leaves the
+  pins as they are too.
 - Every change is journaled before Reskin touches anything. Undo one
   change, restore an icon's original, or restore all icons — from the box,
   the tray, the History view, or `reskin.exe --restore-all` (exit code 0
@@ -183,16 +190,20 @@ Apply changes the real icon — every change journaled and undoable.
   a warning when the global shortcut doesn't work.
 - Reduced motion follows Windows (or your choice) and turns movement into
   fades; dark and light themes; compatibility mode for opaque windows.
+- Text, controls and the focus ring meet WCAG AA contrast in both themes,
+  whatever the Windows accent colour.
 
 #### Performance
 
 - The box idles at no CPU cost and loads only a small script of its own
-  (at most 33 KB compressed).
+  (at most 33.5 KB compressed).
 - The editor is prepared shortly after start, so it opens without a wait;
   low-memory mode closes it completely instead.
 - Adjustments, effects, styles, thumbnails and saving run off the main
   thread, so dragging a slider stays smooth; undo keeps only the changed
-  parts of the image (up to 256 MB).
+  parts of the image (up to 256 MB). Library, autosave and project files
+  are read and written in the background, so the windows never wait for
+  them.
 
 #### Installers and releases
 
@@ -209,18 +220,21 @@ Apply changes the real icon — every change journaled and undoable.
 
 ### Security
 
-- Started as administrator, Reskin restarts itself as a normal user (and
-  warns you when it can't). Public Desktop changes go through a separate
-  helper that Windows asks you to approve; it accepts only validated jobs,
-  edits only shortcuts that are plain files directly on the Public
-  Desktop, creates files only in an administrator-owned
-  `%ProgramData%\Reskin` folder and never over an existing one, refuses
-  links and hard-linked files, and keeps no log.
+- Started as administrator, Reskin restarts itself as a normal user before
+  it writes anything, even its log (and warns you when it can't). Public
+  Desktop changes go through a separate helper that Windows asks you to
+  approve; it accepts only validated jobs, edits only shortcuts that are
+  plain files directly on the Public Desktop, creates files only in an
+  administrator-owned `%ProgramData%\Reskin` folder and never over an
+  existing one, refuses links and hard-linked files, and keeps no log.
 - `reskin.exe --restore-all` started as administrator restores nothing
   itself: it runs again as the signed-in user (or refuses).
 - Several Reskin processes share the history safely; the editor pages
   work with opaque item handles and a strict content security policy, and
   damaged or oversized `.reskin` files are refused.
+- A damaged or crafted icon — an `.ico` file, a program's icon — can't make
+  Reskin run out of memory: its sizes are checked before anything is read
+  or decoded.
 
 [Unreleased]: https://github.com/KarimEidou/Reskin/compare/v1.0.0...HEAD
 [1.0.0]: https://github.com/KarimEidou/Reskin/releases/tag/v1.0.0

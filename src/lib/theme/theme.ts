@@ -7,6 +7,8 @@ import './tokens.css';
 import type { Settings, ThemeMode } from '$lib/ipc/types';
 import {
   accentRamp,
+  blend,
+  luminance,
   parseHex,
   readableOn,
   rgbToOklch,
@@ -56,19 +58,28 @@ const LEAST_CONTRAST_SURFACE: Readonly<Record<ResolvedTheme, Rgb>> = {
 /**
  * WCAG AA against every surface and the panel: 3:1 for accent fills
  * (switches, selection marks), 4.5:1 for accent text (and the focus ring,
- * drawn in it).
+ * drawn in it) and for text on the fills (`--on-accent`).
  */
 const MIN_FILL_CONTRAST = 3;
 const MIN_TEXT_CONTRAST = 4.5;
+const WHITE_TEXT: Rgb = { r: 255, g: 255, b: 255 };
+
+/**
+ * The strongest accent tint accent text is drawn on (tokens.css:
+ * `--accent-soft-strong`; `--surface-selected` and `--accent-soft` are
+ * lighter): selected rows and tabs, soft badges.
+ */
+export const MAX_ACCENT_TINT = 0.26;
 
 /**
  * Accent custom properties for a theme. Fills use a lighter shade on dark
  * and a darker one on light (as Windows does) so text on them stays legible.
  * Windows lets the accent be any colour: a fill or text shade that would
- * not stand out from every surface of the theme and from the panel goes
- * further (lighter on dark, darker on light) until it does, hover and
- * pressed in step with the fill; accents that already do are used as they
- * are.
+ * not stand out from every surface of the theme and from the panel — text
+ * also on the accent's tints of them — goes further (lighter on dark,
+ * darker on light) until it does, hover and pressed in step with the fill;
+ * accents that already do are used as they are. Hover and pressed go no
+ * further towards the text on them than keeps it legible.
  */
 export function accentVars(accent: Rgb, theme: ResolvedTheme): Record<string, string> {
   const ramp = accentRamp(accent);
@@ -77,21 +88,31 @@ export function accentVars(accent: Rgb, theme: ResolvedTheme): Record<string, st
   const towards = dark ? 'lighter' : 'darker';
   const shade = dark ? ramp.light1 : ramp.dark1;
   const fill = withContrast(shade, surface, MIN_FILL_CONTRAST, towards);
+  const onFill = readableOn(fill);
   const shift = rgbToOklch(fill).l - rgbToOklch(shade).l;
   const inStep = (rgb: Rgb) => (shift === 0 ? rgb : withLightness(rgb, rgbToOklch(rgb).l + shift));
-  const hover = inStep(dark ? ramp.light2 : ramp.base);
-  const pressed = inStep(dark ? ramp.base : ramp.dark2);
-  const text = withContrast(dark ? ramp.light3 : ramp.dark2, surface, MIN_TEXT_CONTRAST, towards);
+  const awayFromText = luminance(onFill) > 0.5 ? 'darker' : 'lighter';
+  const legible = (rgb: Rgb) => withContrast(rgb, onFill, MIN_TEXT_CONTRAST, awayFromText);
+  const hover = legible(inStep(dark ? ramp.light2 : ramp.base));
+  const pressed = legible(inStep(dark ? ramp.base : ramp.dark2));
+  // A tint moves the surface towards the fill (as written: whole channels),
+  // so towards the text too.
+  const tinted = blend(parseHex(toHex(fill))!, MAX_ACCENT_TINT, surface);
+  const text = withContrast(dark ? ramp.light3 : ramp.dark2, tinted, MIN_TEXT_CONTRAST, towards);
+  // The box's count badge: white numbers on a gradient between these two.
+  const badge = (rgb: Rgb) => withContrast(rgb, WHITE_TEXT, MIN_TEXT_CONTRAST, 'darker');
   const vars: Record<string, Rgb> = {
     'accent-base': ramp.base,
     accent: fill,
     'accent-hover': hover,
     'accent-pressed': pressed,
     'accent-text': text,
-    'on-accent': readableOn(fill),
+    'on-accent': onFill,
     'accent-vivid': ramp.vivid,
     'accent-light': ramp.light2,
     'accent-dark': ramp.dark2,
+    'accent-badge-top': badge(ramp.vivid),
+    'accent-badge-bottom': badge(ramp.dark2),
   };
   const out: Record<string, string> = {};
   for (const [name, rgb] of Object.entries(vars)) {

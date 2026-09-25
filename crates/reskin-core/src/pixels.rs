@@ -5,6 +5,12 @@
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD;
 
+/// Largest PNG edge [`Rgba::decode_png`] decodes, in pixels. A PNG's header
+/// sets the buffer decoding allocates, so a few bytes could otherwise ask
+/// for gigabytes. Reskin needs far less: the PNGs it decodes are the icon
+/// frames the editor sends (at most 256 px).
+pub const MAX_PNG_PX: u32 = 4096;
+
 /// Straight-alpha RGBA8 image, rows top to bottom.
 #[derive(Clone, PartialEq, Eq)]
 pub struct Rgba {
@@ -164,10 +170,18 @@ impl Rgba {
         out
     }
 
+    /// Decodes a PNG of at most [`MAX_PNG_PX`] on each side; a bigger one
+    /// is refused from its header, before anything is allocated for it.
     pub fn decode_png(bytes: &[u8]) -> Result<Rgba, String> {
         let mut decoder = png::Decoder::new(std::io::Cursor::new(bytes));
         decoder.set_transformations(png::Transformations::normalize_to_color8());
         let mut reader = decoder.read_info().map_err(|e| format!("png: {e}"))?;
+        let (w, h) = reader.info().size();
+        if w > MAX_PNG_PX || h > MAX_PNG_PX {
+            return Err(format!(
+                "png: {w}x{h} is larger than {MAX_PNG_PX}x{MAX_PNG_PX}"
+            ));
+        }
         let mut buf = vec![0; reader.output_buffer_size()];
         let info = reader
             .next_frame(&mut buf)
@@ -317,6 +331,16 @@ mod tests {
         let b64 = img.to_png_base64();
         assert_eq!(Rgba::from_png_base64(&b64).unwrap(), img);
         assert_eq!(Rgba::from_png_base64(&img.to_data_url()).unwrap(), img);
+    }
+
+    #[test]
+    fn png_edges_over_the_limit_are_refused() {
+        let widest = Rgba::filled(MAX_PNG_PX, 1, [1, 2, 3, 255]);
+        assert_eq!(Rgba::decode_png(&widest.encode_png()).unwrap(), widest);
+        for (w, h) in [(MAX_PNG_PX + 1, 1), (1, MAX_PNG_PX + 1)] {
+            let err = Rgba::decode_png(&Rgba::new(w, h).encode_png()).unwrap_err();
+            assert!(err.contains("larger than"), "{w}x{h}: {err}");
+        }
     }
 
     #[test]

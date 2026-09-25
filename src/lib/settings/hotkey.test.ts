@@ -35,15 +35,24 @@ describe('parseHotkey', () => {
   });
 
   it('needs Ctrl, Alt or Win, or for F1–F24 at least Shift', () => {
-    expect(parseHotkey('Q').ok).toBe(false);
     expect(parseHotkey('Shift+Q')).toEqual({ ok: false, error: "Add Ctrl, Alt or Win (Shift alone isn't enough)" });
-    expect(parseHotkey('F9').ok).toBe(false);
     expect(parseHotkey('Shift+F9')).toEqual({
       ok: true,
       hotkey: { ctrl: false, alt: false, shift: true, win: false, key: 'F9' },
     });
     expect(canonicalHotkey('shift+f24', '')).toBe('Shift+F24');
     expect(canonicalHotkey('Alt+Q', '')).toBe('Alt+Q');
+  });
+
+  it('asks a bare key only for the modifiers that would do', () => {
+    // Shift would not do for these: it is never suggested.
+    for (const key of ['Q', '5', 'Space', 'Up', 'Plus', 'Escape']) {
+      expect(parseHotkey(key)).toEqual({ ok: false, error: 'Add Ctrl, Alt or Win' });
+    }
+    // Function keys type nothing: Shift alone will do.
+    for (const key of ['F1', 'F9', 'F24']) {
+      expect(parseHotkey(key)).toEqual({ ok: false, error: 'Add Ctrl, Alt, Shift or Win' });
+    }
   });
 
   it('builds hotkeys from key events', () => {

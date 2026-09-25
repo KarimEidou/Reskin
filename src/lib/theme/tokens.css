@@ -18,7 +18,9 @@
  * editor panel's fill over any wallpaper (hence the nearly opaque
  * --glass-fill-strong); the text colours also inside controls. theme.ts
  * keeps any accent at 3:1 (fills) and 4.5:1 (text, focus ring) on the
- * same surfaces and panel.
+ * same surfaces and panel — accent text also on the accent tints below
+ * (up to --accent-soft-strong) — and --on-accent at 4.5:1 on the fill, hover
+ * and pressed shades.
  */
 
 :root {
@@ -116,22 +118,26 @@
   /* ---- accent (brand fallback; theme.ts overrides) --------------------- */
   --accent-base: #7c5cff;
   --accent-base-rgb: 124 92 255;
-  --accent: #9a82ff;
-  --accent-rgb: 154 130 255;
-  --accent-hover: #b6a4ff;
-  --accent-hover-rgb: 182 164 255;
+  --accent: #9587ff;
+  --accent-rgb: 149 135 255;
+  --accent-hover: #b1acff;
+  --accent-hover-rgb: 177 172 255;
   --accent-pressed: #7c5cff;
   --accent-pressed-rgb: 124 92 255;
-  --accent-text: #cfc3ff;
-  --accent-text-rgb: 207 195 255;
+  --accent-text: #d0ceff;
+  --accent-text-rgb: 208 206 255;
   --on-accent: #000000;
   --on-accent-rgb: 0 0 0;
-  --accent-vivid: #8f73ff;
-  --accent-vivid-rgb: 143 115 255;
-  --accent-light: #b6a4ff;
-  --accent-light-rgb: 182 164 255;
-  --accent-dark: #5a38d6;
-  --accent-dark-rgb: 90 56 214;
+  --accent-vivid: #8771ff;
+  --accent-vivid-rgb: 135 113 255;
+  --accent-light: #b1acff;
+  --accent-light-rgb: 177 172 255;
+  --accent-dark: #531fc7;
+  --accent-dark-rgb: 83 31 199;
+  --accent-badge-top: #785fec;
+  --accent-badge-top-rgb: 120 95 236;
+  --accent-badge-bottom: #531fc7;
+  --accent-badge-bottom-rgb: 83 31 199;
   --accent-soft: rgb(var(--accent-rgb) / 0.16);
   --accent-soft-strong: rgb(var(--accent-rgb) / 0.26);
   --accent-border: rgb(var(--accent-rgb) / 0.55);
@@ -218,14 +224,14 @@
 :root[data-theme='light'] {
   color-scheme: light;
 
-  --accent: #5d3fe0;
-  --accent-rgb: 93 63 224;
-  --accent-hover: #7c5cff;
-  --accent-hover-rgb: 124 92 255;
-  --accent-pressed: #4a2cc2;
-  --accent-pressed-rgb: 74 44 194;
-  --accent-text: #4a2cc2;
-  --accent-text-rgb: 74 44 194;
+  --accent: #6740e3;
+  --accent-rgb: 103 64 227;
+  --accent-hover: #7a59fc;
+  --accent-hover-rgb: 122 89 252;
+  --accent-pressed: #531fc7;
+  --accent-pressed-rgb: 83 31 199;
+  --accent-text: #531fc7;
+  --accent-text-rgb: 83 31 199;
   --on-accent: #ffffff;
   --on-accent-rgb: 255 255 255;
 

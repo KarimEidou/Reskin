@@ -890,7 +890,7 @@ describe('EditorSession style recipes', () => {
     (deps.commands.libraryLoad as ReturnType<typeof vi.fn>).mockResolvedValue(project);
     (deps.commands.readProject as ReturnType<typeof vi.fn>).mockResolvedValue(project);
     const s = new EditorSession(deps, new Engine());
-    const designs: [string, () => Promise<void>][] = [
+    const designs: [string, () => Promise<unknown>][] = [
       ['image', () => s.openItems([image('img')])],
       ['project', () => s.openItems([item('p', { kind: 'project', modes: [] })])],
       ['blank', async () => s.newBlank()],
@@ -1343,7 +1343,7 @@ describe('EditorSession Library', () => {
     const { s, deps } = await queued();
     vi.mocked(deps.commands.libraryLoad).mockResolvedValue(project);
     const original = s.original;
-    await s.openLibraryDesign('lib7', 'Neon');
+    expect(await s.openLibraryDesign('lib7', 'Neon')).toBe(true);
     expect(s.item?.id).toBe('a');
     expect(s.original).toBe(original);
     expect(s.engine.doc.meta.name).toBe('Neon');
@@ -1351,6 +1351,20 @@ describe('EditorSession Library', () => {
     expect([s.libraryId, s.libraryName]).toEqual(['lib7', 'Neon']);
     expect(s.unsaved).toBe(false);
     expect(s.engine.canUndo).toBe(false);
+    s.dispose();
+  });
+
+  it('says so when a Library design it was loading went with a reset, and opens nothing', async () => {
+    const { s, deps } = await queued();
+    vi.mocked(deps.commands.libraryLoad).mockResolvedValue(await new Engine().serialize());
+    const release = holdNext(deps.commands.libraryLoad as Mock);
+    const opening = s.openLibraryDesign('lib7', 'Neon');
+    // The editor closed and opened again on another item while it loaded.
+    s.reset();
+    await s.openItems([item('b')], { replace: true });
+    release();
+    expect(await opening).toBe(false);
+    expect([s.item?.id, s.libraryId, s.engine.doc.meta.name]).toEqual(['b', null, 'b']);
     s.dispose();
   });
 });
@@ -1654,7 +1668,7 @@ describe('EditorSession workers', () => {
     onerror: ((ev: ErrorEvent) => void) | null = null;
     terminated = false;
     readonly posted: Array<{ reqId: number; id: string }> = [];
-    constructor() {
+    constructor(readonly url: URL | string) {
       FakeWorker.spawned.push(this);
     }
     postMessage(message: unknown): void {
@@ -1724,6 +1738,20 @@ describe('EditorSession workers', () => {
     reply(1);
     expect(posted.map((m) => m.id)).toEqual(['user', 'thumb']);
     s.dispose();
+  });
+
+  it('starts the encoder with the first unsaved change, so a close right after never waits for it to load', () => {
+    const encoders = () => FakeWorker.spawned.filter((w) => String(w.url).includes('project.worker'));
+    const s = new EditorSession(makeDeps({}, applied), new Engine());
+    s.newBlank();
+    expect(encoders()).toHaveLength(0);
+    // The close's autosave (flushAutosave) finds it running: Clear waits for that save only so long.
+    paint(s);
+    expect(encoders()).toHaveLength(1);
+    paint(s);
+    expect(encoders()).toHaveLength(1);
+    s.dispose();
+    expect(encoders()[0]!.terminated).toBe(true);
   });
 
   it('never starts a worker for a session disposed before using one', async () => {

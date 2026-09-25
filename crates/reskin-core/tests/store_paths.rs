@@ -800,6 +800,17 @@ fn parse_hotkey_disabled_and_rejected() {
         let err = parse_hotkey(bad).unwrap_err().to_string();
         assert!(err.contains("Shift alone"), "{bad:?}: {err}");
     }
+    // A key without a modifier: the message names the modifiers that
+    // would do, Shift only for the function keys.
+    for (bad, advice) in [
+        ("R", "add Ctrl, Alt or Win"),
+        ("Space", "add Ctrl, Alt or Win"),
+        ("F5", "add Ctrl, Alt, Shift or Win"),
+        ("F24", "add Ctrl, Alt, Shift or Win"),
+    ] {
+        let err = parse_hotkey(bad).unwrap_err().to_string();
+        assert!(err.ends_with(&format!(": {advice}")), "{bad:?}: {err}");
+    }
     let err = parse_hotkey("Ctrl+Nope").unwrap_err().to_string();
     assert!(err.contains("Nope"), "{err}");
 }

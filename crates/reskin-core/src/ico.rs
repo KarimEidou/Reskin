@@ -5,12 +5,23 @@
 //! and pick soft-alpha paths the legacy shell renders poorly, so the choice
 //! is explicit here.
 
+use std::io::Read;
+use std::path::Path;
+
 use crate::model::SizedPng;
 use crate::pixels::Rgba;
 
 /// Hard limit on the .ico files Reskin writes (and the elevated helper
 /// accepts).
 pub const MAX_ICO_BYTES: usize = 1024 * 1024;
+
+/// Largest icon Reskin reads, in bytes: an `.ico` file ([`read_ico_file`])
+/// or one rebuilt from a program's icon group
+/// ([`crate::grpicon::rebuild_ico`]). Real icons are far smaller (a 256 px
+/// frame takes 270 KB even as an uncompressed 32-bpp BMP), and it still
+/// holds three frames of [`MAX_FRAME_PX`]. A bigger icon is refused before
+/// it is read or put together.
+pub const MAX_READ_ICO_BYTES: usize = 16 * 1024 * 1024;
 
 /// Largest frame edge [`parse_ico`] decodes, in pixels: the editor's
 /// working size. A frame's own header (BITMAPINFOHEADER or PNG IHDR) sets
@@ -201,6 +212,32 @@ fn check_directory(bytes: &[u8]) -> Result<(), String> {
         return Err("ico: the images claim more data than the file holds".into());
     }
     Ok(())
+}
+
+/// Reads an `.ico` file for [`parse_ico`]. A file over
+/// [`MAX_READ_ICO_BYTES`] is refused by its size, before anything is read
+/// (and so is one that grows past it while it is read).
+pub fn read_ico_file(path: &Path) -> crate::Result<Vec<u8>> {
+    let too_large = || {
+        crate::Error::Unsupported(format!(
+            "{} is larger than the {} MB an icon may have",
+            path.display(),
+            MAX_READ_ICO_BYTES >> 20
+        ))
+    };
+    let file = std::fs::File::open(path)?;
+    let len = file.metadata()?.len();
+    if len > MAX_READ_ICO_BYTES as u64 {
+        return Err(too_large());
+    }
+    // `len` fits: it is at most the limit.
+    let mut bytes = Vec::with_capacity(len as usize);
+    file.take(MAX_READ_ICO_BYTES as u64 + 1)
+        .read_to_end(&mut bytes)?;
+    if bytes.len() > MAX_READ_ICO_BYTES {
+        return Err(too_large());
+    }
+    Ok(bytes)
 }
 
 /// Parses every frame of an .ico (largest first). Frames that fail to

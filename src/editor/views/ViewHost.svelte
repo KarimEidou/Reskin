@@ -2,11 +2,13 @@
   Shows the current view: the Edit workspace (another package's
   <Workspace />), Start, or a lazily loaded page. `data-view-host` marks the
   element the morph staggers and aims the icon at; it also takes focus
-  that a view change takes away.
+  that a view change takes away. It is the page's main landmark, named
+  after the view, so a screen reader landing on it says which view it is.
 -->
 <script lang="ts">
   import { tick, untrack } from 'svelte';
   import Spinner from '$lib/ui/Spinner.svelte';
+  import { stage } from '../workspace/stage.svelte';
   import Workspace from '../workspace/Workspace.svelte';
   import { getShell } from '../chrome/shell.svelte';
   import { getSession } from '../state/context';
@@ -26,6 +28,18 @@
   });
 
   const Lazy = $derived(isLazyView(shown) ? loadedView(shown) : null);
+
+  /** What the view is called (the title bar's names). */
+  const NAMES: Record<Shown, string> = {
+    edit: 'Edit',
+    loading: 'Edit',
+    start: 'Start',
+    library: 'Library',
+    history: 'History',
+    settings: 'Settings',
+    systemIcons: 'System icons',
+    welcome: 'Welcome',
+  };
 
   $effect(() => {
     if (isLazyView(shown)) void loadView(shown);
@@ -48,9 +62,61 @@
       });
     });
   });
+
+  /** What a mouse press focuses: the nearest element that takes focus from a click. */
+  const CLICK_FOCUSABLE = 'a[href], button, input, select, textarea, summary, [tabindex], [contenteditable="true"]';
+
+  /**
+   * A press on empty space of the Edit view — the bars around the canvas,
+   * where nothing takes focus, so the host would — is for the canvas, as it
+   * was before the host took focus: its keys (arrows, Enter, Delete) keep
+   * going to it. So is a press on a disabled control there: it gets no
+   * mousedown, but leaves focus on the host all the same; the canvas takes
+   * it as the press ends. The host's own focus (after a view change) stays
+   * the keyboard's: Delete there clears nothing.
+   */
+  function pressesToCanvas(node: HTMLElement) {
+    /** A press on a disabled control of the Edit view is down. */
+    let disabledPress = false;
+    const onPress = (e: MouseEvent) => {
+      if (shown !== 'edit' || e.button !== 0 || !(e.target instanceof Element)) return;
+      if (e.target.closest(CLICK_FOCUSABLE) !== node) return;
+      e.preventDefault();
+      stage.focusCanvas({ pointer: true });
+    };
+    const onPointerDown = (e: PointerEvent) => {
+      disabledPress = shown === 'edit' && e.button === 0 && e.target instanceof Element && e.target.closest(':disabled') !== null;
+    };
+    const onPointerUp = () => {
+      if (disabledPress && shown === 'edit' && document.activeElement === node) stage.focusCanvas({ pointer: true });
+      disabledPress = false;
+    };
+    const onPointerCancel = () => {
+      disabledPress = false;
+    };
+    node.addEventListener('mousedown', onPress);
+    node.addEventListener('pointerdown', onPointerDown, true);
+    window.addEventListener('pointerup', onPointerUp, true);
+    window.addEventListener('pointercancel', onPointerCancel, true);
+    return () => {
+      node.removeEventListener('mousedown', onPress);
+      node.removeEventListener('pointerdown', onPointerDown, true);
+      window.removeEventListener('pointerup', onPointerUp, true);
+      window.removeEventListener('pointercancel', onPointerCancel, true);
+    };
+  }
 </script>
 
-<div class="view-host" data-view-host data-view={shown} tabindex="-1" bind:this={host}>
+<div
+  class="view-host"
+  role="main"
+  aria-label={NAMES[shown]}
+  data-view-host
+  data-view={shown}
+  tabindex="-1"
+  bind:this={host}
+  {@attach pressesToCanvas}
+>
   {#if shown === 'edit'}
     <Workspace />
   {:else if shown === 'start'}

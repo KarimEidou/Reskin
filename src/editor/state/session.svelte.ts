@@ -374,7 +374,11 @@ export class EditorSession {
     return this.panelsClient;
   }
 
-  /** .reskin serialization off the main thread; starts on first use, ends with the session. */
+  /**
+   * .reskin serialization off the main thread; starts on first use — at
+   * the latest with the first unsaved change (see `onEngineEvent`) — and
+   * ends with the session.
+   */
   private get encoder(): ProjectEncoder {
     if (!this.encoderClient) {
       this.encoderClient = new ProjectEncoder(this.disposed ? { worker: false } : {});
@@ -521,6 +525,10 @@ export class EditorSession {
       this.followHistory();
       // Every change to a design is a history step (a load clears the history).
       if (this.hasDesign) this.autosaver.schedule();
+      // Unsaved work is encoded before long — by its autosave, or by the
+      // close's flush, which Clear waits for only so long: the encoder's
+      // worker loads now, not in the middle of that close.
+      if (this.unsaved) void this.encoder;
     }
   }
 
@@ -1512,13 +1520,14 @@ export class EditorSession {
   /**
    * Opens a Library design in place of the open one (named after its
    * entry). The current item keeps its target; saving updates that
-   * Library design.
+   * Library design. False when it was not opened: the editor closed and
+   * opened again while it loaded.
    */
-  async openLibraryDesign(id: string, name?: string): Promise<void> {
+  async openLibraryDesign(id: string, name?: string): Promise<boolean> {
     const generation = this.generation;
     const doc = await deserializeProject(await this.deps.commands.libraryLoad(id));
     // The editor closed and opened again meanwhile: not for the next open.
-    if (generation !== this.generation) return;
+    if (generation !== this.generation) return false;
     await this.replaceDesign(async () => {
       this.engine.loadDocument(doc);
       if (name) this.engine.setDocumentName(name);
@@ -1527,6 +1536,7 @@ export class EditorSession {
       this.loaded({ library: { id, name: this.engine.doc.meta.name } });
     });
     this.view = 'edit';
+    return true;
   }
 
   /** A Library design was deleted: saving no longer updates it. */

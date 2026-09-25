@@ -18,8 +18,11 @@ export interface StageController {
   setZoom(zoom: number): void;
   /** The document's rectangle in client (page) CSS px. */
   docRect(): DOMRect | null;
-  /** Keyboard focus to the canvas. */
-  focus(): void;
+  /**
+   * Keyboard focus to the canvas. `pointer`: for a press of the pointer,
+   * so no focus ring shows (the ring is for keyboard focus).
+   */
+  focus(pointer?: boolean): void;
   /**
    * Shows a still picture of the canvas instead of the canvas until the
    * returned function is called (see `StageState.hold`); resolves once the
@@ -87,8 +90,8 @@ class StageState {
     return this.controller?.docRect() ?? null;
   }
 
-  focusCanvas(): void {
-    this.controller?.focus();
+  focusCanvas(opts: { pointer?: boolean } = {}): void {
+    this.controller?.focus(opts.pointer);
   }
 
   /**
