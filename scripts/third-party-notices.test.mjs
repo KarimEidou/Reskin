@@ -8,6 +8,7 @@ import {
   cleanText,
   licenseFiles,
   linkedCrates,
+  nativeLibraries,
   npmComponents,
   renderNotices,
   sharedTexts,
@@ -106,6 +107,35 @@ describe('Rust crates', () => {
     assert.deepEqual(
       crates.map((c) => [c.name, c.url, c.files.map((f) => f.slice(dir.length + 1))]),
       [['serde', 'https://github.com/example/serde', [join('serde', 'LICENSE-MIT')]]],
+    );
+  });
+});
+
+describe('native libraries', () => {
+  const crates = [
+    component({ name: 'webview2-com', version: '0.38.2' }),
+    component({ name: 'webview2-com-sys', version: '0.38.2' }),
+  ];
+
+  it('adds the WebView2 SDK and its license on msvc, where its loader is linked statically', () => {
+    const native = nativeLibraries(crates, 'x86_64-pc-windows-msvc');
+    assert.deepEqual(
+      native.map((c) => [c.name, c.version, c.license, c.url]),
+      [['Microsoft.Web.WebView2', '1.0.3650.58', 'BSD-3-Clause', 'https://www.nuget.org/packages/Microsoft.Web.WebView2/1.0.3650.58']],
+    );
+    const [text] = textsOf(/** @type {import('./third-party-notices.mjs').Component} */ (native[0]), new Map());
+    assert.match(text ?? '', /^Copyright \(C\) Microsoft Corporation\. All rights reserved\.\n\nRedistribution and use/);
+  });
+
+  it('adds nothing where the loader is a DLL or not linked at all', () => {
+    assert.deepEqual(nativeLibraries(crates, 'x86_64-pc-windows-gnu'), []);
+    assert.deepEqual(nativeLibraries([component({ name: 'serde' })], 'x86_64-pc-windows-msvc'), []);
+  });
+
+  it('refuses a webview2-com-sys whose SDK it has not checked', () => {
+    assert.throws(
+      () => nativeLibraries([component({ name: 'webview2-com-sys', version: '0.39.0' })], 'x86_64-pc-windows-msvc'),
+      /webview2-com-sys 0\.39\.0 ships a WebView2 SDK this script doesn't know/,
     );
   });
 });

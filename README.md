@@ -104,10 +104,10 @@ touches anything and offers the personal copy for shortcuts.
   morph or crossfade when the editor opens, and whether the new icon flies
   to the desktop.
 - **Behaviour:** the global shortcut (a key with Ctrl, Alt or Win; F1–F24
-  also alone), start with Windows, Explorer context-menu entry *Reskin this
-  icon*, hide the box during full-screen apps (**Show box** in the tray
-  brings it back over one), also update matching Start-menu and taskbar-pin
-  shortcuts (undone together with the icon), sounds.
+  also with just Shift), start with Windows, Explorer context-menu entry
+  *Reskin this icon*, hide the box during full-screen apps (**Show box** in
+  the tray brings it back over one), also update matching Start-menu and
+  taskbar-pin shortcuts (undone together with the icon), sounds.
 - **Advanced:** compatibility mode (opaque windows for remote desktop or
   unusual graphics drivers), low-memory mode (closes the editor completely
   when you're done), refresh desktop icons (or rebuild the icon cache), the
@@ -127,6 +127,22 @@ touches anything and offers the personal copy for shortcuts.
   their icons (if it can't, it changes nothing and exits with 3). An item
   you have deleted since counts as restored: nothing of it is left to put
   back.
+
+Reskin is a windowed program, so a terminal doesn't wait for it to finish
+(a `.cmd` script does). To wait for `--restore-all` and see its exit code,
+run it from the folder that holds `reskin.exe` (`%LOCALAPPDATA%\Reskin` when
+installed with the setup). In Command Prompt:
+
+```bat
+start /wait reskin.exe --restore-all
+echo %ERRORLEVEL%
+```
+
+In PowerShell:
+
+```powershell
+(Start-Process .\reskin.exe -ArgumentList '--restore-all' -Wait -PassThru).ExitCode
+```
 
 ### Uninstalling
 
@@ -194,7 +210,11 @@ pnpm bindings; git diff --exit-code            # the IPC types are up to date
 `pnpm docs:screenshots` renders the pictures in this README from the app's
 pages. Helper modes: `reskin.exe --self-test` prints a JSON health report,
 `--smoke-test [--capture-handoff]` exercises the packaged app end to end,
-`--restore-all [--quiet]` puts every icon back.
+`--restore-all [--quiet]` puts every icon back. A release build is a
+windowed program that a terminal doesn't wait for: run
+`.\reskin.exe --self-test | Out-String` in PowerShell or
+`start /wait reskin.exe --self-test` in Command Prompt to see the report
+(and `--restore-all` as in [Restoring icons](#restoring-icons)).
 
 ## How it's built
 

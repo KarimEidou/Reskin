@@ -34,6 +34,18 @@ describe('parseHotkey', () => {
     expect(canonicalHotkey('Ctrl+Bogus', 'Ctrl+Alt+Shift+R')).toBe('Ctrl+Alt+Shift+R');
   });
 
+  it('needs Ctrl, Alt or Win, or for F1–F24 at least Shift', () => {
+    expect(parseHotkey('Q').ok).toBe(false);
+    expect(parseHotkey('Shift+Q')).toEqual({ ok: false, error: "Add Ctrl, Alt or Win (Shift alone isn't enough)" });
+    expect(parseHotkey('F9').ok).toBe(false);
+    expect(parseHotkey('Shift+F9')).toEqual({
+      ok: true,
+      hotkey: { ctrl: false, alt: false, shift: true, win: false, key: 'F9' },
+    });
+    expect(canonicalHotkey('shift+f24', '')).toBe('Shift+F24');
+    expect(canonicalHotkey('Alt+Q', '')).toBe('Alt+Q');
+  });
+
   it('builds hotkeys from key events', () => {
     expect(
       hotkeyFromEvent({ code: 'KeyR', ctrlKey: true, altKey: true, shiftKey: false, metaKey: false }),

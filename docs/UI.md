@@ -166,9 +166,9 @@ The visual and interaction contract for the box and the editor. Tokens live in
   grid), About (version, build, Releases link, MIT license, and "Open-source
   licenses": a dialog, loaded when first opened, with the third-party
   notices shipped in the app). The hotkey recorder takes one key with Ctrl,
-  Alt or Win (F1–F24 also alone); a saved hotkey Windows won't register
-  (another app holds it) shows a warning under the recorder, and recording
-  it again retries it. The accent swatch follows Windows live.
+  Alt or Win (F1–F24 also with just Shift); a saved hotkey Windows won't
+  register (another app holds it) shows a warning under the recorder, and
+  recording it again retries it. The accent swatch follows Windows live.
 
 ## Dialogs & overlays
 
