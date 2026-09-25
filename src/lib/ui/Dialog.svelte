@@ -1,7 +1,9 @@
 <!--
   Modal dialog on the native <dialog> (inert background, top layer) with an
   explicit Tab focus trap, Escape / backdrop dismissal (when `dismissible`)
-  and focus restored to the previously focused element on close.
+  and focus restored to the previously focused element on close. A backdrop
+  click right after it opened is the rest of the click that opened it (a
+  double-click), not an answer: it is ignored.
     <Dialog bind:open title="Restore all icons?" description="…">
       …body…
       {#snippet footer()}<Button onclick={…}>Cancel</Button>…{/snippet}
@@ -36,9 +38,14 @@
     footer,
   }: Props = $props();
 
+  /** How long after opening a backdrop click is still part of the click that opened it. */
+  const BACKDROP_GRACE_MS = 300;
+
   const id = $props.id();
   let dialog: HTMLDialogElement | undefined = $state();
   let restoreFocus: HTMLElement | null = null;
+  /** When it last opened (`performance.now()`, as event time stamps). */
+  let openedAt = -Infinity;
 
   function close(): void {
     if (!open) return;
@@ -52,6 +59,7 @@
     if (open && !el.open) {
       restoreFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null;
       el.showModal();
+      openedAt = performance.now();
       const first = focusableIn(el.querySelector('.body') ?? el)[0] ?? focusableIn(el)[0];
       first?.focus();
     } else if (!open && el.open) {
@@ -72,7 +80,7 @@
     const onClick = (e: MouseEvent) => {
       // The panel fills the dialog box, so a click whose target is the
       // <dialog> element itself landed on the ::backdrop.
-      if (dismissible && e.target === node) close();
+      if (dismissible && e.target === node && e.timeStamp - openedAt >= BACKDROP_GRACE_MS) close();
     };
     node.addEventListener('cancel', onCancel);
     node.addEventListener('keydown', onKey);

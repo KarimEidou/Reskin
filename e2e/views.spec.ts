@@ -19,7 +19,6 @@ import {
   simulateClose,
   simulateOpen,
   test,
-  waitForAck,
   waitForCall,
 } from './support/fixtures';
 
@@ -394,6 +393,42 @@ test.describe('library', () => {
     expect(apply.args.req).toMatchObject({ designName: 'Mono', mode: 'inPlace' });
   });
 
+  test('an Apply whose design was still loading as the editor closed and opened again applies nothing', async ({ openEditor, page }) => {
+    await openEditor({ applyCollapses: false });
+    await simulateOpen(page, [SAMPLE_PATHS.notes], 'edit');
+    await hasDesign(page);
+    await page.evaluate(() => (window as unknown as Win).__reskinSession.saveToLibrary('Mono'));
+    await titleBar(page).getByRole('button', { name: 'Library' }).click();
+    // The design is held on its way in until the test lets it go.
+    type Held = { __releaseLoad?: () => void; __loadAsked?: boolean };
+    await page.evaluate(() => {
+      type Invoke = (cmd: string, args?: unknown, opts?: unknown) => Promise<unknown>;
+      const w = window as unknown as Held & { __TAURI_INTERNALS__: { invoke: Invoke } };
+      const inner = w.__TAURI_INTERNALS__.invoke;
+      const held = new Promise<void>((r) => (w.__releaseLoad = r));
+      w.__TAURI_INTERNALS__.invoke = (cmd, args, opts) => {
+        if (cmd !== 'library_load') return inner(cmd, args, opts);
+        w.__loadAsked = true;
+        return held.then(() => inner(cmd, args, opts));
+      };
+    });
+    const card = page.getByTestId('library-card');
+    await card.getByRole('button', { name: 'More actions for Mono' }).click();
+    await page.getByRole('menuitem', { name: 'Apply to “Notes”' }).click();
+    await page.waitForFunction(() => (window as unknown as Held).__loadAsked === true);
+    // Rust closes the editor (the hotkey) and opens it on another item.
+    await simulateClose(page);
+    await simulateOpen(page, [SAMPLE_PATHS.steam], 'edit');
+    await hasDesign(page);
+    await page.evaluate(() => (window as unknown as Held).__releaseLoad!());
+    await waitForCall(page, 'library_load');
+    // Mono is not Steam's design now: nothing is applied, to Steam or Notes.
+    await page.waitForTimeout(500);
+    expect(await calls(page, 'apply_icon')).toEqual([]);
+    expect(await queueNames(page)).toEqual(['Steam']);
+    expect(await page.evaluate(() => (window as unknown as Win).__reskinSession.engine.doc.meta.name)).toBe('Steam');
+  });
+
   test('Open asks before replacing unsaved changes; the design saves over its Library design, or as a new one', async ({ openEditor, page }) => {
     await openEditor();
     await simulateOpen(page, [SAMPLE_PATHS.steam], 'edit');
@@ -560,9 +595,12 @@ test.describe('settings', () => {
     await page.keyboard.press('Shift+R');
     await expect(view.getByTestId('hotkey-error')).toContainText("Shift alone isn't enough");
     expect(await calls(page, 'settings_set')).toHaveLength(0);
-    // A bare key is refused too.
+    // A bare key is refused too, without suggesting Shift — unless it is a
+    // function key, which Shift alone will do for.
     await page.keyboard.press('R');
-    await expect(view.getByTestId('hotkey-error')).toContainText('Add at least one of Ctrl, Alt, Shift or Win');
+    await expect(view.getByTestId('hotkey-error')).toHaveText('Add Ctrl, Alt or Win');
+    await page.keyboard.press('F9');
+    await expect(view.getByTestId('hotkey-error')).toHaveText('Add Ctrl, Alt, Shift or Win');
     // A valid one is saved canonically; Ctrl+K is recorded, not the palette.
     await page.keyboard.press('Control+Alt+K');
     const set = await waitForCall(page, 'settings_set');
@@ -666,6 +704,28 @@ test.describe('closing over unsaved work', () => {
     expect(await unsavedWork(page)).toEqual({ view: 'start', open: null, unsaved: false, queue: [] });
   });
 
+  test('a double-clicked ✕ asks and waits for the answer; a later click beside the question dismisses it', async ({ openEditor, page }) => {
+    await openEditor();
+    await simulateOpen(page, [SAMPLE_PATHS.steam], 'edit');
+    await hasDesign(page);
+    await paint(page);
+    const close = (await page.getByRole('button', { name: 'Close editor' }).boundingBox())!;
+    const at = { x: close.x + close.width / 2, y: close.y + close.height / 2 };
+    // The second click lands on the question's backdrop, where the ✕ was.
+    await page.mouse.dblclick(at.x, at.y);
+    const question = closeQuestion(page);
+    await expect(question).toBeVisible();
+    await page.waitForTimeout(400);
+    await expect(question).toBeVisible();
+    expect(await calls(page, 'editor_close')).toHaveLength(0);
+    // Once it has been up a moment, a click beside it is an answer: Cancel.
+    await page.mouse.click(at.x, at.y);
+    await expect(question).toBeHidden();
+    await page.waitForTimeout(150);
+    expect(await calls(page, 'editor_close')).toHaveLength(0);
+    expect((await editorState(page)).phase).toBe('open');
+  });
+
   test('a close without unsaved work asks nothing', async ({ openEditor, page }) => {
     await openEditor();
     await simulateOpen(page, [SAMPLE_PATHS.steam], 'edit');
@@ -760,32 +820,49 @@ test.describe('autosave', () => {
 
   test("the editor is cleared (and may be destroyed) only once that close's autosave went out", async ({ openEditor, page }) => {
     await openEditor();
-    const { session } = await simulateOpen(page, [SAMPLE_PATHS.steam], 'edit');
+    await simulateOpen(page, [SAMPLE_PATHS.steam], 'edit');
     await hasDesign(page);
+    // An earlier autosave went out (so the encoder is up: how long its
+    // worker takes to load on a busy machine is not what this measures),
+    // and the design changed again since.
     await paint(page);
-    // The autosave is held until the test lets it go.
-    type Held = { __releaseSave?: () => void; __releasedAt?: number };
+    await page.evaluate(() => (window as unknown as Win).__reskinSession.flushAutosave());
+    // The close's autosave is held until the Clear step is under way, and
+    // let go 100 ms into it, well within the step's time box. The page
+    // lets it go on its own clock: the test's round trips (slow on a busy
+    // machine) must not decide whether that is in time. The change comes
+    // with the hold, so its scheduled autosave is held too.
+    type Held = { __clearingAt?: number };
     await page.evaluate(() => {
       type Invoke = (cmd: string, args?: unknown, opts?: unknown) => Promise<unknown>;
-      const w = window as unknown as Held & { __TAURI_INTERNALS__: { invoke: Invoke } };
+      const w = window as unknown as Held & Win & { __TAURI_INTERNALS__: { invoke: Invoke } };
       const inner = w.__TAURI_INTERNALS__.invoke;
-      const held = new Promise<void>((r) => (w.__releaseSave = r));
+      let release!: () => void;
+      const held = new Promise<void>((r) => (release = r));
       w.__TAURI_INTERNALS__.invoke = (cmd, args, opts) => (cmd === 'autosave' ? held.then(() => inner(cmd, args, opts)) : inner(cmd, args, opts));
+      const root = document.documentElement;
+      new MutationObserver((_, observer) => {
+        if (root.dataset.phase !== 'clearing') return;
+        observer.disconnect();
+        w.__clearingAt = performance.now();
+        setTimeout(release, 100);
+      }).observe(root, { attributes: true, attributeFilter: ['data-phase'] });
+      const { engine } = w.__reskinSession;
+      engine.editLayerPixels(engine.activeLayer.id, 'Paint', (surface) => surface.data.fill(90));
     });
-    const closing = simulateClose(page, 'hide', { morph: false });
-    expect(await waitForAck(page, session, 'collapsed')).toBe(true);
-    await page.waitForTimeout(100);
-    await page.evaluate(() => {
-      const w = window as Held;
-      w.__releasedAt = performance.now();
-      w.__releaseSave!();
-    });
-    expect((await closing).timedOut).toEqual([]);
-    const [releasedAt, cleared] = await page.evaluate(() => [
-      (window as Held).__releasedAt!,
+    expect((await simulateClose(page, 'hide', { morph: false })).timedOut).toEqual([]);
+    const [clearingAt, cleared] = await page.evaluate(() => [
+      (window as Held).__clearingAt!,
       window.__e2e!.acks.find((a) => a.stage === 'cleared')!.t,
     ]);
-    expect(cleared).toBeGreaterThanOrEqual(releasedAt);
+    const saves = await calls(page, 'autosave');
+    expect(saves).toHaveLength(2);
+    const saved = saves[1]!;
+    // The close's save reached the backend during the Clear step, and only
+    // then was the editor cleared.
+    expect(saved.t).toBeGreaterThan(clearingAt);
+    expect(cleared).toBeGreaterThanOrEqual(saved.t);
+    expect(JSON.parse(saved.args.data as string).meta.source.path).toBe(SAMPLE_PATHS.steam);
     expect(JSON.parse((await liveDraft(page))!).meta.source.path).toBe(SAMPLE_PATHS.steam);
   });
 

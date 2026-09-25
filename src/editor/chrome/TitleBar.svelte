@@ -341,7 +341,7 @@
     border: 1px solid var(--control-border);
     border-radius: var(--radius-md);
     background: var(--control-fill);
-    color: var(--text-3);
+    color: var(--text-2);
     font-size: var(--text-sm);
     box-shadow: var(--inset-highlight);
     transition:
@@ -350,7 +350,7 @@
   }
   .search:hover {
     background: var(--control-fill-hover);
-    color: var(--text-2);
+    color: var(--text);
   }
   .search:focus-visible {
     outline: var(--focus-width) solid var(--focus-color);

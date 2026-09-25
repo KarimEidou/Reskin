@@ -7,7 +7,7 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 import { accentRamp, contrast, parseHex, rgbToOklch, toHex, type Rgb } from './color';
-import { accentVars, BRAND_ACCENT } from './theme';
+import { accentVars, BRAND_ACCENT, MAX_ACCENT_TINT } from './theme';
 
 const css = readFileSync(join(dirname(fileURLToPath(import.meta.url)), 'tokens.css'), 'utf8');
 
@@ -84,10 +84,11 @@ describe('text tokens', () => {
     });
 
     it(`keep 4.5:1 inside controls (${theme})`, () => {
-      const controls = Object.fromEntries(
-        Object.entries(backgrounds(theme)).map(([name, bg]) => [`a control on ${name}`, over(tokens['control-fill']!, bg)]),
-      );
-      expect(below(4.5, texts(['text', 'text-2', 'text-3']), controls)).toEqual([]);
+      const controls = (fill: string) =>
+        Object.fromEntries(Object.entries(backgrounds(theme)).map(([name, bg]) => [`${fill} on ${name}`, over(tokens[fill]!, bg)]));
+      expect(below(4.5, texts(['text', 'text-2', 'text-3']), controls('control-fill'))).toEqual([]);
+      // Hovered, a control's muted text is --text-2 (the title bar's search: --text-2, --text on hover).
+      expect(below(4.5, texts(['text', 'text-2']), controls('control-fill-hover'))).toEqual([]);
     });
   }
 
@@ -114,6 +115,21 @@ const ACCENTS = [
   BRAND_ACCENT, '#FFFFFF', '#000000',
 ];
 
+/** The accent tints accent text is drawn on (selected rows and tabs, soft badges), by token. */
+const TINTS = ['surface-selected', 'accent-soft', 'accent-soft-strong'];
+
+/** The alpha of an accent tint token (`rgb(var(--accent-rgb) / a)`). */
+function tintAlpha(value: string): number {
+  const m = /^rgb\(var\(--accent-rgb\) \/ ([\d.]+)\)$/.exec(value);
+  expect(m, `an accent tint: ${value}`).not.toBeNull();
+  return Number(m![1]);
+}
+
+/** `a` → `b` in `steps` equal steps, mixed as a CSS gradient of hex colours mixes them (sRGB). */
+function gradient(a: Rgb, b: Rgb, steps = 10): Rgb[] {
+  return Array.from({ length: steps + 1 }, (_, i) => over(`rgb(${a.r} ${a.g} ${a.b} / ${i / steps})`, b));
+}
+
 describe('accent colours', () => {
   for (const variant of Object.keys(THEMES) as Array<keyof typeof THEMES>) {
     it(`stand out from every surface and the panel, whatever the Windows accent (${variant})`, () => {
@@ -130,6 +146,48 @@ describe('accent colours', () => {
           'text on the fill': contrast(color('on-accent'), color('accent')) >= 4.5,
         };
         for (const [what, ok] of Object.entries(checks)) if (!ok) failures.push(`${accent}: ${what}`);
+      }
+      expect(failures).toEqual([]);
+    });
+
+    it(`keep accent text legible on the accent's tints of every surface and the panel (${variant})`, () => {
+      const theme = variant.startsWith('dark') ? 'dark' : 'light';
+      const tokens = THEMES[variant];
+      const failures: string[] = [];
+      for (const accent of ACCENTS) {
+        const vars = accentVars(parseHex(accent)!, theme);
+        const fill = parseHex(vars['--accent']!)!;
+        const text = { '--accent-text': parseHex(vars['--accent-text']!)! };
+        for (const tint of TINTS) {
+          const alpha = tintAlpha(tokens[tint]!);
+          // theme.ts keeps the text legible on tints up to this strong.
+          expect(alpha, `--${tint}`).toBeLessThanOrEqual(MAX_ACCENT_TINT);
+          const tinted = Object.fromEntries(
+            Object.entries(backgrounds(variant)).map(([name, bg]) => [`--${tint} on ${name}`, over(`rgb(${fill.r} ${fill.g} ${fill.b} / ${alpha})`, bg)]),
+          );
+          failures.push(...below(4.5, text, tinted).map((f) => `${accent}: ${f}`));
+        }
+      }
+      expect(failures).toEqual([]);
+    });
+  }
+
+  for (const theme of ['dark', 'light'] as const) {
+    it(`keep text on the fill legible on hover and pressed, and across a gradient between them (${theme})`, () => {
+      const failures: string[] = [];
+      for (const accent of ACCENTS) {
+        const vars = accentVars(parseHex(accent)!, theme);
+        const color = (name: string) => parseHex(vars[`--${name}`]!)!;
+        const on = { '--on-accent': color('on-accent') };
+        const fills = ['accent', 'accent-hover', 'accent-pressed'];
+        // Save & Apply shades from one fill to another (resting: fill → pressed; hover: hover → fill).
+        const shades: Record<string, Rgb> = {};
+        fills.forEach((a, i) => {
+          for (const b of fills.slice(i + 1)) {
+            gradient(color(a), color(b)).forEach((c, step) => (shades[`--${a} → --${b} at ${step * 10}%`] = c));
+          }
+        });
+        failures.push(...below(4.5, on, shades).map((f) => `${accent}: ${f}`));
       }
       expect(failures).toEqual([]);
     });
@@ -151,6 +209,18 @@ describe('accent colours', () => {
       }
     });
   }
+
+  it('before boot, are what theme.ts derives from the brand accent', () => {
+    const fallbacks = { dark: rule(':root'), light: rule(":root[data-theme='light']") };
+    for (const theme of ['dark', 'light'] as const) {
+      const vars = accentVars(parseHex(BRAND_ACCENT)!, theme);
+      const set = fallbacks[theme];
+      const written = Object.keys(vars).filter((name) => set[name.slice(2)] !== undefined);
+      // Dark writes them all; light the ones that differ in it.
+      expect(written.length, theme).toBe(theme === 'dark' ? Object.keys(vars).length : 10);
+      for (const name of written) expect(set[name.slice(2)], `${name} (${theme})`).toBe(vars[name]);
+    }
+  });
 
   it('leaves accents that stand out as they are', () => {
     // Windows' default blue keeps its ramp's shades.

@@ -176,7 +176,7 @@
       checkerSize: 8,
       grid: light ? 'rgba(20, 22, 30, 0.16)' : 'rgba(255, 255, 255, 0.12)',
       keyline: 'rgba(31, 200, 227, 0.85)',
-      divider: v('--accent', '#9a82ff'),
+      divider: v('--accent', '#9587ff'),
       handleFill: '#ffffff',
     };
   }
@@ -249,7 +249,11 @@
       const s = viewport.scale;
       return new DOMRect(r.left + viewport.panX, r.top + viewport.panY, engine.doc.width * s, engine.doc.height * s);
     },
-    focus: () => canvas?.focus({ preventScroll: true }),
+    focus: (pointer?: boolean) => {
+      if (!canvas) return;
+      if (pointer) focusForPointer(canvas);
+      else canvas.focus({ preventScroll: true });
+    },
   };
 
   // ---- pointer input ----------------------------------------------------------------

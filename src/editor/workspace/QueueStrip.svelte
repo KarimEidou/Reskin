@@ -4,12 +4,14 @@
   did not go through and the item's notes. Click switches the design (each
   item keeps its own), × removes an item — both wait while a job runs or
   an item loads (the session's queue lock, shared with the title bar's
-  queue menu); removing an item with unsaved changes asks first. The strip
+  queue menu); removing an item with unsaved changes asks first, and focus
+  on its × moves to the thumbnail taking its place. The strip
   scrolls sideways (the mouse wheel too) and keeps the current item in
   view. "Apply style to all" replays the current item's recipe on every
   other queued icon (each on its own icon) and applies it.
 -->
 <script lang="ts">
+  import { tick } from 'svelte';
   import CircleAlert from '@lucide/svelte/icons/circle-alert';
   import CircleCheck from '@lucide/svelte/icons/circle-check';
   import Layers2 from '@lucide/svelte/icons/layers-2';
@@ -21,6 +23,7 @@
   import { confirm } from '../dialogs/confirm.svelte';
   import { errorText, type QueueEntry, type QueueStatus } from '../state/session.svelte';
   import { getSession } from '../state/context';
+  import { stage } from './stage.svelte';
 
   const session = getSession();
 
@@ -78,13 +81,30 @@
       danger: true,
     };
     if (unsaved && !(await confirm(question))) return;
-    try {
-      // Found again: the queue may have changed while the question was open
-      // (gone, or locked by a job: the session refuses then).
-      await session.remove(session.queue.indexOf(entry));
-    } catch (e) {
+    // Found again: the queue may have changed while the question was open
+    // (gone, or locked by a job: the session refuses then).
+    const at = session.queue.indexOf(entry);
+    // The session takes the item out at once; opening the next design may take a while.
+    const removing = session.remove(at).catch((e: unknown) => {
       toast({ message: `Could not switch icons: ${errorText(e)}`, kind: 'error' });
-    }
+    });
+    if (at >= 0 && !session.queue.includes(entry)) await keepFocus(at);
+    await removing;
+  }
+
+  /**
+   * Focus went with a removed item's ×: it moves to the thumbnail now in
+   * its place (the next item's), else the previous one's, else the canvas
+   * — never <body>. Focus the user moved elsewhere meanwhile stays.
+   */
+  async function keepFocus(at: number): Promise<void> {
+    await tick();
+    const active = document.activeElement;
+    if (active !== null && active !== document.body) return;
+    const neighbour = list?.children[Math.min(at, session.queue.length - 1)];
+    const thumb = neighbour?.querySelector<HTMLElement>('.thumb');
+    if (thumb) thumb.focus();
+    else stage.focusCanvas();
   }
 
   /** The list's padding (see .items): room for the edge items' remove buttons, badges and focus rings. */

@@ -196,12 +196,13 @@ export class Shell {
 
   /**
    * Opens a Library design in place of the open one, asking first when
-   * that has unsaved changes. False when the user kept the open design.
+   * that has unsaved changes. True once it is the open design; false when
+   * the user kept the open design, or the editor closed and opened again
+   * while it loaded (the new open does not get it).
    */
   async openLibraryDesign(entry: LibraryEntry): Promise<boolean> {
     if (!(await this.confirmReplace(`Open "${entry.name}"?`, 'Open'))) return false;
-    await this.session.openLibraryDesign(entry.id, entry.name);
-    return true;
+    return this.session.openLibraryDesign(entry.id, entry.name);
   }
 
   /** Re-reads the autosave offered for recovery. */
