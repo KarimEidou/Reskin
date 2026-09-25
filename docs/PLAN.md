@@ -50,7 +50,9 @@ Once Windows CI is green, v1.0.0 is published as a GitHub Release by pushing a `
     Replaces `data-tauri-drag-region` (eats mouseup, toggles maximize on double-click).
 - **Editor command mailbox**: Rust→editor commands go through a sequence-numbered long-poll `invoke('editor_next', {after})`
   with a 25 s heartbeat, not events (events to hidden-created windows can be dropped, tauri#15652). The box uses normal events.
-- **One STA COM worker thread** with a message pump runs all shell work. Commands are `async` and never run COM on the main thread.
+- **One STA COM worker thread** with a message pump runs all shell work. Commands that use COM or read or write files (a log
+  line aside) are `async` and do that work off the main thread (Tauri runs synchronous commands there, where both windows and
+  the handoff run).
 - **Security**: JS gets opaque `ItemId`s from `inspect_paths`; Rust keeps `ItemId → path`. Mutating commands never accept raw
   paths. Capabilities split per window (`capabilities/box.json`, `capabilities/editor.json`); app-command permissions from
   `build.rs` via `AppManifest::commands`. Strict CSP: `default-src 'self'`, `img-src 'self' data: blob:`,
@@ -141,6 +143,9 @@ holds is flagged in Settings.
   `LoadLibraryExW(AS_DATAFILE|AS_IMAGE_RESOURCE)`; (c) `IShellItemImageFactory::GetImage(256, ICONONLY|BIGGERSIZEOK)` →
   `GetDIBits`, premultiplied check (straight if any r,g,b > a), alpha-bbox normalisation (small icons in the corner of a 256
   canvas). `.lnk` details: raw path, IDList, IconLocation, expand `%vars%`. Writability probed with `CreateFileW(GENERIC_WRITE)`.
+  Icon data is untrusted: sizes are checked before anything is allocated for them (`.ico` files and rebuilt groups ≤ 16 MiB,
+  a group ≤ 256 entries with each image copied once, an `.ico`'s directory within the file, decoded frames ≤ 1024 px, the
+  PNGs the editor sends ≤ 4096 px).
 - **ICO build:** sizes `[16,20,24,32,40,48,60,64,72,96,128,256]`; BMP below 256, PNG for 256.
 - **Apply:** `.lnk`: `IPersistFile::Load(STGM_READWRITE)` → `IShellLinkW::SetIconLocation` → `Save`. `.url`:
   `CLSID_InternetShortcut` via `IPropertySetStorage`/`FMTID_Intshcut` `PID_IS_ICONFILE`/`ICONINDEX` (handles
@@ -163,7 +168,8 @@ holds is flagged in Settings.
 - **Desktop icon lookup:** `ShellWindows.FindWindowSW(CSIDL_DESKTOP, SWC_DESKTOP)` → `QueryService(SID_STopLevelBrowser)` →
   `QueryActiveShellView` → `IFolderView2`; match by `SHGDN_FORPARSING`; `GetItemPosition` (relative to `SysListView32`) +
   `MapWindowPoints`; icon size; `FWF_NOICONS`; z-order walk for occlusion (skip own, hidden, minimized, cloaked windows).
-- **CLI:** in `main()` before the builder: `--elevated-apply <job>` (exit 0/2/3), `--restore-all [--quiet]`, `--self-test` (JSON).
+- **CLI:** in `main()` before the builder: `--elevated-apply <job>` (exit 0/2/3), `--restore-all [--quiet]`, `--self-test` (JSON;
+  to be run without administrator rights: as administrator it only reads, reports a failed `elevation` check and exits 1).
   In-app: `--edit <path>` (context-menu verb, forwarded by single-instance), `--autostart`, `--smoke-test [--capture-handoff]`.
   Started "as administrator", the app starts itself again unelevated through Explorer (`IShellDispatch2::ShellExecute`,
   marked `--relaunched`) and exits; if that fails it warns and carries on. `--restore-all` with an administrator's full token
@@ -184,13 +190,16 @@ holds is flagged in Settings.
   x86_64-pc-windows-msvc -- -D warnings` (pnpm build first).
 - `ci.yml`: web (ubuntu), rust-core (ubuntu, incl. msvc-target clippy + ts-rs bindings diff), windows (windows-latest: build,
   clippy, `cargo test --workspace -- --include-ignored`, ensure-webview2, `pnpm tauri build`, `--smoke-test --capture-handoff`,
-  installer round-trip, upload artifacts).
+  installer round-trip, upload artifacts). A smoke run passes only with exit code 0 *and* `smoke: finished with exit code 0`
+  in `%TEMP%\reskin.log`, in case the exit code is lost (Tauri drops it on Windows; `exit_with` works around that).
 - `release.yml` on `v*` tags: a gate job checks that the tag matches package.json, tauri.conf.json and the Cargo workspace
-  version and that `ci.yml` succeeded on the tagged commit (waiting for a run in progress); then build (`pnpm build` under
-  `tauri build` also writes `THIRD_PARTY_NOTICES.txt` from the production npm tree and the crates linked into `reskin.exe`,
-  `scripts/third-party-notices.mjs`), `--smoke-test --capture-handoff`, stage `Reskin_<v>_x64-setup.exe`,
-  `Reskin_<v>_x64_en-US.msi`, `Reskin_<v>_x64_portable.exe`, `THIRD_PARTY_NOTICES.txt`, `SHA256SUMS.txt`; publish with
-  `softprops/action-gh-release@v3`.
+  version, takes the release text from the tag's section of `CHANGELOG.md` (failing at once when there is none), and only
+  then waits for `ci.yml` to have succeeded on the tagged commit (a run in progress is waited for); then build (`pnpm build`
+  under `tauri build` also writes `THIRD_PARTY_NOTICES.txt` from the production npm tree, the crates linked into
+  `reskin.exe` and, on msvc, the WebView2 SDK linked in with them: `scripts/third-party-notices.mjs`), `--smoke-test
+  --capture-handoff` (checked like CI's), stage `Reskin_<v>_x64-setup.exe`, `Reskin_<v>_x64_en-US.msi`,
+  `Reskin_<v>_x64_portable.exe`, `THIRD_PARTY_NOTICES.txt`, `SHA256SUMS.txt`; publish with
+  `softprops/action-gh-release@v3` (the CHANGELOG text, a note on the unsigned exe, then GitHub's generated notes).
 
 ## Milestones
 1. M1 Skeleton + CI  2. M2 Box, drop, inspect, morph  3. M3 Editor core  4. M4 Apply, restore, history
