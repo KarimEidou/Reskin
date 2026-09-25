@@ -103,7 +103,7 @@ jobs:
           if ($p.ExitCode -ne 0) { throw "smoke test failed with exit code $($p.ExitCode)" }
           # The log must say it passed too, in case the exit code gets lost again
           # (Tauri drops the one the app asks for on Windows; see exit_with).
-          if (-not (Select-String -Path "$env:TEMP\reskin.log" -Pattern 'smoke: finished with exit code 0 ' -SimpleMatch -Quiet -ErrorAction SilentlyContinue)) {
+          if (-not (Get-Content "$env:TEMP\reskin.log" -ErrorAction SilentlyContinue | Select-String 'smoke: finished with exit code 0 ' -SimpleMatch -Quiet)) {
             throw 'smoke test did not report success'
           }
       - name: Installer round-trip

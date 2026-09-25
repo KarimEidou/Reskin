@@ -13,12 +13,14 @@ env:
 
 jobs:
   gate:
-    name: gate (versions match the tag, CI passed)
+    name: gate (versions and CHANGELOG match the tag, CI passed)
     runs-on: ubuntu-latest
     timeout-minutes: 100
     permissions:
       contents: read
       actions: read
+    outputs:
+      notes: ${{ steps.notes.outputs.notes }}
     steps:
       - uses: actions/checkout@v5
       - name: Versions match the tag
@@ -43,6 +45,55 @@ jobs:
             for (const [file, v] of wrong) console.log(`::error::${file} has version ${v}, the tag says ${tag}`);
             if (wrong.length > 0) process.exit(1);
             console.log(`package.json, tauri.conf.json and Cargo.toml are all ${tag}`);
+          '
+      - name: Release notes from CHANGELOG.md
+        id: notes
+        run: |
+          # The release text is the tag's section of CHANGELOG.md (GitHub adds
+          # its generated list of changes below it). Taken here, before the
+          # wait for CI, so a tag the CHANGELOG doesn't describe fails at once.
+          node --input-type=module -e '
+            import { randomUUID } from "node:crypto";
+            import { appendFileSync, readFileSync } from "node:fs";
+            const tag = process.env.GITHUB_REF_NAME;
+            const version = tag.replace(/^v/, "");
+            const lines = readFileSync("CHANGELOG.md", "utf8").split(/\r?\n/);
+            const start = lines.findIndex((line) => line.startsWith(`## [${version}]`));
+            if (start < 0) {
+              console.log(`::error::CHANGELOG.md has no "## [${version}]" section`);
+              process.exit(1);
+            }
+            // Up to the next version, the link references at the end, or EOF.
+            const rest = lines.slice(start + 1);
+            const end = rest.findIndex((line) => line.startsWith("## [") || /^\[[^\]]+\]:\s/.test(line));
+            // A release text shows every line break, so the wrapped lines of a
+            // paragraph or list item become one. Only plain text is joined:
+            // code, headings, quotes, tables, HTML and hard breaks stay as
+            // they are, and a line starting a list item or rule starts anew.
+            const plain = (line) => line.trim() !== "" && !/^( {4}|\t)|^\s*(#|>|<|```|~~~)|\|/.test(line);
+            const section = [];
+            let fenced = false;
+            for (const line of end < 0 ? rest : rest.slice(0, end)) {
+              if (/^\s*(```|~~~)/.test(line)) fenced = !fenced;
+              const prev = section.at(-1);
+              const joins =
+                !fenced && prev !== undefined && plain(prev) && !/( {2}|\\)$/.test(prev) &&
+                plain(line) && !/^\s*(?:[-*+](?:\s|$)|\d+[.)](?:\s|$)|[=-]+\s*$|([-*_])(?:\s*\1){2,}\s*$)/.test(line);
+              if (joins) section[section.length - 1] = `${prev.trimEnd()} ${line.trimStart()}`;
+              else section.push(line);
+            }
+            const notes = section.join("\n").trim();
+            if (!notes) {
+              console.log(`::error::the "## [${version}]" section of CHANGELOG.md is empty`);
+              process.exit(1);
+            }
+            const readme = `${process.env.GITHUB_SERVER_URL}/${process.env.GITHUB_REPOSITORY}/blob/${tag}/README.md`;
+            const unsigned =
+              `Reskin is not code-signed yet: see [Windows protected your PC](${readme}#windows-protected-your-pc) ` +
+              "for the SmartScreen warning, and check the downloads against `SHA256SUMS.txt`.";
+            const eof = `EOF_${randomUUID()}`;
+            appendFileSync(process.env.GITHUB_OUTPUT, `notes<<${eof}\n${notes}\n\n---\n\n${unsigned}\n${eof}\n`);
+            console.log(`release notes: the ${version} section of CHANGELOG.md (${notes.split("\n").length} lines)`);
           '
       - name: CI passed on this commit
         env:
@@ -90,36 +141,6 @@ jobs:
         with:
           node-version: 22
           cache: pnpm
-      - name: Release notes from CHANGELOG.md
-        shell: bash
-        run: |
-          # The release text is the tag's section of CHANGELOG.md (GitHub adds
-          # its generated list of changes below it).
-          node --input-type=module -e '
-            import { readFileSync, writeFileSync } from "node:fs";
-            const tag = process.env.GITHUB_REF_NAME;
-            const version = tag.replace(/^v/, "");
-            const lines = readFileSync("CHANGELOG.md", "utf8").split(/\r?\n/);
-            const start = lines.findIndex((line) => line.startsWith(`## [${version}]`));
-            if (start < 0) {
-              console.log(`::error::CHANGELOG.md has no "## [${version}]" section`);
-              process.exit(1);
-            }
-            // Up to the next version, the link references at the end, or EOF.
-            const rest = lines.slice(start + 1);
-            const end = rest.findIndex((line) => line.startsWith("## [") || /^\[[^\]]+\]:\s/.test(line));
-            const section = (end < 0 ? rest : rest.slice(0, end)).join("\n").trim();
-            if (!section) {
-              console.log(`::error::the "## [${version}]" section of CHANGELOG.md is empty`);
-              process.exit(1);
-            }
-            const readme = `${process.env.GITHUB_SERVER_URL}/${process.env.GITHUB_REPOSITORY}/blob/${tag}/README.md`;
-            const unsigned =
-              `Reskin is not code-signed yet: see [Windows protected your PC](${readme}#windows-protected-your-pc) ` +
-              "for the SmartScreen warning, and check the downloads against `SHA256SUMS.txt`.";
-            writeFileSync("release-notes.md", `${section}\n\n---\n\n${unsigned}\n`);
-            console.log(`release notes: the ${version} section of CHANGELOG.md`);
-          '
       - name: Toolchain (rust-toolchain.toml)
         run: rustup toolchain install
       - uses: Swatinem/rust-cache@v2
@@ -143,7 +164,7 @@ jobs:
           if ($p.ExitCode -ne 0) { throw "smoke test failed with exit code $($p.ExitCode)" }
           # The log must say it passed too, in case the exit code gets lost again
           # (Tauri drops the one the app asks for on Windows; see exit_with).
-          if (-not (Select-String -Path "$env:TEMP\reskin.log" -Pattern 'smoke: finished with exit code 0 ' -SimpleMatch -Quiet -ErrorAction SilentlyContinue)) {
+          if (-not (Get-Content "$env:TEMP\reskin.log" -ErrorAction SilentlyContinue | Select-String 'smoke: finished with exit code 0 ' -SimpleMatch -Quiet)) {
             throw 'smoke test did not report success'
           }
       - name: Stage release assets
@@ -174,7 +195,7 @@ jobs:
           name: Reskin ${{ github.ref_name }}
           draft: false
           prerelease: false
-          body_path: release-notes.md
+          body: ${{ needs.gate.outputs.notes }}
           generate_release_notes: true
           fail_on_unmatched_files: true
           files: |
