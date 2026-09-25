@@ -88,10 +88,11 @@ The visual and interaction contract for the box and the editor. Tokens live in
   undo / redo, layer commands and Save & Apply fire from the keyboard only in
   the Edit view.
 * **Canvas keys** (arrows, Enter, Delete / Backspace) reach the canvas while
-  it has focus — also after a press on empty space in the bars around it,
-  which focuses the canvas. A view change from the keyboard leaves focus on
-  the view itself (the page's main landmark, named after the view), where
-  they do nothing until the canvas has focus again.
+  it has focus — also after a press on empty space or a disabled control in
+  the panels and bars around it, which focuses the canvas. A view change
+  from the keyboard leaves focus on the view itself (the page's main
+  landmark, named after the view), where they do nothing until the canvas
+  has focus again.
 * **Tool options bar**: context options for the active tool (size, hardness,
   flow, opacity, smoothing, tolerance, contiguous, shape kind, fill/stroke,
   font, spray density and **Reshuffle**, retouch strength and exposure, the
@@ -236,11 +237,12 @@ The visual and interaction contract for the box and the editor. Tokens live in
   focus back to the opener — Tab then carries on to what follows it. Menus
   close on Escape and Tab, focus back on their button.
 * **Toasts**: bottom-centre stack; success/info/error; optional action
-  (e.g. Undo); auto-dismiss 4–6 s (paused while focus is in the stack).
-  Screen readers hear each toast once: the stack is two persistent live
-  regions, warnings/errors (an alert region, on top) and info/success (a
-  polite status region below). A toast that leaves with focus on it hands
-  focus to the next toast, else back to where it came from.
+  (e.g. Undo); auto-dismiss 4–6 s (paused while the pointer or focus is on
+  the stack). Screen readers hear each toast once: the stack is two
+  persistent live regions, warnings/errors (an alert region, on top) and
+  info/success (a polite status region below). A toast that leaves with
+  focus on it hands focus to the next toast, else back to where it came
+  from.
 
 ## Box
 

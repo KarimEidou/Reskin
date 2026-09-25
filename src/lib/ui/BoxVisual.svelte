@@ -713,7 +713,7 @@
     display: grid;
     place-items: center;
     border-radius: 12px;
-    background: linear-gradient(180deg, rgb(var(--bv-glow-rgb) / 1), rgb(var(--accent-dark-rgb, 90 56 214) / 1));
+    background: linear-gradient(180deg, rgb(var(--bv-glow-rgb) / 1), rgb(var(--accent-dark-rgb, 83 31 199) / 1));
     color: #fff;
     font-size: 12.5px;
     font-weight: 700;

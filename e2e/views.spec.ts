@@ -827,18 +827,15 @@ test.describe('autosave', () => {
     // and the design changed again since.
     await paint(page);
     await page.evaluate(() => (window as unknown as Win).__reskinSession.flushAutosave());
-    await page.evaluate(() => {
-      const { engine } = (window as unknown as Win).__reskinSession;
-      engine.editLayerPixels(engine.activeLayer.id, 'Paint', (surface) => surface.data.fill(90));
-    });
     // The close's autosave is held until the Clear step is under way, and
     // let go 100 ms into it, well within the step's time box. The page
     // lets it go on its own clock: the test's round trips (slow on a busy
-    // machine) must not decide whether that is in time.
+    // machine) must not decide whether that is in time. The change comes
+    // with the hold, so its scheduled autosave is held too.
     type Held = { __clearingAt?: number };
     await page.evaluate(() => {
       type Invoke = (cmd: string, args?: unknown, opts?: unknown) => Promise<unknown>;
-      const w = window as unknown as Held & { __TAURI_INTERNALS__: { invoke: Invoke } };
+      const w = window as unknown as Held & Win & { __TAURI_INTERNALS__: { invoke: Invoke } };
       const inner = w.__TAURI_INTERNALS__.invoke;
       let release!: () => void;
       const held = new Promise<void>((r) => (release = r));
@@ -850,6 +847,8 @@ test.describe('autosave', () => {
         w.__clearingAt = performance.now();
         setTimeout(release, 100);
       }).observe(root, { attributes: true, attributeFilter: ['data-phase'] });
+      const { engine } = w.__reskinSession;
+      engine.editLayerPixels(engine.activeLayer.id, 'Paint', (surface) => surface.data.fill(90));
     });
     expect((await simulateClose(page, 'hide', { morph: false })).timedOut).toEqual([]);
     const [clearingAt, cleared] = await page.evaluate(() => [

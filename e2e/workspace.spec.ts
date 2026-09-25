@@ -1399,6 +1399,23 @@ test.describe('robustness', () => {
     await expect(canvas).toBeFocused();
     await page.keyboard.press('Delete');
     await expect.poll(labels).toContain('Clear');
+
+    // A disabled control there (Before / after, for a new icon with no
+    // original) gets no mousedown, and its press leaves focus on the view:
+    // the canvas gets it too.
+    await withSession(page, (s) => {
+      s.newBlank();
+      s.engine.editLayerPixels(s.engine.activeLayer!.id, 'Paint', (surface) => surface.data.fill(90));
+    });
+    const compare = page.getByTestId('compare-toggle');
+    await expect(compare).toBeDisabled();
+    await page.locator('[data-view-host]').focus();
+    const box = (await compare.boundingBox())!;
+    await page.mouse.click(box.x + box.width / 2, box.y + box.height / 2);
+    await expect(canvas).toBeFocused();
+    await expect(canvas).toHaveAttribute('data-pointer-focus', '');
+    await page.keyboard.press('Delete');
+    await expect.poll(labels).toEqual(['Paint', 'Clear']);
   });
 
   test('Space activates a keyboard-focused rail button instead of panning', async ({ page }) => {

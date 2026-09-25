@@ -70,18 +70,40 @@
    * A press on empty space of the Edit view — the bars around the canvas,
    * where nothing takes focus, so the host would — is for the canvas, as it
    * was before the host took focus: its keys (arrows, Enter, Delete) keep
-   * going to it. The host's own focus (after a view change) stays the
-   * keyboard's: Delete there clears nothing.
+   * going to it. So is a press on a disabled control there: it gets no
+   * mousedown, but leaves focus on the host all the same; the canvas takes
+   * it as the press ends. The host's own focus (after a view change) stays
+   * the keyboard's: Delete there clears nothing.
    */
   function pressesToCanvas(node: HTMLElement) {
+    /** A press on a disabled control of the Edit view is down. */
+    let disabledPress = false;
     const onPress = (e: MouseEvent) => {
       if (shown !== 'edit' || e.button !== 0 || !(e.target instanceof Element)) return;
       if (e.target.closest(CLICK_FOCUSABLE) !== node) return;
       e.preventDefault();
       stage.focusCanvas({ pointer: true });
     };
+    const onPointerDown = (e: PointerEvent) => {
+      disabledPress = shown === 'edit' && e.button === 0 && e.target instanceof Element && e.target.closest(':disabled') !== null;
+    };
+    const onPointerUp = () => {
+      if (disabledPress && shown === 'edit' && document.activeElement === node) stage.focusCanvas({ pointer: true });
+      disabledPress = false;
+    };
+    const onPointerCancel = () => {
+      disabledPress = false;
+    };
     node.addEventListener('mousedown', onPress);
-    return () => node.removeEventListener('mousedown', onPress);
+    node.addEventListener('pointerdown', onPointerDown, true);
+    window.addEventListener('pointerup', onPointerUp, true);
+    window.addEventListener('pointercancel', onPointerCancel, true);
+    return () => {
+      node.removeEventListener('mousedown', onPress);
+      node.removeEventListener('pointerdown', onPointerDown, true);
+      window.removeEventListener('pointerup', onPointerUp, true);
+      window.removeEventListener('pointercancel', onPointerCancel, true);
+    };
   }
 </script>
 
