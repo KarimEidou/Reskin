@@ -510,13 +510,19 @@ pub fn parse_hotkey(s: &str) -> Result<Option<Hotkey>> {
     let Some(key) = key else {
         return Err(invalid("a key is missing"));
     };
-    // Shift alone would swallow that character system-wide (Shift+A types
-    // "A"), so a global hotkey needs Ctrl, Alt or Win — except for the
-    // function keys, which type nothing.
+    // A global hotkey needs a modifier. Shift alone would swallow that
+    // character system-wide (Shift+A types "A"), so it needs Ctrl, Alt or
+    // Win — except for the function keys, which type nothing: Shift will do
+    // for them. The message names only the modifiers that would do.
+    let function_key = matches!(key, Key::F(_));
     if !(ctrl || alt || shift || win) {
-        return Err(invalid("add at least one of Ctrl, Alt, Shift or Win"));
+        return Err(invalid(if function_key {
+            "add Ctrl, Alt, Shift or Win"
+        } else {
+            "add Ctrl, Alt or Win"
+        }));
     }
-    if !(ctrl || alt || win || matches!(key, Key::F(_))) {
+    if !(ctrl || alt || win || function_key) {
         return Err(invalid("add Ctrl, Alt or Win (Shift alone isn't enough)"));
     }
     Ok(Some(Hotkey {

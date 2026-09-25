@@ -42,9 +42,9 @@ src-tauri/                      the Tauri app (windows, animator, mailbox, comma
   dragging); the first returned item's optional `skipped` says how many
   were left out. `history_list` reads the journal as it is on disk (another
   Reskin process may have changed it). `restore({type:'entry', id})` undoes
-  the entry and the entries applied with it (its `group`: the matching
-  pins); `ApplyOutcome.applied.skippedPins` counts matching pins Reskin could
-  not change.
+  the entry and, once that went through, the entries applied with it (its
+  `group`: the matching pins); `ApplyOutcome.applied.skippedPins` counts
+  matching pins Reskin could not change.
 * Rust → editor: **mailbox only** (`editor_next(after)` long-poll, returns
   `Envelope[]` with increasing `seq`; returns `[{seq, cmd:{type:'heartbeat'}}]`
   after 25 s of silence). The editor processes envelopes strictly in order and
@@ -398,14 +398,25 @@ trying again later can work. Pixels: `pixels::Rgba` (straight alpha RGBA8).
 Pure (all hosts, unit tested on Linux):
 
 * `ico` — `build_ico(&[Rgba])`, `build_ico_from_pngs(&[SizedPng])`, `parse_ico`,
-  `best_frame`, `validate_ico`, `MAX_ICO_BYTES` (1 MiB). <256 → 32-bpp BMP + AND
-  mask; 256 → PNG.
+  `best_frame`, `validate_ico`, `MAX_ICO_BYTES` (1 MiB, what Reskin writes).
+  <256 → 32-bpp BMP + AND mask; 256 → PNG. What an icon claims is checked
+  before it is allocated for: `parse_ico` first checks the directory against
+  the file (each entry's data lies inside it; all of them together claim no
+  more than it holds), then skips frames over `MAX_FRAME_PX` (1024) and,
+  broken ones included, those after `MAX_DECODE_PX` (sixteen such frames)
+  is spent. `read_ico_file(path)` refuses a file over `MAX_READ_ICO_BYTES`
+  (16 MiB, also the most `grpicon` rebuilds) by its size, before reading.
 * `geom` — `place_editor`, `snap_target`, `fling_projection`, `spring_step`,
   `arc_point`, `clamp_into`, `nearest_point_in`, `ease_in_out`.
-* `pixels` — `Rgba`, PNG/base64/data-URL helpers, `bgra_to_rgba`,
-  `looks_premultiplied_bgra`, `normalize_corner_icon`.
-* `grpicon` — `GroupEntry`, `parse_group`, `rebuild_ico(group, get_icon)`
-  (byte-exact ICO from RT_GROUP_ICON + RT_ICON blobs).
+* `pixels` — `Rgba` (`decode_png` refuses a PNG over `MAX_PNG_PX` = 4096
+  on a side from its header, before allocating), PNG/base64/data-URL
+  helpers, `bgra_to_rgba`, `looks_premultiplied_bgra`,
+  `normalize_corner_icon`.
+* `grpicon` — `GroupEntry`, `parse_group` (at most `MAX_GROUP_ENTRIES` =
+  256), `rebuild_ico(group, get_icon)` (byte-exact ICO from RT_GROUP_ICON +
+  RT_ICON blobs, which `get_icon` lends: each id is fetched and copied
+  once, however often the group lists it, and a result over
+  `ico::MAX_READ_ICO_BYTES` is refused before anything is copied).
 * `urlini` — `UrlFile::parse(bytes)` (infallible; UTF-16LE/BE, UTF-8, ANSI
   1252; `[InternetShortcut.W]` UTF-7 values preferred) with `url()`,
   `icon_file()`, `icon_index()`, `has_icon(Option<(file, index)>)` (the
@@ -499,8 +510,10 @@ Windows (`win/`, `#[cfg(windows)]`, type-checked on Linux with
   `taskbar_pins` (all `Result<PathBuf>`).
 * `extract` — `Inspected` (+ `icon_data_url()`), `classify`, `inspect_path`,
   `icon_frames` (largest first), `inspect_system_icon`, `system_icon_frames`,
-  `to_icon_frames`. Ladder: .ico frames → RT_GROUP_ICON rebuild (incl. `.mun`
-  fallback) → WIC for images → IShellItemImageFactory.
+  `to_icon_frames`. Ladder: .ico frames (`ico::read_ico_file`: a file over
+  the limit goes to the shell) → RT_GROUP_ICON rebuild (resources are
+  borrowed from the module mapped as data; only the rebuilt icon is a
+  copy; incl. `.mun` fallback) → WIC for images → IShellItemImageFactory.
 * `shortcut` — `LinkInfo` (+ `icon_path()`), `read_link`, `set_link_icon(path,
   Option<(&str, i32)>)` (None clears; verified by read-back), `create_link(dest,
   target, args, Option<(&Path, i32)>, description)`.
@@ -509,8 +522,10 @@ Windows (`win/`, `#[cfg(windows)]`, type-checked on Linux with
   `<name>.reskin-tmp`), `set_url_icon_in(dir: &TrustedDir, path, icon)`
   (the elevated helper's: `check_file` first; the fallback reads and
   rewrites only through `dir`'s `read_file` / `replace_file`).
-* `folder` — `read_folder_icon`, `set_folder_icon(path, Option<(&Path, i32)>)`
-  (clear removes the keys and an empty desktop.ini).
+* `folder` — `read_folder_icon`, `folder_icon_path` (the custom icon as the
+  shell resolves it: `%VARS%` expanded, a relative location against the
+  folder), `set_folder_icon(path, Option<(&Path, i32)>)` (clear removes the
+  keys and an empty desktop.ini).
 * `sysicons` — `read_system_icon`, `set_system_icon`, `restore_system_icon`,
   `effective_system_icon`.
 * `notify` — `item_updated`, `assoc_changed`, `rebuild_icon_cache() -> Result`.
@@ -543,10 +558,10 @@ Windows (`win/`, `#[cfg(windows)]`, type-checked on Linux with
 
 * `main.rs` handles `--elevated-apply`, `--restore-all [--quiet]`, `--self-test`
   before building Tauri; otherwise exits with `reskin_lib::run(argv)`.
-  `--self-test` run as administrator (`is_uac_elevated`) only reads: it
-  leaves out the checks that write the app data (`app-data`, `journal`,
-  `icon-store`) and its log line, reports a failed `elevation` check and
-  exits 1.
+  `--self-test` must run without administrator rights: as administrator
+  (`is_uac_elevated`) it only reads — it leaves out the checks that write
+  the app data (`app-data`, `journal`, `icon-store`) and its log line —
+  and reports a failed `elevation` check and exits 1.
 * `lib.rs` `run`: started as administrator (`is_uac_elevated`) it first
   restarts unelevated through Explorer (`--relaunched`) and returns, having
   written nothing (not even `reskin.log`: the new start's first log line
@@ -617,14 +632,33 @@ Windows (`win/`, `#[cfg(windows)]`, type-checked on Linux with
   Public-Desktop icons no entry needs any more; their results are recorded
   under the lock only if the step still plans the same. Restore all emits
   `box:progress {done, total}` after each step and `done == total` at the
-  end.
+  end. `execute_undo` (`restore({type:'entry'})`) runs the entry's own step
+  first (`execute_steps_then`) and its group only once that went through,
+  so a declined prompt or a failure leaves the whole apply in place; that
+  first step's elevated job also deletes the Public-Desktop icons the group
+  releases, since the group's own steps ask for no approval. The helper is
+  reached through the `Elevation` trait (implemented by `AppDirs`), so the
+  tests can decline or approve it.
 * `helper.rs`: `--elevated-apply`, `run_elevated_job` and `--restore-all`
   (see "Elevation"; `--restore-all` runs alongside the app thanks to the
   journal lock, asks once for approval — also under `--quiet` — and exits
   3 unless everything is back, so the uninstaller keeps Reskin's data; run
   with an administrator's full token it restarts as the desktop user, see
   "Elevation").
-* `commands/*.rs`: `boot, box_cmds, editor_cmds, items, apply, library, system, settings`.
+* `smoke.rs` (`--smoke-test [--capture-handoff]`): once both pages report
+  ready it runs its scenarios on a thread of its own, logs `smoke: finished
+  with exit code N after S s` and exits with N through `exit_with` (Tauri's
+  `AppHandle::exit` drops the code on Windows). CI and the release job
+  pass a run only when the exit code is 0 and `reskin.log` has that line
+  with 0.
+* `commands/*.rs`: `boot, box_cmds, editor_cmds, library, system, settings`
+  (and the commands of `items.rs`, `apply.rs`, `restore.rs`). Tauri runs a
+  synchronous command on the main thread, where both windows and the
+  handoff run, so every command that uses COM or reads or writes files is
+  `async` and does that work in `spawn_blocking` (shell work through
+  `Sta::run`). The synchronous ones only read state or the registry, show
+  or hide a window or the box menu, add a log line, or hand a link to the
+  opener plugin.
   `settings::rebuild_windows` (compatibility mode) and the low-memory drop
   destroy the editor through `morph::destroy_editor`, which returns once
   tauri has released its label and the mailbox moved on, so the next open
@@ -752,7 +786,10 @@ uninstaller then keeps Reskin's data, so nothing is lost.
   (which sets `TAURI_ENV_*`) `pnpm build` also runs
   `scripts/third-party-notices.mjs`: `dist/THIRD_PARTY_NOTICES.txt` (production
   npm tree + Svelte runtime, crates `cargo tree` links into `reskin.exe`,
-  license texts deduplicated), embedded in the app (Settings › About ›
+  license texts deduplicated; on msvc targets also the WebView2 SDK, whose
+  `WebView2LoaderStatic.lib` `webview2-com-sys` links in, with its license
+  from `scripts/licenses/` — a `webview2-com-sys` version the script
+  doesn't know fails it), embedded in the app (Settings › About ›
   Open-source licenses fetches it) and attached to each release; `pnpm
   notices` writes it by hand.
 * Every page entry (`src/*/main.ts`) starts with

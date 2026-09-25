@@ -1,15 +1,18 @@
-//! `ico::parse_ico` on hostile input: whatever an icon's headers claim,
-//! parsing it allocates no more than decoding real frames of the allowed
-//! size would. This binary counts the bytes each thread allocates and
-//! refuses any single request over [`REFUSE_OVER`], so a regression aborts
-//! it ("memory allocation of … bytes failed") instead of exhausting the
-//! machine.
+//! Icon data on hostile input — `ico::parse_ico`, `ico::read_ico_file`,
+//! `grpicon::rebuild_ico` and `Rgba::decode_png`: whatever an icon's
+//! headers or a program's icon group claim, reading it allocates no more
+//! than real icons of the allowed size would. This binary counts the bytes
+//! each thread allocates and refuses any single request over
+//! [`REFUSE_OVER`], so a regression aborts it ("memory allocation of …
+//! bytes failed") instead of exhausting the machine.
 
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::cell::Cell;
+use std::path::PathBuf;
 
-use reskin_core::ico::{MAX_DECODE_PX, parse_ico};
-use reskin_core::pixels::Rgba;
+use reskin_core::grpicon::{MAX_GROUP_ENTRIES, rebuild_ico};
+use reskin_core::ico::{MAX_DECODE_PX, MAX_READ_ICO_BYTES, parse_ico, read_ico_file};
+use reskin_core::pixels::{MAX_PNG_PX, Rgba};
 
 /// Largest single allocation granted: well above the 4 MiB one frame of
 /// `ico::MAX_FRAME_PX` decodes to.
@@ -71,11 +74,16 @@ unsafe impl GlobalAlloc for Counting {
 #[global_allocator]
 static COUNTING: Counting = Counting;
 
+/// What `f` returns, and the bytes it allocated on this thread.
+fn counting<T>(f: impl FnOnce() -> T) -> (T, u64) {
+    let before = ALLOCATED.with(Cell::get);
+    let out = f();
+    (out, ALLOCATED.with(Cell::get) - before)
+}
+
 /// How many frames `parse_ico(bytes)` returns, and the bytes it allocated.
 fn parse_counting(bytes: &[u8]) -> (Result<usize, String>, u64) {
-    let before = ALLOCATED.with(Cell::get);
-    let frames = parse_ico(bytes).map(|frames| frames.len());
-    (frames, ALLOCATED.with(Cell::get) - before)
+    counting(|| parse_ico(bytes).map(|frames| frames.len()))
 }
 
 /// An .ico listing `images`, laid out one after another. The directory's
@@ -180,4 +188,80 @@ fn broken_frames_cannot_add_up_to_gigabytes() {
     assert!(frames.is_err(), "{frames:?}");
     let budget = MAX_DECODE_PX * 4 + (1 << 20);
     assert!(allocated <= budget, "{allocated} bytes, budget {budget}");
+}
+
+/// A `RT_GROUP_ICON` directory listing the `RT_ICON` ids `ids`.
+fn group_of(ids: impl ExactSizeIterator<Item = u16>) -> Vec<u8> {
+    let mut group = vec![0, 0, 1, 0];
+    group.extend_from_slice(&(ids.len() as u16).to_le_bytes());
+    for id in ids {
+        group.extend_from_slice(&[0, 0, 0, 0, 1, 0, 32, 0]);
+        group.extend_from_slice(&0u32.to_le_bytes());
+        group.extend_from_slice(&id.to_le_bytes());
+    }
+    group
+}
+
+#[test]
+fn an_icon_group_cannot_copy_an_image_over_and_over() {
+    // Every entry names the same 4 MiB image: copied once per entry, the
+    // group would make 1 GiB of it.
+    let image = vec![7u8; 4 << 20];
+    let group = group_of(std::iter::repeat_n(1, MAX_GROUP_ENTRIES));
+    let (rebuilt, allocated) = counting(|| rebuild_ico(&group, |_| Some(&image[..])));
+    assert_eq!(rebuilt.map(|ico| ico.len()), Ok(6 + 16 + image.len()));
+    let budget = image.len() as u64 + (1 << 20);
+    assert!(allocated <= budget, "{allocated} bytes, budget {budget}");
+}
+
+#[test]
+fn an_icon_group_cannot_add_up_to_more_than_an_icon_may_have() {
+    // Different ids, each naming the same 4 MiB of the program: 1 GiB in
+    // all. Refused before anything is copied.
+    let image = vec![7u8; 4 << 20];
+    let group = group_of(1..=MAX_GROUP_ENTRIES as u16);
+    let (rebuilt, allocated) = counting(|| rebuild_ico(&group, |_| Some(&image[..])));
+    assert!(rebuilt.is_err(), "{:?}", rebuilt.map(|ico| ico.len()));
+    assert!(allocated < 1 << 20, "{allocated} bytes");
+}
+
+#[test]
+fn a_png_header_cannot_ask_for_gigabytes() {
+    // As the editor could send them: 8 GiB decoded, and just over 64 MiB.
+    for (w, h) in [(1, 0x7FFF_FFFF), (MAX_PNG_PX + 1, MAX_PNG_PX)] {
+        let png = png_claiming(w, h);
+        let (decoded, allocated) = counting(|| Rgba::decode_png(&png));
+        assert!(decoded.is_err(), "{w}x{h}: {decoded:?}");
+        assert!(allocated < 1 << 20, "{w}x{h}: {allocated} bytes");
+    }
+}
+
+/// A file in the temp folder, removed on drop.
+struct TempFile(PathBuf);
+
+impl Drop for TempFile {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.0);
+    }
+}
+
+#[test]
+fn an_ico_file_over_the_limit_is_not_read() {
+    let file = TempFile(
+        std::env::temp_dir().join(format!("reskin-ico-memory-{}.ico", std::process::id())),
+    );
+    let icon = ico_of(&[Rgba::filled(16, 16, [1, 2, 3, 255]).encode_png()]);
+    std::fs::write(&file.0, &icon).unwrap();
+    assert_eq!(read_ico_file(&file.0).as_ref(), Ok(&icon));
+    // Grown past the limit (sparse where the file system allows it): its
+    // size alone refuses it.
+    let big = std::fs::OpenOptions::new()
+        .write(true)
+        .open(&file.0)
+        .unwrap();
+    big.set_len(MAX_READ_ICO_BYTES as u64 + 1).unwrap();
+    drop(big);
+    let (read, allocated) = counting(|| read_ico_file(&file.0));
+    assert!(read.is_err(), "{:?}", read.map(|b| b.len()));
+    assert!(allocated < 1 << 20, "{allocated} bytes");
 }

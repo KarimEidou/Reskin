@@ -4,10 +4,12 @@
 //! 1. an explicit icon location (`.lnk` IconLocation, `.url` IconFile,
 //!    `desktop.ini`, the system-icon registry value) or the item/target
 //!    itself:
-//!    - `.ico` files → every frame (`ico::parse_ico`; WIC as fallback);
+//!    - `.ico` files of at most `ico::MAX_READ_ICO_BYTES` → every frame
+//!      (`ico::parse_ico`; WIC as fallback);
 //!    - PE files (exe, dll, icl, mun, cpl, …) → the `RT_GROUP_ICON` group,
-//!      rebuilt byte-exactly into an `.ico` by [`crate::grpicon`] from a
-//!      module mapped with `LoadLibraryExW(LOAD_LIBRARY_AS_DATAFILE |
+//!      rebuilt byte-exactly into an `.ico` (within the same limit) by
+//!      [`crate::grpicon`] from a module mapped with
+//!      `LoadLibraryExW(LOAD_LIBRARY_AS_DATAFILE |
 //!      LOAD_LIBRARY_AS_IMAGE_RESOURCE)`; index ≥ 0 is the n-th group in
 //!      `EnumResourceNamesW` order, index < 0 the resource id `-index`
 //!      (`ExtractIcon` semantics). Windows 10+ keeps many system icons in
@@ -433,8 +435,10 @@ fn preview(frames: &[Rgba]) -> Option<Rgba> {
 
 // --- (a) .ico files ---------------------------------------------------------
 
+/// Every frame of an `.ico` file. A file over [`ico::MAX_READ_ICO_BYTES`]
+/// is an error (the ladder moves on to the shell), not read.
 fn ico_file_frames(path: &Path) -> Result<Vec<Rgba>> {
-    let bytes = std::fs::read(path)?;
+    let bytes = ico::read_ico_file(path)?;
     match ico::parse_ico(&bytes) {
         Ok(frames) => Ok(frames.into_iter().map(|f| f.image).collect()),
         // Some icons use encodings the `ico` crate rejects; WIC reads them.
@@ -504,25 +508,29 @@ fn group_names(module: HMODULE) -> Vec<ResName> {
     names
 }
 
-fn resource_bytes(module: HMODULE, name: &ResName, kind: PCWSTR) -> Result<Vec<u8>> {
+/// The data of a resource of the loaded `module`, borrowed from its image:
+/// nothing is copied here, whatever size the resource claims
+/// ([`grpicon::rebuild_ico`] bounds what it copies).
+fn resource_data<'m>(module: &'m Owned<HMODULE>, name: &ResName, kind: PCWSTR) -> Result<&'m [u8]> {
     // SAFETY: `module` is a loaded image; the resource data stays mapped
-    // while it is loaded and is copied out before returning.
+    // while it is loaded, which the returned borrow of `module` ensures.
     unsafe {
-        let info = FindResourceW(Some(module), name.as_pcwstr(), kind);
+        let info = FindResourceW(Some(**module), name.as_pcwstr(), kind);
         if info.is_invalid() {
             return Err(Error::NotFound("icon resource".into()));
         }
-        let size = SizeofResource(Some(module), info) as usize;
-        let data = LoadResource(Some(module), info).ctx("load an icon resource")?;
+        let size = SizeofResource(Some(**module), info) as usize;
+        let data = LoadResource(Some(**module), info).ctx("load an icon resource")?;
         let ptr = LockResource(data) as *const u8;
         if ptr.is_null() || size == 0 {
             return Err(Error::NotFound("empty icon resource".into()));
         }
-        Ok(std::slice::from_raw_parts(ptr, size).to_vec())
+        Ok(std::slice::from_raw_parts(ptr, size))
     }
 }
 
-/// The icon group `index` of a PE file rebuilt into `.ico` bytes.
+/// The icon group `index` of a PE file rebuilt into `.ico` bytes (within
+/// the limits of [`grpicon::rebuild_ico`]).
 fn pe_group_ico(file: &Path, index: i32) -> Result<Vec<u8>> {
     let w = wide(file);
     // SAFETY: data-file mapping only; nothing in the module runs.
@@ -546,9 +554,9 @@ fn pe_group_ico(file: &Path, index: i32) -> Result<Vec<u8>> {
             .map_err(|_| Error::NotFound(format!("icon id {index} is out of range")))?;
         ResName::Id(id)
     };
-    let directory = resource_bytes(*module, &group, RT_GROUP_ICON)?;
-    grpicon::rebuild_ico(&directory, |id| {
-        resource_bytes(*module, &ResName::Id(id), RT_ICON).ok()
+    let directory = resource_data(&module, &group, RT_GROUP_ICON)?;
+    grpicon::rebuild_ico(directory, |id| {
+        resource_data(&module, &ResName::Id(id), RT_ICON).ok()
     })
 }
 

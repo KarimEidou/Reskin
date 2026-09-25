@@ -208,7 +208,9 @@ pnpm bindings; git diff --exit-code            # the IPC types are up to date
 ```
 
 `pnpm docs:screenshots` renders the pictures in this README from the app's
-pages. Helper modes: `reskin.exe --self-test` prints a JSON health report,
+pages. Helper modes: `reskin.exe --self-test` prints a JSON health report
+(run it without administrator rights: as administrator it skips the
+checks that write your app data and reports a failed `elevation` check),
 `--smoke-test [--capture-handoff]` exercises the packaged app end to end,
 `--restore-all [--quiet]` puts every icon back. A release build is a
 windowed program that a terminal doesn't wait for: run
