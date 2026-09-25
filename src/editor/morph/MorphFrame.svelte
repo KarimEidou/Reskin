@@ -25,13 +25,13 @@
   proxy it is laid out and drawn, only transparent. A morph or fade first
   shows its first frame — the picture on screen already — and only then
   plays, so the frame that sets it up (new layers, their styles and paint)
-  is never a step of the motion. While the panel morphs nothing of it is
-  painted again: its glass, its content and its border are pictures in
-  rounded clips laid out on the shell's rect (`data-morphing`,
-  ./choreography.ts), and the Edit view's canvas is held still
-  (`stage.hold`). After a collapse its
-  content rests unrendered (`content-visibility: hidden`) until the next
-  open, so hiding the panel does not restyle the view either.
+  is never a step of the motion. While it morphs, its content is revealed
+  by a rounded clip laid out on the shell's rect (./choreography.ts); as
+  it opens, the Edit view's canvas is held still (`stage.hold`): the
+  compositor is not handed a new copy of it at every frame. After a
+  collapse its content rests unrendered (`content-visibility: hidden`)
+  until the next open, so hiding the panel does not restyle the view
+  either.
 -->
 <script module lang="ts">
   export type FrameMode = 'hidden' | 'proxy' | 'animating' | 'open';
@@ -73,7 +73,7 @@
   const PANEL_INSET = 12;
   /** How long the first frame may take before the animations play anyway. */
   const FIRST_FRAME_WAIT_MS = 100;
-  /** How long each of an open's last touches waits for its frame (see `expand`). */
+  /** How long each of an open's last touches waits for its frame (see `settleOpen`). */
   const SETTLE_WAIT_MS = 100;
 
   let mode = $state<FrameMode>('hidden');
@@ -84,25 +84,18 @@
   let flyer = $state.raw<{ src: string; rect: Rect } | null>(null);
   /**
    * After a collapse the content rests unrendered (`content-visibility:
-   * hidden`) until the next open shows or morphs: hiding the panel then
+   * hidden`) until the next open shows or morphs it: hiding the panel then
    * restyles a handful of elements instead of every one in the view, and
    * the next open usually replaces the view before it is rendered again.
    */
   let resting = $state(false);
-  /**
-   * A morph is set up or plays (`data-morphing`): the border and the
-   * content fade by custom properties, and the clip around the glass and
-   * the content does their rounding.
-   */
-  let morphing = $state(false);
 
   let proxyEl: HTMLDivElement | undefined = $state();
   let panelEl: HTMLDivElement | undefined = $state();
-  let fillEl: HTMLDivElement | undefined = $state();
-  let edgeEl: HTMLDivElement | undefined = $state();
+  let shellEl: HTMLDivElement | undefined = $state();
   let shadowEl: HTMLDivElement | undefined = $state();
   let contentEl: HTMLDivElement | undefined = $state();
-  let contentBoxEl: HTMLDivElement | undefined = $state();
+  let viewsEl: HTMLDivElement | undefined = $state();
   let flyerEl: HTMLImageElement | undefined = $state();
 
   /** Bumped by every call so a superseded animation doesn't settle the frame. */
@@ -158,16 +151,10 @@
     return contentEl?.querySelector<HTMLElement>('[data-view-host]') ?? null;
   }
 
-  /** The parts the choreography moves (null until mounted). */
+  /** The panel's parts the choreography moves (null until mounted). */
   function parts(regions: HTMLElement[]): Omit<MorphParts, 'proxy' | 'flyer'> | null {
-    if (!fillEl || !edgeEl || !shadowEl || !contentEl || !contentBoxEl) return null;
-    return {
-      // The content's clip is the glass's too. Compatibility mode draws no border.
-      shell: { clip: contentEl, fill: fillEl, edge: compat ? null : edgeEl },
-      shadow: shadowEl,
-      content: contentBoxEl,
-      regions,
-    };
+    if (!shellEl || !shadowEl || !contentEl || !viewsEl) return null;
+    return { shell: shellEl, shadow: shadowEl, clip: contentEl, content: viewsEl, regions };
   }
 
   async function decoded(): Promise<void> {
@@ -186,7 +173,7 @@
     running = [];
   }
 
-  /** Holds the canvas still for the motion (see `stage.hold`); resolves once it is. */
+  /** Holds the Edit view's canvas still for the motion (see `stage.hold`); resolves once it is. */
   async function holdStill(): Promise<void> {
     if (letGo) return;
     const release = await stage.hold();
@@ -202,13 +189,9 @@
     release?.();
   }
 
-  /**
-   * Back at rest from a morph: its animations go, the panel's parts take
-   * their places at rest (the same picture) and the canvas shows again.
-   */
+  /** Back at rest: the animations go (the parts take their places at rest) and the canvas shows again. */
   function rest(): void {
     stopAll();
-    morphing = false;
     letStillGo();
   }
 
@@ -275,7 +258,6 @@
       flyer = { src: proxy.props.icon, rect: iconTarget(landing, viewEl() ?? contentEl, 48) };
     }
     const landingEls = flyer && landing ? [...(viewEl()?.querySelectorAll<HTMLElement>('[data-morph-landing]') ?? [])] : [];
-    morphing = useMorph;
     setMode('animating');
     await tick();
     const moved = parts(regions);
@@ -308,12 +290,12 @@
   }
 
   /**
-   * The open panel shows its last frame, held by the animations' fill, for
-   * a frame after the one that opens it; then its parts take their places
-   * at rest, and in the frame after that the canvas shows again (it draws
-   * what it was asked to meanwhile, and is handed to the compositor anew):
-   * each a frame's work of its own, the same picture on screen throughout.
-   * A call that takes over meanwhile (`run`) does what is left its own way.
+   * The open panel shows the morph's last frame, held by the animations'
+   * fill, for a frame after the one that opens it; then its parts take
+   * their places at rest (the same picture), and in the frame after that
+   * the canvas shows again (it draws what it was asked to meanwhile): each
+   * a frame's work of its own. A call that takes over meanwhile (`run`)
+   * does what is left its own way.
    */
   async function settleOpen(my: number): Promise<void> {
     // The animations finished in this frame's animation step: a frame
@@ -321,7 +303,6 @@
     await frames(2, { timeoutMs: SETTLE_WAIT_MS });
     if (my !== run) return;
     stopAll();
-    morphing = false;
     await nextFrame({ timeoutMs: SETTLE_WAIT_MS });
     if (my !== run) return;
     letStillGo();
@@ -333,21 +314,19 @@
    */
   export async function collapse(rect: Rect, props: BoxVisualProps | null, morph: boolean): Promise<void> {
     const my = ++run;
-    const wasOpen = mode === 'open' || mode === 'animating';
-    // The canvas holds still first (see expand).
-    if (wasOpen) await holdStill();
-    if (my !== run) return;
+    // The canvas is not held for a collapse (see expand): the content is gone
+    // after its first ~110 ms, and taking a picture of the canvas first would
+    // make the collapse wait for it.
     stopAll();
-    morphing = false;
     transition = null;
     flyer = null;
     held = false;
     proxy = props ? { rect, props } : null;
+    const wasOpen = mode === 'open' || mode === 'animating';
     // Layout reads before the mode changes (see expand).
     const g = geometry();
     const useMorph = morph && wasOpen && g !== null;
     const geo = g ?? fallbackGeometry();
-    morphing = useMorph;
     setMode('animating');
     await tick();
     const moved = parts([]);
@@ -388,7 +367,6 @@
   data-testid="morph-frame"
   data-mode={mode}
   data-transition={transition}
-  data-morphing={morphing || undefined}
   style:--inset="{inset}px"
   style:--panel-radius="{radius}px"
 >
@@ -400,15 +378,9 @@
     onfocusin={guardFocus}
   >
     <div class="shadow" bind:this={shadowEl}></div>
-    <div class="edge" bind:this={edgeEl}>
-      <div class="top"></div>
-      <div class="bottom"></div>
-      <div class="left"></div>
-      <div class="right"></div>
-    </div>
+    <div class="shell" bind:this={shellEl}></div>
     <div class="content" class:resting bind:this={contentEl} tabindex="-1">
-      <div class="fill" bind:this={fillEl}></div>
-      <div class="content-box" bind:this={contentBoxEl}>
+      <div class="views" bind:this={viewsEl}>
         {@render children()}
       </div>
     </div>
@@ -448,12 +420,7 @@
 </div>
 
 <style>
-  /* The fades of a morph (./choreography.ts SHELL_OPACITY, CONTENT_OPACITY). */
-  @property --morph-shell-o {
-    syntax: '<number>';
-    inherits: false;
-    initial-value: 1;
-  }
+  /* The content's fade in a morph (./choreography.ts CONTENT_OPACITY). */
   @property --morph-content-o {
     syntax: '<number>';
     inherits: false;
@@ -465,9 +432,6 @@
     inset: 0;
     overflow: hidden;
     pointer-events: none;
-    /* The panel's size, for what keeps it while the clips around it change. */
-    --panel-w: calc(100vw - 2 * var(--inset));
-    --panel-h: calc(100vh - 2 * var(--inset));
   }
   .frame[data-mode='hidden'] {
     visibility: hidden;
@@ -484,15 +448,15 @@
      showing it restyles three elements — `visibility`, which every element
      inherits, would restyle the whole view as the morph starts. The shield
      keeps the pointer off it. */
-  .frame[data-mode='proxy'] :is(.shadow, .edge, .content) {
+  .frame[data-mode='proxy'] :is(.shadow, .shell, .content) {
     opacity: 0;
   }
 
   /* The panel's material: layered translucency (no backdrop blur — the
-     window is transparent, there is nothing to blur), hairline border,
-     a tight shadow that fits the 12 px margin. The shadow is a layer of
-     its own that only fades: a blurred shadow that moved with the shell
-     would be painted anew at every frame of a morph. */
+     window is transparent, there is nothing to blur), hairline border, top
+     highlight, a tight shadow that fits the 12 px margin. The shadow is a
+     layer of its own that only fades: a blurred shadow that moved with the
+     shell would be painted anew at every frame of a morph. */
   .shadow {
     position: absolute;
     inset: 0;
@@ -507,139 +471,54 @@
       0 2px 5px -1px rgb(20 24 40 / 0.12);
   }
 
-  /* The glass and the content are pictures in one rounded clip (.content),
-     the border is solid pieces in another (.edge): an overflow clip with
-     round corners paints nothing — the compositor rounds the pictures
-     inside it. At rest the clips are the panel (the border's, the panel
-     grown by the border). While the panel morphs they are moved (a
-     composited translation) and laid out onto the shell's rect, and the
-     pictures only move (./choreography.ts): what keeps its place while its
-     clip changes is sized by the panel (--panel-w / --panel-h), not by the
-     clip. Only what is on the panel takes the pointer: the clips, the
-     glass and the border are pictures (nothing of them is hit-tested as
-     they move). */
-  .edge,
-  .content {
+  .shell {
     position: absolute;
-    left: 0;
-    top: 0;
-    width: 100%;
-    height: 100%;
-    overflow: clip;
-    transform-origin: 0 0;
-    will-change: transform;
-    pointer-events: none;
-  }
-  .fill,
-  .content-box,
-  .edge > div {
-    position: absolute;
-    will-change: transform;
-  }
-  /* The glass: the panel's own, scaled into the shell's rect like a FLIP,
-     so its tint stretches with it. It is round by itself (at rest the clip
-     is square, see .content), and scaled its corners are never rounder
-     than the clip's. */
-  .fill {
-    left: 0;
-    top: 0;
-    width: var(--panel-w);
-    height: var(--panel-h);
+    inset: 0;
     border-radius: var(--panel-radius);
     background: var(--glass-tint), var(--glass-fill-strong);
-    box-shadow: var(--glass-highlight);
+    box-shadow:
+      0 0 0 1px var(--glass-border),
+      var(--glass-highlight);
     transform-origin: 0 0;
+    will-change: transform;
   }
-  /* The hairline border: 1 px around the glass — a clip of the panel grown
-     by it, round by the radius grown by it — filled by solid pieces along
-     its edges: bands at the top and bottom that reach in under the glass
-     further than its corners ever do (--edge-reach), and the sides between
-     them. They overhang the clip by 2 px (its edge is the one drawn) and
-     follow it as it is laid out; what they cover under the glass shows
-     through its ~5 % transparency at most (under a level of colour). */
-  .edge {
-    --edge-reach: 40px;
-    left: -1px;
-    top: -1px;
-    width: calc(100% + 2px);
-    height: calc(100% + 2px);
-    border-radius: calc(var(--panel-radius) + 1px);
+  :global([data-theme='light']) .shell {
+    box-shadow:
+      0 0 0 1px rgb(0 0 0 / 0.08),
+      var(--glass-highlight);
   }
-  .edge > div {
-    background: var(--glass-border);
-  }
-  .edge > .top,
-  .edge > .bottom {
-    left: -2px;
-    right: -2px;
-    height: calc(var(--edge-reach) + 3px);
-  }
-  .edge > .top {
-    top: -2px;
-  }
-  .edge > .bottom {
-    bottom: -2px;
-  }
-  .edge > .left,
-  .edge > .right {
-    top: calc(var(--edge-reach) + 1px);
-    bottom: calc(var(--edge-reach) + 1px);
-    width: 5px;
-  }
-  .edge > .left {
-    left: -2px;
-  }
-  .edge > .right {
-    right: -2px;
-  }
-  :global([data-theme='light']) .edge > div {
-    background: rgb(0 0 0 / 0.08);
-  }
-  .compat .shadow,
-  .compat .edge {
+  .compat .shadow {
     display: none;
   }
-  .compat .fill {
+  .compat .shell {
     box-shadow: none;
     background: var(--glass-fill-strong);
   }
-  .frame[data-morphing] .edge {
-    opacity: var(--morph-shell-o);
-  }
 
-  /* One round clip on the content at a time. Under the content box's
-     composited transform the compositor cannot tell which of its layers
-     reach the corners of a clip outside it, so it rounds them all; a layer
-     with a round clip of its own too (the canvas stage) then has the whole
-     content drawn in a pass of its own, then over the window, at every
-     frame. At rest the clip is square and the content box (like the glass)
-     rounds itself; while the panel morphs the clip does the rounding. It is
-     drawn while the panel is transparent behind the proxy (`will-change`),
-     so its first frame of a morph has nothing to paint. */
+  /* The content's rounded clip: the panel at rest, laid out on the shell's
+     rect while it morphs, with the content kept in place inside it (see
+     ./choreography.ts). */
   .content {
-    border-radius: 0;
+    position: absolute;
+    inset: 0;
+    overflow: clip;
+    border-radius: var(--panel-radius);
     outline: none;
-    will-change: opacity, transform;
   }
   .content.resting {
     content-visibility: hidden;
   }
-  .content-box {
+  /* The panel's size, which it keeps while its clip is laid out smaller. */
+  .views {
+    position: absolute;
     left: 0;
     top: 0;
-    width: var(--panel-w);
-    height: var(--panel-h);
+    width: calc(100vw - 2 * var(--inset));
+    height: calc(100vh - 2 * var(--inset));
     display: flex;
     flex-direction: column;
-    overflow: clip;
-    border-radius: var(--panel-radius);
-    transform-origin: 0 0;
-    will-change: opacity, transform;
-    pointer-events: auto;
-  }
-  .frame[data-morphing] .content-box {
-    border-radius: 0;
     opacity: var(--morph-content-o);
+    will-change: opacity;
   }
 
   /* Takes the pointer while the panel is behind the proxy or animates. */

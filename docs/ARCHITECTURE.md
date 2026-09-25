@@ -826,6 +826,15 @@ Budgets, and what enforces them:
   morph nor a collapse runs a style recalc of half the Edit view's
   elements or more (it has ~580; a change they all inherit restyles
   nearly all of them, the targeted changes a few dozen).
+* **Counted work of the open morph** (same spec, Chromium trace from the
+  morph's `data-transition` to `expanded`; counted, not timed, so they
+  hold on a machine of any speed): the box proxy is rastered in at most
+  two of the morph's frames (as it gets its layer, and once at the size it
+  grows to), the canvas is never handed to the compositor again (no
+  `CanvasResource…::ProduceCanvasResource` / `PrepareTransferableResource`:
+  it holds still, see below), and the page rasters at most
+  `MORPH_TILES_PER_FRAME` (16) tiles per frame it commits — the morph
+  rastered 21–23 before the measures below, ~12 with them.
 * **Idle** (same spec): the box at rest, and the editor in the Edit view
   with nothing happening, run no animation-frame callback, no animation,
   no style recalc and no layout for 2 s (< 20 ms of tasks: idle CPU ~0).
@@ -893,6 +902,19 @@ Idle, both pages ran 0 frame callbacks, 0 animations, 0 style recalcs and
 editor 201.1 KB. On the Windows smoke run the idle working set of the
 process tree has been ~370 MB.
 
+What an open morph costs per frame (Edit view with an item, 4× CPU, CPU
+time per thread from the trace), against the morph before the held
+canvas, the laid-out content clip, the custom-property fade and the
+settled corners (below). With every animation stepped through the same 30
+frame states: the page's main thread 17.0 → 12.6 ms per frame (−26 %),
+the display compositor 19.2 → 12.7 ms per drawn frame (−34 %), raster
+10.1 → 7.0 ms (−31 %), 25.5 → 13.1 tiles. Played in real time (slowed 4×
+to see every frame): main thread 11.6–13.6 → 8.3–10.0 ms per frame (−22
+to −28 %), the compositor's draw 15.8–16.9 → 13.0–13.6 ms (−17 to −20 %),
+23 → 11 tiles. (Medians of 4–8 alternated runs each, three sets.) The
+collapse and the Start view keep their main-thread time (within ±10 %,
+the spread between runs) and the compositor draws 35–45 % less.
+
 What gets the open ready before its motion (the Edit view with an item):
 
 * `Prepare` starts loading the item; the design is made from its icon
@@ -930,15 +952,39 @@ What keeps the morph cheap (`src/editor/morph/`):
 * Proxy, flyer and panel regions animate transform and opacity only; the
   proxy and the flyer carry a constant non-compositable property so they
   stay on the main thread's clock with the shell (`MAIN_THREAD`).
-* The shell's radius changes every frame, so the shell is repainted every
-  frame: it carries only its fill, hairline and highlight. The blurred drop
-  shadow is a layer of its own that never moves — it fades in as the shell
-  settles and out as the collapse starts. (In software rendering — CI
-  runners, VMs — repainting the blurred shadow with the shell doubled the
-  raster work of every frame, ~50 ms per frame at the panel's size, and the
-  main thread waits for raster at every commit.)
-* The content's clip-path runs only while the content shows (from its
-  fade-in on open; for the ~110 ms of its fade-out on close).
+* The shell's radius changes as it grows, so the shell is repainted at
+  those frames: it carries only its fill, hairline and highlight. Once its
+  counter-scaled corners are within half a pixel of its radius at rest
+  (the last ~third of the open's frames) they keep that radius, and the
+  shell only moves. The blurred drop shadow is a layer of its own that
+  never moves — it fades in as the shell settles and out as the collapse
+  starts. (In software rendering — CI runners, VMs — repainting the blurred
+  shadow with the shell doubled the raster work of every frame, ~50 ms per
+  frame at the panel's size, and the main thread waits for raster at every
+  commit.)
+* The content is revealed by a rounded clip (`.content`) laid out on the
+  shell's rect — its offset, size and radius animated — with the content
+  (`.views`, panel-sized) moved by the opposite offset so it stays in
+  place. A `clip-path` did this before: the compositor drew the whole
+  content through a mask it rastered anew at every frame. The clip moves
+  only while the content shows (from its fade-in on open; for the ~110 ms
+  of its fade-out on close).
+* The content fades in by a registered custom property
+  (`--morph-content-o`, its `opacity`), not an `opacity` animation: an
+  animated opacity keeps the whole content in a render pass of its own for
+  as long as it runs, even while opaque. The collapse's short fade-out is
+  an `opacity` animation; once transparent the content is not drawn.
+* The canvas holds still while the open morph plays (`stage.hold`,
+  CanvasStage): a 2D canvas on the page is handed to the compositor anew
+  at every frame the page commits, drawn or not — ~3 ms of each frame's
+  main thread at 4×, a sixth of it. A still picture of it (an `ImageBitmap` on a
+  `bitmaprenderer` canvas, handed over once) takes its place — same pixels,
+  same box, what the icon lands on — until the panel is open; what the
+  canvas was asked to draw meanwhile it draws then. A collapse does not
+  hold it: its content is gone after ~110 ms, and taking the picture first
+  would delay the motion.
+* What is transparent holds still: the proxy's animation stops once it
+  has faded, and what the icon lands on starts only as it shows.
 * The panel is never `inert` (toggling it restyles every element in it):
   a shield takes the pointer while it animates and focus is kept out.
 * Floating layers (tooltips, menus, popovers) are portalled to `<body>`

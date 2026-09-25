@@ -9,7 +9,7 @@
   (the command registry's view keys — Ctrl+0 / Ctrl+1 / Ctrl ±, K — use
   them). The document (the canvas and its shadow, `data-morph-landing`) is
   where the open morph's flying icon settles: it shows as the icon lands.
-  While the panel morphs the canvas is held (`stage.hold`): a still
+  While the panel morphs open the canvas is held (`stage.hold`): a still
   picture of it shows in its place and takes over `data-morph-landing`.
 -->
 <script lang="ts">
@@ -258,6 +258,10 @@
         live.setAttribute('data-morph-landing', '');
         pic.removeAttribute('data-morph-landing');
         pic.style.display = '';
+        // The picture goes, for a blank one of the canvas's size: none first
+        // (a blank the size of the canvas costs ~15 ms at 4× CPU).
+        pic.width = 0;
+        pic.height = 0;
         pic.getContext('bitmaprenderer')?.transferFromImageBitmap(null);
       }
       if (redrawWhenLetGo) {
