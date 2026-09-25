@@ -12,6 +12,12 @@
  *
  * Colours with an `-rgb` twin are "r g b" triplets for alpha variants:
  *   background: rgb(var(--accent-rgb) / 0.16);
+ *
+ * Contrast (WCAG AA, checked by contrast.test.ts): --text, --text-2,
+ * --text-3 and the status colours keep 4.5:1 on every surface and on the
+ * editor panel's fill over any wallpaper (hence the nearly opaque
+ * --glass-fill-strong); the text colours also inside controls. theme.ts
+ * keeps any accent at 3:1 (fills) and 4.5:1 (text, focus ring).
  */
 
 :root {
@@ -147,7 +153,7 @@
   --text: #f2f3f6;
   --text-rgb: 242 243 246;
   --text-2: #b9bdc8;
-  --text-3: #868b98;
+  --text-3: #9ba0ad;
   --text-disabled: #5b606c;
   --text-inverse: #15171c;
 
@@ -182,7 +188,7 @@
   /* Glass materials. Transparent windows cannot blur the desktop, so the
      "glass" is layered translucency + highlights, not backdrop-filter. */
   --glass-fill: rgb(28 31 39 / 0.72);
-  --glass-fill-strong: rgb(24 26 33 / 0.86);
+  --glass-fill-strong: rgb(24 26 33 / 0.94);
   --glass-tint: linear-gradient(
     160deg,
     rgb(255 255 255 / 0.1) 0%,
@@ -238,7 +244,7 @@
   --text: #15171c;
   --text-rgb: 21 23 28;
   --text-2: #4a4f5b;
-  --text-3: #6d7280;
+  --text-3: #646976;
   --text-disabled: #a4a8b2;
   --text-inverse: #f2f3f6;
 
@@ -253,13 +259,13 @@
   --control-border-bottom: rgb(0 0 0 / 0.18);
   --track: rgb(0 0 0 / 0.14);
 
-  --danger: #d52b3a;
-  --danger-rgb: 213 43 58;
+  --danger: #c82837;
+  --danger-rgb: 200 40 55;
   --on-danger: #ffffff;
-  --warning: #a86200;
-  --warning-rgb: 168 98 0;
-  --success: #12825a;
-  --success-rgb: 18 130 90;
+  --warning: #995900;
+  --warning-rgb: 153 89 0;
+  --success: #0f7350;
+  --success-rgb: 15 115 80;
 
   --shadow-1: 0 1px 2px rgb(16 18 24 / 0.1);
   --shadow-2: 0 2px 6px rgb(16 18 24 / 0.1), 0 1px 2px rgb(16 18 24 / 0.08);
@@ -270,7 +276,7 @@
   --inset-highlight: inset 0 1px 0 rgb(255 255 255 / 0.7);
 
   --glass-fill: rgb(250 251 253 / 0.74);
-  --glass-fill-strong: rgb(252 252 254 / 0.9);
+  --glass-fill-strong: rgb(252 252 254 / 0.95);
   --glass-tint: linear-gradient(
     160deg,
     rgb(255 255 255 / 0.55) 0%,

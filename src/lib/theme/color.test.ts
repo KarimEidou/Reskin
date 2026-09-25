@@ -9,6 +9,8 @@ import {
   rgbToOklch,
   rgbTriplet,
   toHex,
+  withContrast,
+  withLightness,
 } from './color';
 import { accentVars, effectiveAccent, resolveTheme, BRAND_ACCENT } from './theme';
 
@@ -61,6 +63,32 @@ describe('contrast', () => {
     expect(contrast({ r: 0, g: 0, b: 0 }, { r: 255, g: 255, b: 255 })).toBeCloseTo(21, 6);
     expect(readableOn(parseHex('#0078d4')!)).toEqual({ r: 255, g: 255, b: 255 });
     expect(readableOn(parseHex('#99ebff')!)).toEqual({ r: 0, g: 0, b: 0 });
+  });
+
+  it('moves a colour just far enough for a contrast', () => {
+    const surface = parseHex('#eceef2')!;
+    const gold = parseHex('#c08a00')!;
+    expect(contrast(gold, surface)).toBeLessThan(4.5);
+    const text = withContrast(gold, surface, 4.5, 'darker');
+    expect(contrast(text, surface)).toBeGreaterThanOrEqual(4.5);
+    // Just far enough: a step less would not do.
+    expect(contrast(withLightness(text, rgbToOklch(text).l + 0.01), surface)).toBeLessThan(4.5);
+    expect(Math.abs(rgbToOklch(text).h - rgbToOklch(gold).h)).toBeLessThan(4);
+    expect(Object.values(text).every(Number.isInteger)).toBe(true);
+
+    const dark = parseHex('#23262e')!;
+    const grey = parseHex('#656361')!;
+    expect(contrast(grey, dark)).toBeLessThan(3);
+    const fill = withContrast(grey, dark, 3, 'lighter');
+    expect(contrast(fill, dark)).toBeGreaterThanOrEqual(3);
+    expect(rgbToOklch(fill).l).toBeGreaterThan(rgbToOklch(grey).l);
+  });
+
+  it('keeps a colour that has the contrast, and gives what it can when none has', () => {
+    const blue = parseHex('#0078d4')!;
+    expect(withContrast(blue, parseHex('#ffffff')!, 4.5, 'darker')).toBe(blue);
+    // Nothing lighter than mid-grey has 7:1 against it: white is the most.
+    expect(withContrast(parseHex('#999999')!, parseHex('#777777')!, 7, 'lighter')).toEqual({ r: 255, g: 255, b: 255 });
   });
 });
 

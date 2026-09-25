@@ -142,6 +142,29 @@ export function withLightness(rgb: Rgb, l: number): Rgb {
   return oklchToRgb({ ...o, l });
 }
 
+const rounded = ({ r, g, b }: Rgb): Rgb => ({ r: Math.round(r), g: Math.round(g), b: Math.round(b) });
+
+/**
+ * `color` with at least `ratio` contrast against `bg`: `color` itself when
+ * it has that once rounded to whole channels (as hex writes it), else the
+ * nearest lightness in the given direction that has it — same hue, and
+ * chroma as far as sRGB allows — in whole channels. Black or white, the far
+ * ends, are the most it can give.
+ */
+export function withContrast(color: Rgb, bg: Rgb, ratio: number, towards: 'darker' | 'lighter'): Rgb {
+  if (contrast(rounded(color), bg) >= ratio) return color;
+  const enough = (l: number) => contrast(rounded(withLightness(color, l)), bg) >= ratio;
+  // Bisect between the colour's own lightness (too little) and the far end.
+  let short = rgbToOklch(color).l;
+  let far = towards === 'darker' ? 0 : 1;
+  for (let i = 0; i < 24; i++) {
+    const mid = (short + far) / 2;
+    if (enough(mid)) far = mid;
+    else short = mid;
+  }
+  return rounded(withLightness(color, far));
+}
+
 /**
  * The accent ramp. `light1..3` / `dark1..3` step lightness in OKLCH like
  * Windows' AccentLight/AccentDark colours; `vivid` is a saturated mid-light

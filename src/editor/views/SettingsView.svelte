@@ -88,6 +88,13 @@
   let active = $state<SettingsSection>('appearance');
   let scroller: HTMLElement | undefined = $state();
   const sectionEls: Partial<Record<SettingsSection, HTMLElement>> = {};
+  /**
+   * The jump under way: its section and the scroll offset it ends at. The
+   * nav shows that section until the jump ends, and afterwards too: near
+   * the end of the page a section cannot reach the top, where the scroll
+   * spy would name the next one.
+   */
+  let jumping: { id: SettingsSection; top: number } | null = null;
 
   async function set(patch: Partial<Settings>): Promise<void> {
     try {
@@ -146,29 +153,59 @@
     void set({ icoSizes: [...new Set(next)].sort((a, b) => a - b) });
   }
 
-  function jump(id: SettingsSection): void {
-    active = id;
-    sectionEls[id]?.scrollIntoView({ behavior: motion.reduced ? 'auto' : 'smooth', block: 'start' });
+  /** How far a section's top is below the top of the page, less its scroll margin. */
+  function distanceToTop(root: HTMLElement, el: HTMLElement): number {
+    const margin = parseFloat(getComputedStyle(el).scrollMarginTop) || 0;
+    return el.getBoundingClientRect().top - root.getBoundingClientRect().top - margin;
   }
 
-  // Scroll spy: the nav follows the section at the top of the page.
+  /** Scroll spy: the last section scrolled to the top of the page (the last one at its end). */
+  function sectionAtTop(root: HTMLElement): SettingsSection {
+    if (root.scrollTop + root.clientHeight >= root.scrollHeight - 4) return 'about';
+    let current: SettingsSection = 'appearance';
+    for (const { id } of SECTIONS) {
+      const el = sectionEls[id];
+      // Scroll offsets snap to device pixels: a jump may stop a fraction short.
+      if (el && distanceToTop(root, el) <= 1) current = id;
+    }
+    return current;
+  }
+
+  /**
+   * Scrolls the page until the section is at its top. Only the page:
+   * scrollIntoView would scroll every box around it that can scroll.
+   */
+  function jump(id: SettingsSection, behavior: ScrollBehavior = motion.reduced ? 'auto' : 'smooth'): void {
+    active = id;
+    const root = scroller;
+    const el = sectionEls[id];
+    if (!root || !el) return;
+    const top = Math.min(Math.max(0, root.scrollTop + distanceToTop(root, el)), root.scrollHeight - root.clientHeight);
+    // Already there: nothing scrolls, no scrollend to wait for.
+    jumping = Math.abs(top - root.scrollTop) >= 1 ? { id, top } : null;
+    root.scrollTo({ top, behavior });
+  }
+
   onMount(() => {
     // Windows may have changed the accent or the hotkey's fate meanwhile.
     void refreshSystem();
     const root = scroller;
     if (!root) return;
     const onScroll = () => {
-      const top = root.getBoundingClientRect().top + 24;
-      let current: SettingsSection = 'appearance';
-      for (const { id } of SECTIONS) {
-        const el = sectionEls[id];
-        if (el && el.getBoundingClientRect().top <= top) current = id;
-      }
-      if (root.scrollTop + root.clientHeight >= root.scrollHeight - 4) current = 'about';
-      active = current;
+      if (!jumping) active = sectionAtTop(root);
+    };
+    const onScrollEnd = () => {
+      const done = jumping;
+      jumping = null;
+      // Cut short (the wheel took over): the nav follows the page again.
+      if (done && Math.abs(root.scrollTop - done.top) >= 1) active = sectionAtTop(root);
     };
     root.addEventListener('scroll', onScroll, { passive: true });
-    return () => root.removeEventListener('scroll', onScroll);
+    root.addEventListener('scrollend', onScrollEnd);
+    return () => {
+      root.removeEventListener('scroll', onScroll);
+      root.removeEventListener('scrollend', onScrollEnd);
+    };
   });
 
   // Opening on a section (e.g. "About" from the tray menu).
@@ -176,14 +213,12 @@
     const target = shell.settingsSection;
     void shell.openEpoch;
     if (!target) {
+      jumping = null;
       scroller?.scrollTo({ top: 0 });
       active = 'appearance';
       return;
     }
-    void tick().then(() => {
-      sectionEls[target]?.scrollIntoView({ block: 'start' });
-      active = target;
-    });
+    void tick().then(() => jump(target, 'auto'));
   });
 </script>
 
@@ -501,7 +536,12 @@
     outline-offset: -2px;
   }
 
+  /* The containing block of everything positioned inside (the visually
+     hidden labels of Select and Slider): outside it they would overflow the
+     editor panel and make it scrollable, and bringing a section into view
+     could scroll the panel, title bar and all, out of the window. */
   .scroll {
+    position: relative;
     min-height: 0;
     overflow: auto;
     scrollbar-width: thin;
@@ -587,18 +627,19 @@
   .box-preview {
     position: relative;
   }
+  /* 4.5:1 on the lightest part of the desk behind it. */
   .caption {
     position: absolute;
     bottom: var(--space-2);
     left: 0;
     right: 0;
-    color: rgb(255 255 255 / 0.8);
+    color: #ffffff;
     font-size: var(--text-xs);
     text-align: center;
     text-shadow: 0 1px 2px rgb(0 0 0 / 0.4);
   }
   :global([data-theme='light']) .caption {
-    color: rgb(20 30 60 / 0.65);
+    color: rgb(20 30 60 / 0.8);
     text-shadow: none;
   }
   .box-controls {

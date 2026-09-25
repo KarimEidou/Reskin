@@ -5,7 +5,17 @@
 
 import './tokens.css';
 import type { Settings, ThemeMode } from '$lib/ipc/types';
-import { accentRamp, parseHex, readableOn, rgbTriplet, toHex, type Rgb } from './color';
+import {
+  accentRamp,
+  parseHex,
+  readableOn,
+  rgbToOklch,
+  rgbTriplet,
+  toHex,
+  withContrast,
+  withLightness,
+  type Rgb,
+} from './color';
 
 /** Reskin's own accent, used when the Windows accent is off or unknown. */
 export const BRAND_ACCENT = '#7c5cff';
@@ -33,15 +43,42 @@ export function effectiveAccent(useAccent: boolean, accent: string | null | unde
 }
 
 /**
+ * Each theme's surface with the least contrast to its accents (tokens.css):
+ * the lightest dark one (`--surface-3`), the darkest light one
+ * (`--surface-sunken`).
+ */
+const LEAST_CONTRAST_SURFACE: Readonly<Record<ResolvedTheme, Rgb>> = {
+  dark: parseHex('#23262e')!,
+  light: parseHex('#eceef2')!,
+};
+
+/**
+ * WCAG AA against every surface: 3:1 for accent fills (switches, selection
+ * marks), 4.5:1 for accent text (and the focus ring, drawn in it).
+ */
+const MIN_FILL_CONTRAST = 3;
+const MIN_TEXT_CONTRAST = 4.5;
+
+/**
  * Accent custom properties for a theme. Fills use a lighter shade on dark
  * and a darker one on light (as Windows does) so text on them stays legible.
+ * Windows lets the accent be any colour: a fill or text shade that would
+ * not stand out from every surface of the theme goes further (lighter on
+ * dark, darker on light) until it does, hover and pressed in step with the
+ * fill; accents that already do are used as they are.
  */
 export function accentVars(accent: Rgb, theme: ResolvedTheme): Record<string, string> {
   const ramp = accentRamp(accent);
-  const fill = theme === 'dark' ? ramp.light1 : ramp.dark1;
-  const hover = theme === 'dark' ? ramp.light2 : ramp.base;
-  const pressed = theme === 'dark' ? ramp.base : ramp.dark2;
-  const text = theme === 'dark' ? ramp.light3 : ramp.dark2;
+  const dark = theme === 'dark';
+  const surface = LEAST_CONTRAST_SURFACE[theme];
+  const towards = dark ? 'lighter' : 'darker';
+  const shade = dark ? ramp.light1 : ramp.dark1;
+  const fill = withContrast(shade, surface, MIN_FILL_CONTRAST, towards);
+  const shift = rgbToOklch(fill).l - rgbToOklch(shade).l;
+  const inStep = (rgb: Rgb) => (shift === 0 ? rgb : withLightness(rgb, rgbToOklch(rgb).l + shift));
+  const hover = inStep(dark ? ramp.light2 : ramp.base);
+  const pressed = inStep(dark ? ramp.base : ramp.dark2);
+  const text = withContrast(dark ? ramp.light3 : ramp.dark2, surface, MIN_TEXT_CONTRAST, towards);
   const vars: Record<string, Rgb> = {
     'accent-base': ramp.base,
     accent: fill,
