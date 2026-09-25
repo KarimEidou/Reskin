@@ -17,7 +17,8 @@
  * --text-3 and the status colours keep 4.5:1 on every surface and on the
  * editor panel's fill over any wallpaper (hence the nearly opaque
  * --glass-fill-strong); the text colours also inside controls. theme.ts
- * keeps any accent at 3:1 (fills) and 4.5:1 (text, focus ring).
+ * keeps any accent at 3:1 (fills) and 4.5:1 (text, focus ring) on the
+ * same surfaces and panel.
  */
 
 :root {

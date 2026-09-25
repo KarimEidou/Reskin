@@ -115,9 +115,10 @@ const ACCENTS = [
 ];
 
 describe('accent colours', () => {
-  for (const theme of ['dark', 'light'] as const) {
-    it(`stand out from every surface, whatever the Windows accent (${theme})`, () => {
-      const surfaces = SURFACES.map((s) => paint(THEMES[theme][s]!).rgb);
+  for (const variant of Object.keys(THEMES) as Array<keyof typeof THEMES>) {
+    it(`stand out from every surface and the panel, whatever the Windows accent (${variant})`, () => {
+      const theme = variant.startsWith('dark') ? 'dark' : 'light';
+      const surfaces = Object.values(backgrounds(variant));
       const failures: string[] = [];
       for (const accent of ACCENTS) {
         const vars = accentVars(parseHex(accent)!, theme);
@@ -132,7 +133,9 @@ describe('accent colours', () => {
       }
       expect(failures).toEqual([]);
     });
+  }
 
+  for (const theme of ['dark', 'light'] as const) {
     it(`moves hover and pressed with a fill that had to move (${theme})`, () => {
       const moved = ACCENTS.filter((accent) => {
         const ramp = accentRamp(parseHex(accent)!);

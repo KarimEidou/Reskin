@@ -43,18 +43,20 @@ export function effectiveAccent(useAccent: boolean, accent: string | null | unde
 }
 
 /**
- * Each theme's surface with the least contrast to its accents (tokens.css):
- * the lightest dark one (`--surface-3`), the darkest light one
- * (`--surface-sunken`).
+ * What accents are drawn on with the least contrast to them (tokens.css):
+ * in dark, the editor panel's fill (`--glass-fill-strong`) over a white
+ * wallpaper, rounded up — lighter than every dark surface; in light, the
+ * darkest surface (`--surface-sunken`).
  */
 const LEAST_CONTRAST_SURFACE: Readonly<Record<ResolvedTheme, Rgb>> = {
-  dark: parseHex('#23262e')!,
+  dark: parseHex('#26282f')!,
   light: parseHex('#eceef2')!,
 };
 
 /**
- * WCAG AA against every surface: 3:1 for accent fills (switches, selection
- * marks), 4.5:1 for accent text (and the focus ring, drawn in it).
+ * WCAG AA against every surface and the panel: 3:1 for accent fills
+ * (switches, selection marks), 4.5:1 for accent text (and the focus ring,
+ * drawn in it).
  */
 const MIN_FILL_CONTRAST = 3;
 const MIN_TEXT_CONTRAST = 4.5;
@@ -63,9 +65,10 @@ const MIN_TEXT_CONTRAST = 4.5;
  * Accent custom properties for a theme. Fills use a lighter shade on dark
  * and a darker one on light (as Windows does) so text on them stays legible.
  * Windows lets the accent be any colour: a fill or text shade that would
- * not stand out from every surface of the theme goes further (lighter on
- * dark, darker on light) until it does, hover and pressed in step with the
- * fill; accents that already do are used as they are.
+ * not stand out from every surface of the theme and from the panel goes
+ * further (lighter on dark, darker on light) until it does, hover and
+ * pressed in step with the fill; accents that already do are used as they
+ * are.
  */
 export function accentVars(accent: Rgb, theme: ResolvedTheme): Record<string, string> {
   const ramp = accentRamp(accent);
