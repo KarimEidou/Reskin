@@ -35,6 +35,7 @@ import {
   Engine,
   MASTER_SIZE,
   Surface,
+  deserializeProject,
   migrateProject,
   type Doc,
   type EngineEvent,
@@ -125,10 +126,28 @@ export interface ElevationRequest extends ApplyJob {
   reason: string;
 }
 
+/** An applied change the Undo of its toast can take back. */
+export interface AppliedChange {
+  entry: QueueEntry;
+  before: ItemInfo;
+  /**
+   * The apply's main journal entry, if it has one: undoing it undoes the
+   * Start menu and taskbar pins applied with it (its group) too.
+   */
+  historyId: string | null;
+}
+
 export interface PendingElevation {
   requests: ElevationRequest[];
-  /** From "Apply style to all": approved or copied together, with one summary. */
+  /**
+   * From "Apply style to all": approved or copied together, with one
+   * summary for the whole batch once the dialog is answered.
+   */
   batch: boolean;
+  /** What the batch applied before asking (its Undo goes with that summary). */
+  applied: AppliedChange[];
+  /** How many of the batch's items failed before asking. */
+  failed: number;
 }
 
 /** Something to bring into the editor: an inspected item, or a picture (a paste). */
@@ -232,13 +251,6 @@ function failureText(outcome: Extract<ApplyOutcome, { type: 'failed' }>): string
 
 const plural = (n: number, word: string) => `${n} ${word}${n === 1 ? '' : 's'}`;
 
-/** An applied change the Undo of its toast can take back. */
-interface AppliedChange {
-  entry: QueueEntry;
-  before: ItemInfo;
-  historyIds: string[];
-}
-
 export class EditorSession {
   readonly engine: Engine;
   private readonly deps: SessionDeps;
@@ -302,8 +314,16 @@ export class EditorSession {
   private designSerial = 0;
   /** Designs being put in the engine right now (see `replaceDesign`). */
   private replacing = 0;
+  /**
+   * Bumped by `reset`: loads started for the queue it forgot (an item still
+   * loading as the editor closed) read it first and, once back, put
+   * nothing in the next open.
+   */
+  private generation = 0;
   private switchChain: Promise<void> = Promise.resolve();
   private readonly autosaver: Autosave;
+  /** The live autosave holds a draft of the open design (see `produceAutosave`). */
+  private draftWritten = false;
   private readonly unsubscribe: () => void;
   private disposed = false;
 
@@ -311,8 +331,7 @@ export class EditorSession {
     this.deps = deps;
     this.engine = engine;
     this.autosaver = new Autosave({
-      // Only unsaved work is kept; the serialization runs off the main thread.
-      produce: () => (this.unsaved ? this.encodeProject() : null),
+      produce: () => this.produceAutosave(),
       save: (data) => this.deps.commands.autosave(data),
       delayMs: AUTOSAVE_DELAY_MS,
       maxWaitMs: AUTOSAVE_MAX_WAIT_MS,
@@ -541,6 +560,8 @@ export class EditorSession {
     this.standalone = opts.standalone ?? null;
     this.cleanEntry = this.engine.currentEntryId;
     this.baseUnsaved = opts.unsaved ?? false;
+    // Whatever the autosave holds is some other design's.
+    this.draftWritten = false;
     this.hasDesign = true;
   }
 
@@ -578,6 +599,7 @@ export class EditorSession {
    * and join the queue otherwise.
    */
   async openItems(items: ItemInfo[], opts: { replace?: boolean } = {}): Promise<void> {
+    const generation = this.generation;
     // Loading can take a moment; don't yank the user back to the Edit view
     // if they (or Rust) navigated elsewhere meanwhile.
     const viewAtStart = this.view;
@@ -599,9 +621,12 @@ export class EditorSession {
       await this.startFromSource(sources[0]!);
       sources = sources.slice(1);
     }
+    // The editor closed and opened again meanwhile: the rest was for the queue it forgot.
+    if (generation !== this.generation) return;
     for (const s of sources) {
       if (s.kind !== 'project') {
         await this.addAsLayer(s);
+        if (generation !== this.generation) return;
       } else {
         this.ensureQueued();
         this.enqueue(s);
@@ -617,11 +642,14 @@ export class EditorSession {
    * the queue.
    */
   async importSources(sources: readonly ImportSource[], how: ImportChoice): Promise<number> {
+    const generation = this.generation;
     const items = sources.flatMap((s) => (s.kind === 'item' ? [s.info] : []));
     const pictures = sources.flatMap((s) => (s.kind === 'image' ? [s] : []));
     const queued = this.queue.length;
     if (!this.hasDesign) {
       if (items.length > 0) await this.openItems(items);
+      // Reset meanwhile (see `openItems`): the pictures were for the queue it forgot.
+      if (generation !== this.generation) return 0;
       for (const p of pictures) {
         if (this.hasDesign) this.engine.importImage(p.surface, p.name);
         else this.startFromSurface(p.surface, p.name);
@@ -644,11 +672,11 @@ export class EditorSession {
         if (s.kind === 'image') this.engine.importImage(s.surface, s.name);
         else await this.addAsLayer(s.info);
       } else if (s.kind === 'image') {
-        await this.queuePicture(s.name, s.surface);
-        added++;
+        if (await this.queuePicture(s.name, s.surface)) added++;
       } else if (this.enqueue(s.info)) {
         added++;
       }
+      if (generation !== this.generation) return added;
     }
     this.view = 'edit';
     return added;
@@ -761,18 +789,20 @@ export class EditorSession {
     });
   }
 
-  /** Queues a picture as a design of its own. */
-  private async queuePicture(name: string, surface: Surface): Promise<void> {
+  /** Queues a picture as a design of its own; false when `reset` forgot the queue meanwhile. */
+  private async queuePicture(name: string, surface: Surface): Promise<boolean> {
+    const generation = this.generation;
     const scratch = new Engine();
     try {
       scratch.newDocument({ name });
       const blank = scratch.doc.layers[0]!;
       if (scratch.importImage(surface, name)) scratch.deleteLayer(blank.id);
       const thumb = scratch.thumbnail(THUMB_SIZE);
-      this.pushEntry(this.designItem(name), {
-        project: await this.encodeProject(scratch.doc),
-        thumb: await this.deps.encode(thumb),
-      });
+      const project = await this.encodeProject(scratch.doc);
+      const url = await this.deps.encode(thumb);
+      if (generation !== this.generation) return false;
+      this.pushEntry(this.designItem(name), { project, thumb: url });
+      return true;
     } finally {
       scratch.dispose();
     }
@@ -783,8 +813,9 @@ export class EditorSession {
    * serialised: a switch requested while another is loading runs after it.
    */
   select(index: number): Promise<void> {
+    const generation = this.generation;
     this.switching += 1;
-    const run = this.switchChain.then(() => this.selectNow(index));
+    const run = this.switchChain.then(() => this.selectNow(index, generation));
     this.switchChain = run.catch(() => {});
     return run.finally(() => {
       this.switching -= 1;
@@ -801,18 +832,22 @@ export class EditorSession {
     return true;
   }
 
-  private async selectNow(index: number): Promise<void> {
-    if (index === this.currentIndex || !this.queue[index]) return;
+  /** Switches to entry `index` of the queue of `generation` (none, once `reset` forgot it). */
+  private async selectNow(index: number, generation: number): Promise<void> {
+    if (generation !== this.generation || index === this.currentIndex || !this.queue[index]) return;
     await this.replaceDesign(async () => {
       await this.stashCurrent();
+      if (generation !== this.generation) return;
       const previous = { index: this.currentIndex, original: this.original };
       const entry = this.queue[index]!;
       const status = entry.status;
       this.currentIndex = index;
       if (status === 'pending') entry.status = 'editing';
       try {
-        await this.loadEntry(entry);
+        await this.loadEntry(entry, generation);
       } catch (e) {
+        // Its queue is gone: nothing to put back, nobody to tell.
+        if (generation !== this.generation) return;
         // Nothing replaced the design in the engine: it stays the open one.
         this.currentIndex = previous.index;
         this.original = previous.original;
@@ -822,16 +857,23 @@ export class EditorSession {
     });
   }
 
-  /** Puts a queue entry's design in the engine. */
-  private async loadEntry(entry: QueueEntry): Promise<void> {
+  /**
+   * Puts a queue entry's design in the engine. Everything is read first:
+   * the engine and `original` change only once it is all in, and not at
+   * all when `reset` forgot the queue of `generation` meanwhile.
+   */
+  private async loadEntry(entry: QueueEntry, generation: number): Promise<void> {
     const { info } = entry;
-    this.original = info.kind === 'project' ? null : await this.loadIcon(info);
-    if (entry.project !== null) {
-      await this.engine.loadProject(entry.project);
-    } else if (info.kind === 'project') {
-      await this.engine.loadProject(await this.deps.commands.readProject(info.id));
+    const original = info.kind === 'project' ? null : await this.loadIcon(info);
+    const json = entry.project ?? (info.kind === 'project' ? await this.deps.commands.readProject(info.id) : null);
+    const doc = json === null ? null : await deserializeProject(json);
+    const icon = doc === null && original ? await this.fitted(original, MASTER_SIZE) : null;
+    if (generation !== this.generation) return;
+    this.original = original;
+    if (doc) {
+      this.engine.loadDocument(doc);
     } else {
-      designFromIcon(this.engine, info, this.original && (await this.fitted(this.original, MASTER_SIZE)));
+      designFromIcon(this.engine, info, icon);
       this.engine.clearHistory();
     }
     const library = entry.libraryId !== null && entry.libraryName !== null ? { id: entry.libraryId, name: entry.libraryName } : null;
@@ -840,10 +882,16 @@ export class EditorSession {
     this.loaded({ recipe: entry.recipe, library, unsaved: entry.unsaved });
   }
 
-  /** Removes a queued item; refused — false — while a job runs or an item is loading. */
+  /**
+   * Removes a queued item, with its design; refused — false — while a job
+   * runs or an item is loading. Unsaved changes it had are not offered for
+   * recovery any more.
+   */
   async remove(index: number): Promise<boolean> {
     if (this.queueLocked || !this.queue[index]) return false;
+    const generation = this.generation;
     const wasCurrent = index === this.currentIndex;
+    const dropped = wasCurrent ? this.unsaved : this.queue[index]!.unsaved;
     this.queue.splice(index, 1);
     if (index < this.currentIndex) this.currentIndex -= 1;
     if (wasCurrent) {
@@ -859,6 +907,8 @@ export class EditorSession {
         this.libraryName = null;
       }
     }
+    // Its draft may be the one the autosave holds.
+    if (dropped && generation === this.generation) await this.settleAutosave();
     return true;
   }
 
@@ -916,6 +966,7 @@ export class EditorSession {
     entry.libraryName = this.libraryName;
     entry.unsaved = this.unsaved;
     const autosave = entry.unsaved && this.autosaver.pending;
+    if (autosave) this.draftWritten = true;
     // Both take the design as it is now, before anything is awaited.
     const thumb = this.deps.encode(this.engine.thumbnail(THUMB_SIZE)).then(
       (url) => (entry.thumb = url),
@@ -962,12 +1013,18 @@ export class EditorSession {
     return info.icon ? this.deps.decode(info.icon).catch(() => null) : null;
   }
 
-  /** A standalone design from an image or a project file (nothing was open). */
+  /**
+   * A standalone design from an image or a project file (nothing was
+   * open). Everything is read first; the design does not open when `reset`
+   * forgot the queue meanwhile.
+   */
   private async startFromSource(info: ItemInfo): Promise<void> {
+    const generation = this.generation;
     if (info.kind === 'project') {
-      const json = await this.deps.commands.readProject(info.id);
+      const doc = await deserializeProject(await this.deps.commands.readProject(info.id));
+      if (generation !== this.generation) return;
       await this.replaceDesign(async () => {
-        await this.engine.loadProject(json);
+        this.engine.loadDocument(doc);
         this.original = null;
         this.loaded({ standalone: info });
       });
@@ -975,6 +1032,7 @@ export class EditorSession {
     }
     const icon = await this.loadIcon(info);
     const fitted = icon && (await this.fitted(icon, MASTER_SIZE));
+    if (generation !== this.generation) return;
     await this.replaceDesign(async () => {
       this.original = icon;
       designFromIcon(this.engine, info, fitted);
@@ -1093,6 +1151,8 @@ export class EditorSession {
         this.elevation = {
           requests: [{ ...job, entry, ticket: outcome.ticket, reason: outcome.reason }],
           batch: false,
+          applied: [],
+          failed: 0,
         };
         break;
       case 'unsupported':
@@ -1120,7 +1180,11 @@ export class EditorSession {
     play('error');
   }
 
-  /** Marks `entry` applied; returns what undoing it takes. */
+  /**
+   * Marks `entry` applied; returns what undoing it takes: its main journal
+   * entry, which Rust undoes together with the pins applied with it (the
+   * outcome's other entries).
+   */
   private markApplied(entry: QueueEntry, outcome: Extract<ApplyOutcome, { type: 'applied' }>, job: ApplyJob): AppliedChange {
     const before = entry.info;
     entry.outcome = outcome;
@@ -1129,7 +1193,7 @@ export class EditorSession {
     entry.info = { ...before, reskinned: true, customIcon: true };
     entry.unsaved = false;
     if (job.saved) this.markSaved(job.saved);
-    return { entry, before, historyIds: outcome.entries.map((e) => e.id) };
+    return { entry, before, historyId: outcome.entries[0]?.id ?? null };
   }
 
   /** A batch item that was not applied, and why. */
@@ -1165,18 +1229,27 @@ export class EditorSession {
     );
   }
 
-  /** Takes applied changes back (the toast's Undo): their items can be applied again. */
+  /**
+   * Takes applied changes back (the toast's Undo): their items can be
+   * applied again. Every change is tried; the ones that could not be undone
+   * are reported together at the end.
+   */
   private async undoApplied(changes: AppliedChange[]): Promise<void> {
     const failed: string[] = [];
     let needsAdmin = 0;
     let reopened = false;
-    for (const { entry, before, historyIds } of changes) {
+    for (const { entry, before, historyId } of changes) {
       let undone = true;
-      for (const id of historyIds) {
-        const report = await this.deps.commands.restore({ type: 'entry', id });
-        failed.push(...report.failed);
-        needsAdmin += report.needsElevation;
-        undone &&= report.failed.length === 0 && report.needsElevation === 0;
+      if (historyId !== null) {
+        try {
+          const report = await this.deps.commands.restore({ type: 'entry', id: historyId });
+          failed.push(...report.failed);
+          needsAdmin += report.needsElevation;
+          undone = report.failed.length === 0 && report.needsElevation === 0;
+        } catch (e) {
+          failed.push(`${before.name} — ${errorText(e)}`);
+          undone = false;
+        }
       }
       if (!undone || entry.status !== 'applied') continue;
       entry.status = 'editing';
@@ -1226,6 +1299,18 @@ export class EditorSession {
     return this.runElevation('copy');
   }
 
+  /**
+   * Cancel in the elevation dialog: the items waiting stay as they are; an
+   * "Apply style to all" reports what it applied. Nothing to report once
+   * the dialog was answered or dismissed.
+   */
+  cancelElevation(): void {
+    const pending = this.elevation;
+    this.elevation = null;
+    if (pending?.batch) this.reportBatch(pending, pending.applied);
+  }
+
+  /** Closes the elevation dialog without a word (the editor is closing). */
   dismissElevation(): void {
     this.elevation = null;
   }
@@ -1236,7 +1321,10 @@ export class EditorSession {
     this.elevation = null;
     const requests =
       how === 'copy' ? pending.requests.filter((r) => r.entry.info.modes.includes('personalCopy')) : pending.requests;
-    if (requests.length === 0) return;
+    if (requests.length === 0) {
+      if (pending.batch) this.reportBatch(pending, pending.applied);
+      return;
+    }
     const label = how === 'approve' ? 'Waiting for approval' : 'Making a personal copy';
     const run = (req: ElevationRequest, job: ApplyJob): Promise<ApplyOutcome> => {
       if (how === 'copy') return this.send(req.entry, job);
@@ -1256,7 +1344,7 @@ export class EditorSession {
         }
         return;
       }
-      const changes: AppliedChange[] = [];
+      const changes = [...pending.applied];
       for (const [n, req] of requests.entries()) {
         this.busy = { label: `${label} (${n + 1} of ${requests.length})`, progress: n / requests.length };
         const job = jobOf(req);
@@ -1276,14 +1364,24 @@ export class EditorSession {
         // Declined in Windows' prompt: the others are not asked about.
         if (outcome.type === 'cancelled') break;
       }
-      const n = changes.length;
-      if (n > 0) await this.settleAutosave();
-      if (n === requests.length) this.report(`Applied to ${plural(n, 'more icon')}.`, 'success', changes);
-      else this.report(`Applied to ${n} of ${plural(requests.length, 'icon')}.`, n > 0 ? 'warning' : 'error', changes);
+      if (changes.length > pending.applied.length) await this.settleAutosave();
+      this.reportBatch(pending, changes);
     } finally {
       this.busy = null;
       await this.applySettled();
     }
+  }
+
+  /**
+   * The one summary of an "Apply style to all" that asked for approval,
+   * once the dialog is answered: `changes` is everything the batch
+   * applied, taken back together by the toast's Undo.
+   */
+  private reportBatch(pending: PendingElevation, changes: AppliedChange[]): void {
+    const total = pending.applied.length + pending.failed + pending.requests.length;
+    const n = changes.length;
+    if (n === total) this.report(`Applied to ${plural(n, 'more icon')}.`, 'success', changes);
+    else this.report(`Applied to ${n} of ${plural(total, 'icon')}.`, n > 0 ? 'warning' : 'error', changes);
   }
 
   /**
@@ -1293,7 +1391,7 @@ export class EditorSession {
    * included, stay as they are; each styled item keeps the recipe as its
    * own. Items that need administrator approval are asked about together
    * at the end (the elevation dialog), with personal copies as the
-   * alternative.
+   * alternative; the batch's summary then waits for the answer.
    */
   async applyStyleToAll(): Promise<{ applied: number; failed: number; needsElevation: number }> {
     const result = { applied: 0, failed: 0, needsElevation: 0 };
@@ -1355,13 +1453,14 @@ export class EditorSession {
     }
     // Applied designs are safe now: the autosave keeps what is still unsaved.
     if (result.applied > 0) await this.settleAutosave();
-    if (result.failed === 0 && waiting.length === 0) {
+    if (waiting.length > 0) {
+      // Reported as a whole once the dialog is answered (see `reportBatch`).
+      this.elevation = { requests: waiting, batch: true, applied: changes, failed: result.failed };
+    } else if (result.failed === 0) {
       this.report(`Applied "${recipe.label}" to ${plural(result.applied, 'more icon')}.`, 'success', changes);
     } else {
-      const approval = waiting.length > 0 ? ` ${waiting.length} need${waiting.length === 1 ? 's' : ''} administrator approval.` : '';
-      this.report(`Applied to ${result.applied}; ${result.failed} failed.${approval}`, result.failed > 0 ? 'error' : 'warning', changes);
+      this.report(`Applied to ${result.applied}; ${result.failed} failed.`, 'error', changes);
     }
-    if (waiting.length > 0) this.elevation = { requests: waiting, batch: true };
     return result;
   }
 
@@ -1406,9 +1505,12 @@ export class EditorSession {
    * Library design.
    */
   async openLibraryDesign(id: string, name?: string): Promise<void> {
-    const json = await this.deps.commands.libraryLoad(id);
+    const generation = this.generation;
+    const doc = await deserializeProject(await this.deps.commands.libraryLoad(id));
+    // The editor closed and opened again meanwhile: not for the next open.
+    if (generation !== this.generation) return;
     await this.replaceDesign(async () => {
-      await this.engine.loadProject(json);
+      this.engine.loadDocument(doc);
       if (name) this.engine.setDocumentName(name);
       if (!this.hasTarget) this.original = null;
       this.claimSource();
@@ -1485,8 +1587,31 @@ export class EditorSession {
   // 2 s after the last edit (at least every 10 s while editing goes on),
   // before another design is opened and when the editor closes; a design
   // without unsaved changes is never written. Once the open design is
-  // safe (applied, saved to the Library, exported as a project), the slot
-  // takes another queued design with unsaved changes, or empties.
+  // safe (applied, saved to the Library, exported as a project) or clean
+  // again (its changes undone), or removed from the queue with its
+  // changes, the slot takes another queued design with unsaved changes, or
+  // empties.
+
+  /**
+   * What the scheduled autosave writes: the open design while it has
+   * unsaved changes; once they are gone again after its draft was written,
+   * whatever else is unsaved (see `otherDraft`), so a later launch never
+   * offers a design the user reverted; otherwise nothing.
+   */
+  private produceAutosave(): Promise<string> | string | null {
+    if (this.unsaved) {
+      this.draftWritten = true;
+      // Serialized off the main thread.
+      return this.encodeProject();
+    }
+    return this.draftWritten ? this.otherDraft() : null;
+  }
+
+  /** The slot's content once the open design leaves it: another queued design's unsaved changes, or none (''). */
+  private otherDraft(): string {
+    this.draftWritten = false;
+    return this.queue.find((q) => q !== this.current && q.unsaved && q.project !== null)?.project ?? '';
+  }
 
   /**
    * Writes the open design's unsaved changes now (nothing when there are
@@ -1496,6 +1621,7 @@ export class EditorSession {
    */
   flushAutosave(): Promise<void> {
     if (!this.autosaver.pending || !this.unsaved) return this.autosaver.flush();
+    this.draftWritten = true;
     return this.autosaver.write(this.encodeProject()).catch((e: unknown) => console.warn('autosave failed', e));
   }
 
@@ -1505,8 +1631,7 @@ export class EditorSession {
       this.autosaver.schedule();
       return;
     }
-    const other = this.queue.find((q) => q !== this.current && q.unsaved && q.project !== null);
-    await this.autosaver.write(other?.project ?? '').catch((e: unknown) => console.warn('autosave failed', e));
+    await this.autosaver.write(this.otherDraft()).catch((e: unknown) => console.warn('autosave failed', e));
   }
 
   /** A design left over from a crash / an earlier launch, if any. */
@@ -1526,8 +1651,11 @@ export class EditorSession {
    * own work, and the recovery offer is answered.
    */
   async restoreAutosave(json: string): Promise<void> {
+    const generation = this.generation;
     const project = migrateProject(json);
     const target = await this.findTarget(project.meta.source);
+    // The editor closed and opened again meanwhile: the offer stays for later.
+    if (generation !== this.generation) return;
     if (target || this.hasDesign) {
       this.ensureQueued();
       const entry = (target && this.enqueue(target)) || this.pushEntry(this.designItem(project.meta.name));
@@ -1535,12 +1663,15 @@ export class EditorSession {
       entry.unsaved = true;
       await this.select(this.queue.indexOf(entry));
     } else {
+      const doc = await deserializeProject(json);
+      if (generation !== this.generation) return;
       await this.replaceDesign(async () => {
-        await this.engine.loadProject(json);
+        this.engine.loadDocument(doc);
         this.original = null;
         this.loaded({ unsaved: true });
       });
     }
+    if (generation !== this.generation) return;
     this.view = 'edit';
     this.autosaver.cancel();
     await this.autosaver.enqueue(() => this.deps.commands.autosave(null));
@@ -1589,9 +1720,15 @@ export class EditorSession {
     await this.deps.commands.editorClose('user');
   }
 
-  /** Forgets the queue (after the editor closed). */
+  /**
+   * Forgets the queue (after the editor closed). Items still loading for
+   * it are dropped as they come in (see `generation`); a draft written
+   * before stays in the autosave.
+   */
   reset(): void {
+    this.generation += 1;
     this.autosaver.cancel();
+    this.draftWritten = false;
     this.designToken += 1;
     this.queue = [];
     this.currentIndex = -1;

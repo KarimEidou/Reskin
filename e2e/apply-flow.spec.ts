@@ -1,5 +1,6 @@
 // Save & Apply from the shell: a queue applied item by item (Undo while the
-// editor stays open), "Apply style to all" with administrator approval,
+// editor stays open; the strip keeps the current item in view), "Apply
+// style to all" with administrator approval (one summary once answered),
 // Store app shortcuts, elevation (Allow / personal copy / cancel) and
 // failures surfaced with their hint.
 
@@ -52,6 +53,10 @@ async function openOn(page: Page, what: string | string[] | ItemInfo[]): Promise
     return !!s?.hasDesign && s.current?.status === 'editing' && s.switching === 0;
   });
 }
+
+/** The Undo buttons the toasts offer. */
+const toastUndos = (page: Page) =>
+  page.locator('[role="alert"], [role="status"]').getByRole('button', { name: 'Undo', exact: true });
 
 /** Save & Apply through its keyboard shortcut. */
 async function applyNow(page: Page): Promise<void> {
@@ -340,7 +345,83 @@ test.describe('"Apply style to all" and administrator approval', () => {
       `t-${zoomItem!.id}`,
     ]);
     await expect(page.getByRole('status').filter({ hasText: 'Applied to 2 more icons.' })).toBeVisible();
+    // The one summary: nothing was reported before the dialog was answered.
+    await expect(toastUndos(page)).toHaveCount(1);
+    await expect(page.getByRole('alert').filter({ hasText: 'administrator approval' })).toHaveCount(0);
     expect((await editorState(page)).phase).toBe('open');
+  });
+
+  test('Cancel reports once what the batch applied, with its Undo', async ({ openEditor, page }) => {
+    await openEditor({ applyCollapses: false });
+    const [steam, notes, firefox] = await makeItems(page, [SAMPLE_PATHS.steam, SAMPLE_PATHS.notes, SAMPLE_PATHS.publicShortcut]);
+    await page.evaluate((publicId) => {
+      const w = window as unknown as Internals;
+      const inner = w.__TAURI_INTERNALS__.invoke;
+      w.__TAURI_INTERNALS__.invoke = (cmd, args, opts) => {
+        const req = args?.req as { item: string; mode: string } | undefined;
+        return cmd === 'apply_icon' && req?.item === publicId && req.mode === 'inPlace'
+          ? Promise.resolve({ type: 'needsElevation', ticket: 't-firefox', reason: 'Access is denied. (0x80070005)' })
+          : inner(cmd, args, opts);
+      };
+    }, firefox!.id);
+    await openOn(page, [steam!, notes!, firefox!]);
+    await page.evaluate(() => {
+      (window as unknown as Win).__reskinSession.recipe = { label: 'Mono', apply: () => {} };
+    });
+    await page.getByTestId('apply-style-all').click();
+
+    const dialog = page.getByRole('dialog', { name: 'Administrator permission needed' });
+    await expect(dialog).toBeVisible();
+    await dialog.getByRole('button', { name: 'Cancel' }).click();
+    await expect(dialog).toBeHidden();
+    const summary = page.getByRole('alert').filter({ hasText: 'Applied to 1 of 2 icons.' });
+    await expect(summary).toBeVisible();
+    await expect(toastUndos(page)).toHaveCount(1);
+    expect(await statuses(page)).toEqual(['editing', 'applied', 'failed']);
+    expect(await calls(page, 'apply_icon_elevated')).toHaveLength(0);
+
+    // Its Undo takes back what the batch applied.
+    const [entry] = await page.evaluate(() => window.__e2e!.history);
+    await summary.getByRole('button', { name: 'Undo' }).click();
+    await waitForCall(page, 'restore', { target: { type: 'entry', id: entry!.id } });
+    await expect.poll(() => statuses(page)).toEqual(['editing', 'editing', 'failed']);
+  });
+});
+
+test.describe('the queue strip', () => {
+  // The medium editor window: only a few thumbnails fit beside the zoom and the buttons.
+  test.use({ viewport: { width: 1080, height: 720 } });
+
+  test('scrolls with the mouse wheel and keeps the current item in view', async ({ openEditor, page }) => {
+    // Six applies in turn.
+    test.slow();
+    await openEditor();
+    await openOn(page, Array.from({ length: 8 }, (_, n) => `C:\\Users\\e2e\\Desktop\\App ${n + 1}.lnk`));
+    const list = page.getByRole('list', { name: 'Queued icons' });
+    const scrollLeft = () => list.evaluate((ul) => ul.scrollLeft);
+    expect(await list.evaluate((ul) => ul.scrollWidth > ul.clientWidth)).toBe(true);
+
+    // A vertical wheel over it scrolls it sideways.
+    const strip = (await list.boundingBox())!;
+    await page.mouse.move(strip.x + strip.width / 2, strip.y + strip.height / 2);
+    await page.mouse.wheel(0, 100);
+    await expect.poll(scrollLeft).toBeGreaterThan(0);
+    await page.mouse.move(2, 2);
+    await list.evaluate((ul) => (ul.scrollLeft = 0));
+
+    // Item after item, the one that opens comes into view.
+    for (let next = 1; next <= 6; next++) {
+      await idle(page);
+      await applyNow(page);
+      await expect.poll(() => page.evaluate(() => (window as unknown as Win).__reskinSession.currentIndex)).toBe(next);
+    }
+    const current = list.locator('[data-testid="queue-item"][aria-current="true"]');
+    await expect(current).toHaveAccessibleName('App 7, editing');
+    const inView = async () => {
+      const [box, item] = [(await list.boundingBox())!, (await current.boundingBox())!];
+      return item.x >= box.x && item.x + item.width <= box.x + box.width;
+    };
+    await expect.poll(inView).toBe(true);
   });
 });
 
