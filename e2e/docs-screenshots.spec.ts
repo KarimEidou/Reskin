@@ -176,7 +176,7 @@ test.describe('editor', () => {
 });
 
 // ---- Marketing pictures ----------------------------------------------------------------------
-// The README's and the website's hero (an animated WebP), the twelve styles,
+// The README's and the website's hero (an animated WebP, and a still of it), the twelve styles,
 // the three steps and the repository's social preview. The icons are the
 // fake backend's sample icons as the real Styles panel restyles them.
 
@@ -422,6 +422,8 @@ test.describe('marketing', () => {
     frames.pop();
     mkdirSync(DOCS_DIR, { recursive: true });
     writeFileSync(join(DOCS_DIR, 'hero.webp'), animatedWebp(HERO.width * 2, HERO.height * 2, frames));
+    // Its first frame, for people who turned animations off.
+    writeFileSync(join(DOCS_DIR, 'hero-still.webp'), frames[0]!.webp);
 
     // One icon, every style.
     const hero = icons[0]!;

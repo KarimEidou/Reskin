@@ -1,0 +1,381 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Reskin — give any desktop icon a new look</title>
+  <meta name="description" content="Drag a shortcut onto Reskin's floating box, pick a style, done. Restyle any Windows desktop icon in seconds — Neon, Glass, Retro Pixel and more. Free for Windows 10 and 11. No account. Undo anything.">
+  <link rel="canonical" href="https://karimeidou.github.io/Reskin/">
+  <meta name="theme-color" content="#0a1030">
+  <meta name="color-scheme" content="dark">
+  <link rel="icon" href="assets/icon.svg" type="image/svg+xml">
+  <link rel="apple-touch-icon" href="assets/icon-256.png">
+
+  <meta property="og:type" content="website">
+  <meta property="og:site_name" content="Reskin">
+  <meta property="og:title" content="Reskin — give any desktop icon a new look">
+  <meta property="og:description" content="Drag a shortcut onto the floating box, pick a style, done. Free for Windows 10 and 11.">
+  <meta property="og:url" content="https://karimeidou.github.io/Reskin/">
+  <meta property="og:image" content="https://karimeidou.github.io/Reskin/screenshots/social-preview.png">
+  <meta property="og:image:width" content="1280">
+  <meta property="og:image:height" content="640">
+  <meta property="og:image:alt" content="Reskin: give any desktop icon a new look. Free for Windows 10 and 11.">
+  <meta name="twitter:card" content="summary_large_image">
+
+  <script type="application/ld+json">
+  {
+    "@context": "https://schema.org",
+    "@type": "SoftwareApplication",
+    "name": "Reskin",
+    "description": "A floating box that turns any desktop icon into an editable canvas: drop a shortcut, pick a style, and Save & Apply changes the real icon.",
+    "operatingSystem": "Windows 10, Windows 11",
+    "applicationCategory": "DesignApplication",
+    "downloadUrl": "https://github.com/KarimEidou/Reskin/releases/latest/download/Reskin-Setup.exe",
+    "installUrl": "https://github.com/KarimEidou/Reskin/releases/latest/download/Reskin-Setup.exe",
+    "image": "https://karimeidou.github.io/Reskin/screenshots/social-preview.png",
+    "screenshot": "https://karimeidou.github.io/Reskin/screenshots/editor.png",
+    "license": "https://opensource.org/licenses/MIT",
+    "offers": { "@type": "Offer", "price": "0", "priceCurrency": "USD" },
+    "author": { "@type": "Person", "name": "Karim Eidou", "url": "https://github.com/KarimEidou" }
+  }
+  </script>
+
+  <style>
+    :root {
+      --bg: #070b1f;
+      --text: #f3f5ff;
+      --muted: rgb(226 232 255 / 0.74);
+      --faint: rgb(226 232 255 / 0.56);
+      --card: rgb(255 255 255 / 0.055);
+      --card-strong: rgb(255 255 255 / 0.09);
+      --border: rgb(255 255 255 / 0.13);
+      --violet: #7c5cff;
+      --blue: #4f7dff;
+      --cyan: #1fc8e3;
+      --focus: #9fd8ff;
+      --radius: 18px;
+      --font: 'Segoe UI Variable Display', 'Segoe UI', system-ui, -apple-system, 'Helvetica Neue', Arial, sans-serif;
+    }
+    *, *::before, *::after { box-sizing: border-box; }
+    html { background: var(--bg); color-scheme: dark; scroll-behavior: smooth; }
+    @media (prefers-reduced-motion: reduce) { html { scroll-behavior: auto; } }
+    body {
+      margin: 0;
+      font: 17px/1.55 var(--font);
+      color: var(--text);
+      background:
+        radial-gradient(60% 55% at 12% 0%, rgb(124 92 255 / 0.45), transparent 70%),
+        radial-gradient(50% 45% at 95% 30%, rgb(31 200 227 / 0.18), transparent 70%),
+        radial-gradient(70% 60% at 50% 110%, rgb(79 125 255 / 0.28), transparent 75%),
+        linear-gradient(170deg, #0d1640 0%, #0a1030 45%, #070b1f 100%);
+      background-attachment: fixed;
+      -webkit-font-smoothing: antialiased;
+    }
+    img { max-width: 100%; height: auto; display: block; }
+    a { color: #b9c8ff; text-underline-offset: 3px; }
+    a:hover { color: #fff; }
+    :focus-visible { outline: 3px solid var(--focus); outline-offset: 3px; border-radius: 8px; }
+    .wrap { width: min(1080px, 100% - 32px); margin-inline: auto; }
+    .skip { position: absolute; left: 16px; top: -48px; padding: 8px 14px; border-radius: 10px; background: #fff; color: #0a1030; font-weight: 600; z-index: 10; }
+    .skip:focus { top: 12px; }
+
+    /* Top bar */
+    header { padding: 18px 0; }
+    header .wrap { display: flex; align-items: center; justify-content: space-between; gap: 16px; }
+    .brand { display: inline-flex; align-items: center; gap: 10px; color: var(--text); text-decoration: none; font-weight: 700; font-size: 20px; letter-spacing: -0.01em; }
+    .brand img { width: 34px; height: 34px; }
+    nav { display: flex; align-items: center; gap: 6px; }
+    nav a { color: var(--muted); text-decoration: none; font-size: 15px; padding: 8px 12px; border-radius: 10px; }
+    nav a:hover { color: var(--text); background: var(--card); }
+    @media (max-width: 560px) { nav .hide-sm { display: none; } }
+
+    /* Hero */
+    .hero { text-align: center; padding: 40px 0 28px; }
+    h1 { margin: 0 auto; max-width: 16ch; font-size: clamp(38px, 7vw, 68px); line-height: 1.04; letter-spacing: -0.035em; font-weight: 800; }
+    .grad { background: linear-gradient(95deg, #c7b8ff 0%, #8fb1ff 45%, #7fe6f5 100%); -webkit-background-clip: text; background-clip: text; color: transparent; }
+    .lead { margin: 20px auto 0; max-width: 34em; font-size: clamp(17px, 2.2vw, 20px); color: var(--muted); }
+    .cta { margin-top: 30px; display: flex; flex-direction: column; align-items: center; gap: 12px; }
+    .btn {
+      display: inline-flex; align-items: center; gap: 14px;
+      padding: 16px 30px 16px 24px; border-radius: 16px;
+      color: #fff; text-decoration: none; font-weight: 700; font-size: 19px; letter-spacing: -0.005em;
+      background: linear-gradient(135deg, var(--violet) 0%, var(--blue) 60%, #2a9df4 100%);
+      box-shadow: 0 10px 30px -8px rgb(79 125 255 / 0.65), inset 0 1px 0 rgb(255 255 255 / 0.3), inset 0 0 0 1px rgb(255 255 255 / 0.18);
+      transition: transform 0.15s ease, box-shadow 0.15s ease;
+    }
+    .btn:hover { color: #fff; transform: translateY(-2px); box-shadow: 0 16px 36px -8px rgb(79 125 255 / 0.8), inset 0 1px 0 rgb(255 255 255 / 0.3), inset 0 0 0 1px rgb(255 255 255 / 0.22); }
+    .btn:active { transform: translateY(0); }
+    @media (prefers-reduced-motion: reduce) { .btn, .btn:hover { transition: none; transform: none; } }
+    .btn svg { width: 24px; height: 24px; flex: none; }
+    .btn span { display: flex; flex-direction: column; align-items: flex-start; line-height: 1.2; }
+    .btn small { font-weight: 500; font-size: 13px; opacity: 0.86; }
+    .btn span, .btn small { white-space: nowrap; }
+    @media (max-width: 420px) {
+      .btn { gap: 12px; padding: 14px 22px 14px 18px; font-size: 17px; }
+      .btn small { font-size: 12px; }
+    }
+    .fine { font-size: 14px; color: var(--faint); }
+    .fine a { color: var(--muted); }
+
+    .notice {
+      margin: 18px auto 0; max-width: 560px; text-align: left;
+      padding: 16px 18px; border-radius: 14px; background: var(--card-strong); border: 1px solid var(--border);
+      font-size: 15px; color: var(--muted);
+    }
+    .notice strong, .next strong { color: var(--text); }
+    .next {
+      position: fixed; z-index: 20; left: 16px; right: 16px; bottom: 16px;
+      margin-inline: auto; max-width: 560px; text-align: left;
+      padding: 18px 48px 18px 20px; border-radius: 16px; font-size: 15px; color: var(--muted);
+      background: rgb(16 22 56 / 0.97); border: 1px solid var(--border); box-shadow: 0 24px 60px -12px rgb(0 0 0 / 0.75);
+    }
+    .next .close {
+      position: absolute; top: 8px; right: 8px; width: 36px; height: 36px; border-radius: 10px;
+      border: 0; background: transparent; color: var(--muted); font: 400 24px/1 var(--font); cursor: pointer;
+    }
+    .next .close:hover { background: var(--card-strong); color: var(--text); }
+    .notice .row { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 12px; }
+    .chip {
+      font: 600 14px/1 var(--font); color: var(--text); cursor: pointer;
+      padding: 10px 14px; border-radius: 10px; border: 1px solid var(--border); background: var(--card);
+    }
+    .chip:hover { background: var(--card-strong); }
+    .next ol { margin: 8px 0 0; padding-left: 20px; }
+    .next li + li { margin-top: 4px; }
+    [hidden] { display: none !important; }
+
+    .showcase { margin: 40px auto 0; max-width: 960px; border-radius: 22px; overflow: hidden; border: 1px solid var(--border); box-shadow: 0 40px 80px -30px rgb(0 0 0 / 0.7); }
+    .showcase img { width: 100%; }
+
+    /* Sections */
+    section { padding: 64px 0 8px; }
+    h2 { margin: 0 0 10px; font-size: clamp(28px, 4.2vw, 40px); line-height: 1.12; letter-spacing: -0.025em; font-weight: 800; text-align: center; }
+    .sub { margin: 0 auto; max-width: 36em; text-align: center; color: var(--muted); }
+
+    .steps { list-style: none; margin: 34px 0 0; padding: 0; display: grid; gap: 16px; grid-template-columns: repeat(3, 1fr); counter-reset: step; }
+    @media (max-width: 820px) { .steps { grid-template-columns: 1fr; } }
+    .steps li { position: relative; padding: 26px 24px 24px; border-radius: var(--radius); background: var(--card); border: 1px solid var(--border); }
+    .steps .num { display: inline-grid; place-items: center; width: 34px; height: 34px; border-radius: 50%; font-weight: 800; font-size: 16px; color: #0a1030; background: linear-gradient(135deg, #c7b8ff, #7fe6f5); }
+    .steps h3 { margin: 14px 0 6px; font-size: 21px; letter-spacing: -0.01em; }
+    .steps p { margin: 0; color: var(--muted); font-size: 16px; }
+
+    .figure { margin: 30px auto 0; max-width: 960px; border-radius: var(--radius); overflow: hidden; border: 1px solid var(--border); }
+    .figure.editor { max-width: 900px; border: 0; border-radius: 16px; }
+
+    .features { margin: 34px 0 0; padding: 0; list-style: none; display: grid; gap: 16px; grid-template-columns: repeat(3, 1fr); }
+    @media (max-width: 900px) { .features { grid-template-columns: repeat(2, 1fr); } }
+    @media (max-width: 560px) { .features { grid-template-columns: 1fr; } }
+    .features li { padding: 22px 22px 20px; border-radius: var(--radius); background: var(--card); border: 1px solid var(--border); }
+    .features .ico { font-size: 26px; line-height: 1; }
+    .features h3 { margin: 12px 0 4px; font-size: 18px; letter-spacing: -0.01em; }
+    .features p { margin: 0; font-size: 15.5px; color: var(--muted); }
+
+    .faq { max-width: 760px; margin: 30px auto 0; display: grid; gap: 10px; }
+    details { border-radius: 14px; background: var(--card); border: 1px solid var(--border); }
+    summary { cursor: pointer; list-style: none; padding: 16px 48px 16px 20px; font-weight: 650; position: relative; border-radius: 14px; }
+    summary::-webkit-details-marker { display: none; }
+    summary::after { content: '+'; position: absolute; right: 20px; top: 50%; translate: 0 -52%; font-size: 24px; font-weight: 400; color: var(--muted); }
+    details[open] summary::after { content: '–'; }
+    details p { margin: 0; padding: 0 20px 18px; color: var(--muted); }
+    details code { font-size: 0.92em; padding: 1px 6px; border-radius: 6px; background: rgb(255 255 255 / 0.08); }
+
+    .final { text-align: center; padding: 80px 0 40px; }
+    .final .cta { margin-top: 24px; }
+
+    footer { padding: 30px 0 42px; border-top: 1px solid rgb(255 255 255 / 0.08); color: var(--faint); font-size: 14.5px; }
+    footer .wrap { display: flex; flex-wrap: wrap; gap: 10px 22px; align-items: center; justify-content: space-between; }
+    footer nav { flex-wrap: wrap; gap: 2px 4px; }
+    footer nav a { font-size: 14.5px; padding: 6px 10px; }
+  </style>
+</head>
+<body>
+  <a class="skip" href="#main">Skip to content</a>
+
+  <header>
+    <div class="wrap">
+      <a class="brand" href="./" aria-label="Reskin home"><img src="assets/icon.svg" alt="" width="34" height="34">Reskin</a>
+      <nav aria-label="Main">
+        <a class="hide-sm" href="#how">How it works</a>
+        <a class="hide-sm" href="#faq">FAQ</a>
+        <a href="https://github.com/KarimEidou/Reskin">GitHub</a>
+      </nav>
+    </div>
+  </header>
+
+  <main id="main">
+    <div class="hero wrap">
+      <h1>Give any desktop icon <span class="grad">a new look.</span></h1>
+      <p class="lead">Drag a shortcut onto Reskin's floating box, pick a style, done. Neon, Glass, Retro Pixel and nine more — or draw your own.</p>
+
+      <div class="cta">
+        <a class="btn" data-download href="https://github.com/KarimEidou/Reskin/releases/latest/download/Reskin-Setup.exe">
+          <svg viewBox="0 0 24 24" aria-hidden="true" fill="currentColor"><path d="M3 5.5 10.5 4.4v7.1H3zM11.5 4.3 21 3v8.5h-9.5zM3 12.5h7.5v7.1L3 18.5zM11.5 12.5H21V21l-9.5-1.3z"/></svg>
+          <span>Download for Windows<small>Free · Windows 10 &amp; 11 · 2 MB</small></span>
+        </a>
+        <p class="fine">No account · No admin rights · Undo anything · <a href="https://github.com/KarimEidou/Reskin/releases/latest/download/Reskin-Portable.exe" data-download>Portable version</a></p>
+      </div>
+
+      <div class="notice" id="elsewhere" hidden>
+        <strong>Reskin is for Windows PCs.</strong> Open <strong>karimeidou.github.io/Reskin</strong> on your computer to download it there.
+        <div class="row">
+          <button class="chip" type="button" id="share" hidden>Send to my PC…</button>
+          <button class="chip" type="button" id="copy">Copy link</button>
+        </div>
+      </div>
+
+      <div class="showcase">
+        <picture>
+          <source srcset="screenshots/hero-still.webp" media="(prefers-reduced-motion: reduce)">
+          <img src="screenshots/hero.webp" width="1760" height="680" alt="Six desktop icons go into the Reskin box and come out restyled in Neon, Glass, Retro Pixel, Clay, Pastel and Duotone" fetchpriority="high">
+        </picture>
+      </div>
+    </div>
+
+    <section id="how" aria-labelledby="how-title">
+      <div class="wrap">
+        <h2 id="how-title">Three steps. That's it.</h2>
+        <p class="sub">No design skills needed — and nothing you do is permanent.</p>
+        <ol class="steps">
+          <li><span class="num">1</span><h3>Drop</h3><p>Drag any desktop shortcut, game, folder or image onto the box.</p></li>
+          <li><span class="num">2</span><h3>Restyle</h3><p>Click a style, or paint, recolour and add a backdrop. Every step can be undone.</p></li>
+          <li><span class="num">3</span><h3>Save &amp; Apply</h3><p>The box flies your new icon onto the desktop. Changed your mind? Click <strong>Undo</strong>.</p></li>
+        </ol>
+      </div>
+    </section>
+
+    <section aria-labelledby="styles-title">
+      <div class="wrap">
+        <h2 id="styles-title">12 styles, one click</h2>
+        <p class="sub">Every style is rebuilt from <em>your</em> icon, so your apps stay recognisable. <strong>Apply style to all</strong> gives your whole desktop the same look.</p>
+        <div class="figure"><img src="screenshots/styles.png" width="1760" height="600" loading="lazy" alt="One icon in all twelve styles: Glass, Neon, Mono Light, Mono Dark, Pastel, Retro Pixel, Sticker, Clay, Gradient, Fluent, Duotone and Sketch"></div>
+      </div>
+    </section>
+
+    <section aria-labelledby="editor-title">
+      <div class="wrap">
+        <h2 id="editor-title">Or make it entirely yours</h2>
+        <p class="sub">Brushes, shapes, text, stickers and emoji, layers, 20+ adjustments and backdrops — with live previews at every size, on your own wallpaper and on the taskbar.</p>
+        <div class="figure editor"><img src="screenshots/editor.png" width="1728" height="1152" loading="lazy" alt="The Reskin editor: a shortcut's icon in the Neon style, with the tools, the Styles panel and previews at every size"></div>
+      </div>
+    </section>
+
+    <section aria-labelledby="why-title">
+      <div class="wrap">
+        <h2 id="why-title">Why Reskin</h2>
+        <ul class="features">
+          <li><div class="ico" aria-hidden="true">✨</div><h3>Instant</h3><p>Drop an icon, click a style, done. No image editing know-how required.</p></li>
+          <li><div class="ico" aria-hidden="true">↩️</div><h3>Nothing is permanent</h3><p>Undo one icon, or put every original back in one go.</p></li>
+          <li><div class="ico" aria-hidden="true">🎮</div><h3>Your whole desktop</h3><p>App shortcuts, Steam and Epic games, folders, websites, This PC and the Recycle Bin.</p></li>
+          <li><div class="ico" aria-hidden="true">🔒</div><h3>Private</h3><p>No account, no ads, no tracking. Reskin works entirely offline.</p></li>
+          <li><div class="ico" aria-hidden="true">🪶</div><h3>Light</h3><p>A 2 MB download that installs for you alone — no admin rights needed.</p></li>
+          <li><div class="ico" aria-hidden="true">💜</div><h3>Free &amp; open source</h3><p>No trial, no catch. Every line of code is <a href="https://github.com/KarimEidou/Reskin">on GitHub</a>.</p></li>
+        </ul>
+      </div>
+    </section>
+
+    <section id="faq" aria-labelledby="faq-title">
+      <div class="wrap">
+        <h2 id="faq-title">Questions</h2>
+        <div class="faq">
+          <details>
+            <summary>Windows says "Windows protected your PC". Is Reskin safe?</summary>
+            <p>Yes. Reskin is new and isn't code-signed yet, so Microsoft Defender SmartScreen doesn't recognise it. Click <strong>More info</strong>, then <strong>Run anyway</strong>. Reskin is open source — anyone can read its code — and every release lists the files' SHA-256 checksums in <code>SHA256SUMS.txt</code>.</p>
+          </details>
+          <details>
+            <summary>How do I get my old icons back?</summary>
+            <p>Right after applying, click <strong>Undo</strong> on the box. Any time later, right-click the box → <strong>Restore all icons…</strong> puts every original back, and <strong>History</strong> in Reskin undoes a single one.</p>
+          </details>
+          <details>
+            <summary>Does Reskin change my apps or games?</summary>
+            <p>No. It only changes the icon of the shortcut or folder you drop on it. Programs themselves are never modified.</p>
+          </details>
+          <details>
+            <summary>Where did the box go?</summary>
+            <p>Press <strong>Ctrl + Alt + Shift + R</strong>, or choose <strong>Show box</strong> from Reskin's tray icon. The box hides by itself while a full-screen app or game runs. After a restart, open Reskin from the Start menu — or turn on <strong>Settings → Start with Windows</strong>.</p>
+          </details>
+          <details>
+            <summary>Which PCs does it run on?</summary>
+            <p>Windows 10 and 11, 64-bit. Reskin uses Microsoft's WebView2, which comes with Windows 11 and current Windows 10; the installer adds it if it's missing.</p>
+          </details>
+          <details>
+            <summary>How do I uninstall it?</summary>
+            <p>Windows <strong>Settings → Apps</strong>, find Reskin, <strong>Uninstall</strong>. Tick <em>Delete app data</em> to also put all your original icons back first.</p>
+          </details>
+          <details>
+            <summary>Is it really free?</summary>
+            <p>Yes. Reskin is free and open source under the MIT license — no trial, no ads, no account.</p>
+          </details>
+        </div>
+      </div>
+    </section>
+
+    <div class="final wrap">
+      <h2>Ready for a new look?</h2>
+      <div class="cta">
+        <a class="btn" data-download href="https://github.com/KarimEidou/Reskin/releases/latest/download/Reskin-Setup.exe">
+          <svg viewBox="0 0 24 24" aria-hidden="true" fill="currentColor"><path d="M3 5.5 10.5 4.4v7.1H3zM11.5 4.3 21 3v8.5h-9.5zM3 12.5h7.5v7.1L3 18.5zM11.5 12.5H21V21l-9.5-1.3z"/></svg>
+          <span>Download for Windows<small>Free · Windows 10 &amp; 11 · 2 MB</small></span>
+        </a>
+        <p class="fine">Like it? <a href="https://github.com/KarimEidou/Reskin">A ⭐ on GitHub</a> helps other people find Reskin.</p>
+      </div>
+    </div>
+  </main>
+
+  <div class="next" id="next" hidden role="status">
+    <button class="close" type="button" id="next-close" aria-label="Close">×</button>
+    <strong>Your download is starting.</strong> Next:
+    <ol>
+      <li>Open <strong>Reskin-Setup.exe</strong> from your downloads.</li>
+      <li>If Windows says <em>"Windows protected your PC"</em>, click <strong>More info</strong>, then <strong>Run anyway</strong> — Reskin is new and not code-signed yet.</li>
+      <li>The box appears on your desktop. Drop a shortcut onto it!</li>
+    </ol>
+  </div>
+
+
+  <footer>
+    <div class="wrap">
+      <span>© 2026 Karim Eidou · MIT license</span>
+      <nav aria-label="More">
+        <a href="https://github.com/KarimEidou/Reskin/blob/HEAD/docs/GUIDE.md">User guide</a>
+        <a href="https://github.com/KarimEidou/Reskin/blob/HEAD/CHANGELOG.md">What's new</a>
+        <a href="https://github.com/KarimEidou/Reskin/releases">All downloads</a>
+        <a href="https://github.com/KarimEidou/Reskin/issues/new/choose">Report a problem</a>
+        <a href="https://github.com/KarimEidou/Reskin">GitHub</a>
+      </nav>
+    </div>
+  </footer>
+
+  <script>
+    // Visitors on a phone, tablet or Mac: say it's for Windows and help them
+    // get the link to their PC. After a download starts: what to do next.
+    (function () {
+      var ua = navigator.userAgent || '';
+      var platform = (navigator.userAgentData && navigator.userAgentData.platform) || navigator.platform || '';
+      var windows = /win/i.test(platform) || /Windows NT/i.test(ua);
+      var mobile = /Android|iPhone|iPad|iPod|Mobile/i.test(ua);
+      if (!windows || mobile) {
+        document.getElementById('elsewhere').hidden = false;
+        var share = document.getElementById('share');
+        if (navigator.share) {
+          share.hidden = false;
+          share.addEventListener('click', function () {
+            navigator.share({ title: 'Reskin — give any desktop icon a new look', url: location.href.split('#')[0] }).catch(function () {});
+          });
+        }
+        var copy = document.getElementById('copy');
+        copy.addEventListener('click', function () {
+          var done = function () { copy.textContent = 'Link copied ✓'; };
+          if (navigator.clipboard) navigator.clipboard.writeText(location.href.split('#')[0]).then(done, function () {});
+        });
+      }
+      var next = document.getElementById('next');
+      document.getElementById('next-close').addEventListener('click', function () { next.hidden = true; });
+      document.querySelectorAll('[data-download]').forEach(function (link) {
+        link.addEventListener('click', function () {
+          if (windows && !mobile) next.hidden = false;
+        });
+      });
+    })();
+  </script>
+</body>
+</html>
