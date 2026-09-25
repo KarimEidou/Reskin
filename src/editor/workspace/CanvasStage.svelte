@@ -9,6 +9,8 @@
   (the command registry's view keys — Ctrl+0 / Ctrl+1 / Ctrl ±, K — use
   them). The document (the canvas and its shadow, `data-morph-landing`) is
   where the open morph's flying icon settles: it shows as the icon lands.
+  While the panel morphs the canvas is held (`stage.hold`): a still
+  picture of it shows in its place and takes over `data-morph-landing`.
 -->
 <script lang="ts">
   import { onMount } from 'svelte';
@@ -51,6 +53,8 @@
 
   let host: HTMLDivElement | undefined = $state();
   let canvas: HTMLCanvasElement | undefined = $state();
+  /** The canvas's still picture while it is held (bitmaprenderer; empty otherwise). */
+  let still: HTMLCanvasElement | undefined = $state();
   let shadowEl: HTMLDivElement | undefined = $state();
   let overlayEl: HTMLDivElement | undefined = $state();
 
@@ -69,6 +73,10 @@
   let antsOffset = 0;
   const placed = { x: NaN, y: NaN, w: NaN, h: NaN };
   let sized = false;
+  /** Lets the held canvas go (null: not held); see `hold`. */
+  let letGo: (() => void) | null = null;
+  /** A redraw was asked for while the canvas was held. */
+  let redrawWhenLetGo = false;
 
   // Input state.
   let gestureButton = -1;
@@ -122,6 +130,10 @@
 
   function render(): void {
     frame = 0;
+    if (letGo) {
+      redrawWhenLetGo = true;
+      return;
+    }
     if (!ctx || !view || !canvas || !sized) return;
     const mode = session.compare;
     const image = mode === 'off' ? null : compareImage();
@@ -217,6 +229,68 @@
     originY = r.top;
   }
 
+  // ---- holding still (the morph) ---------------------------------------------------
+
+  /**
+   * Shows a still picture of the canvas in its place until the returned
+   * function is called (`stage.hold`). A 2D canvas is copied for the
+   * compositor at every frame the page commits while it shows, drawn anew
+   * or not; the picture (an ImageBitmap on a bitmaprenderer canvas) is
+   * handed over once. Same pixels, same box: nothing changes on screen. The
+   * canvas stays where it is, transparent: it still takes the pointer, and
+   * what it is asked to draw meanwhile it draws once it is let go.
+   */
+  async function hold(): Promise<() => void> {
+    const live = canvas;
+    const pic = still;
+    if (letGo || !live || !pic || !sized || !session.hasDesign || typeof createImageBitmap !== 'function') return () => {};
+    // The picture is the canvas as it shows next; from here on it holds still.
+    if (frame) {
+      cancelAnimationFrame(frame);
+      render();
+    }
+    let shown = false;
+    const release = () => {
+      if (letGo !== release) return;
+      letGo = null;
+      if (shown) {
+        live.style.opacity = '';
+        live.setAttribute('data-morph-landing', '');
+        pic.removeAttribute('data-morph-landing');
+        pic.style.display = '';
+        pic.getContext('bitmaprenderer')?.transferFromImageBitmap(null);
+      }
+      if (redrawWhenLetGo) {
+        redrawWhenLetGo = false;
+        cancelAnimationFrame(frame);
+        render();
+      }
+    };
+    letGo = release;
+    let bitmap: ImageBitmap | null = null;
+    try {
+      bitmap = await createImageBitmap(live);
+    } catch {
+      // No picture: the canvas shows as it is.
+    }
+    const bitmaps = pic.getContext('bitmaprenderer');
+    // Let go (or unmounted) meanwhile, or no picture of it: nothing to show.
+    if (letGo !== release || canvas !== live || !bitmap || !bitmaps) {
+      bitmap?.close();
+      release();
+      return () => {};
+    }
+    pic.width = live.width;
+    pic.height = live.height;
+    bitmaps.transferFromImageBitmap(bitmap);
+    pic.style.display = 'block';
+    pic.setAttribute('data-morph-landing', '');
+    live.removeAttribute('data-morph-landing');
+    live.style.opacity = '0';
+    shown = true;
+    return release;
+  }
+
   // ---- view actions (also exposed through `stage`) ---------------------------------
 
   function animateView(change: () => void, animate: boolean): void {
@@ -250,6 +324,7 @@
       return new DOMRect(r.left + viewport.panX, r.top + viewport.panY, engine.doc.width * s, engine.doc.height * s);
     },
     focus: () => canvas?.focus({ preventScroll: true }),
+    hold,
   };
 
   // ---- pointer input ----------------------------------------------------------------
@@ -732,6 +807,7 @@
 
     return () => {
       disposed = true;
+      letGo?.();
       unlistenDrop?.();
       cancelAnimationFrame(frame);
       cancelAnimationFrame(viewAnim);
@@ -802,6 +878,7 @@
     aria-label="Icon canvas. Draw with the active tool; hold Space to pan, scroll to zoom."
     data-testid="canvas"
   ></canvas>
+  <canvas bind:this={still} class="canvas still" aria-hidden="true"></canvas>
 
   <div class="doc-overlay" bind:this={overlayEl}>
     {#if session.compare === 'split' && session.original}
@@ -909,6 +986,10 @@
     touch-action: none;
     outline: none;
     user-select: none;
+  }
+  .still {
+    display: none;
+    pointer-events: none;
   }
   .canvas:focus-visible:not([data-pointer-focus]) {
     box-shadow: var(--focus-ring-inset);
