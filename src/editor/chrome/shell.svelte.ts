@@ -53,6 +53,8 @@ export class Shell {
    * palette on a design linked to a Library design (see requestSaveToLibrary).
    */
   saveFormOpen = $state(false);
+  /** The save as new Ctrl+S / the palette started, while it runs (see requestSaveToLibrary). */
+  private quickSave: Promise<LibraryEntry | null> | null = null;
   /**
    * The user closed the editor over unsaved work ("Close anyway", see
    * requestClose): the next open starts over instead of coming back to it.
@@ -272,7 +274,14 @@ export class Shell {
    * saved as a new one at once.
    */
   async requestSaveToLibrary(): Promise<LibraryEntry | null> {
-    if (this.session.libraryId === null) return this.saveToLibrary();
+    // Pressed again while that save runs: the same save, not a second design.
+    if (this.quickSave) return this.quickSave;
+    if (this.session.libraryId === null) {
+      this.quickSave = this.saveToLibrary().finally(() => {
+        this.quickSave = null;
+      });
+      return this.quickSave;
+    }
     this.navigate('edit');
     this.saveFormOpen = true;
     return null;

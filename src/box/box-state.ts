@@ -114,10 +114,12 @@ const rest = (s: BoxState): BoxStateName => (s.hovering ? 'hover' : 'idle');
 
 /**
  * The close released the box: after a plain close it rests on the picture
- * it took over from the editor's collapse; after an apply it holds the new
- * icon (frozen) until its flight carries it on.
+ * it took over from the editor's collapse (hovered when the pointer came
+ * onto it meanwhile); after an apply it holds the new icon (frozen) until
+ * its flight carries it on.
  */
-const showCollapsed = (s: BoxState): BoxState => (s.collapsed === 'hide' ? { ...s, handoff: false, collapsed: null } : s);
+const showCollapsed = (s: BoxState): BoxState =>
+  s.collapsed === 'hide' ? { ...s, name: rest(s), handoff: false, collapsed: null } : s;
 
 /** The icon taken over from the editor's collapse, which a flight carries on. */
 const carried = (s: BoxState): string | null => (s.collapsed ? s.icon : null);

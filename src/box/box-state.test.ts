@@ -175,6 +175,12 @@ describe('boxReducer', () => {
       expect(boxReducer(initialBoxState, { type: 'released' })).toBe(initialBoxState);
     });
 
+    it('a pointer that came onto the frozen box hovers it once the close released it', () => {
+      const hovered = run([{ type: 'shown' }, { type: 'pointerEnter' }], collapse('hide', null));
+      expect(hovered).toMatchObject({ name: 'idle', hovering: true, handoff: true });
+      expect(boxReducer(hovered, { type: 'released' })).toMatchObject({ name: 'hover', handoff: false, collapsed: null });
+    });
+
     it('box:shown keeps the new icon, frozen until the flight carries it on', () => {
       const shown = boxReducer(collapse('fly', 'data:new'), { type: 'shown' });
       expect(shown).toMatchObject({ name: 'idle', icon: 'data:new', handoff: true });

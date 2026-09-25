@@ -27,8 +27,8 @@ use std::time::{Duration, Instant};
 
 use reskin_core::geom;
 use reskin_core::model::{
-    AckStage, BoxCollapse, BoxHandoff, BoxSwap, CollapseThen, EditorCmd, EditorView, ItemInfo,
-    MotionPref, OpenStyle, Rect, Settings, editor_size,
+    AckStage, BoxCollapse, BoxHandoff, BoxMetrics, BoxSwap, CollapseThen, EditorCmd, EditorView,
+    ItemInfo, MotionPref, OpenStyle, Rect, Settings, editor_size,
 };
 use tauri::{AppHandle, Emitter, Manager, PhysicalPosition, PhysicalSize, Runtime, WebviewWindow};
 
@@ -225,8 +225,13 @@ pub fn box_home<R: Runtime>(app: &AppHandle<R>) -> Option<Rect> {
         .box_position
         .as_ref()
         .map(|p| (f64::from(p.x), f64::from(p.y)));
-    let works: Vec<Rect> = monitors::all(app).into_iter().map(|m| m.work).collect();
-    Some(monitors::resting_home(saved, current, &works))
+    let side = BoxMetrics::for_size(settings.box_size).window;
+    Some(monitors::resting_home(
+        saved,
+        current,
+        side,
+        &monitors::all(app),
+    ))
 }
 
 /// The box may be on screen outside a handoff (see `rules::box_allowed`).

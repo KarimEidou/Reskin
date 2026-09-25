@@ -163,8 +163,9 @@ Rust: the swap: Clear{session} + (held) box:reveal{session: box session}
 Rust: waits for cleared (1 s) and the box's box_painted (300 ms from
       box:reveal); hide editor, box back to the top of the topmost band +
       box:released (+ low-memory: destroy the editor); glide box home if
-      needed — its saved home while that is on a monitor still connected,
-      else where it is (`monitors::resting_home`)
+      needed — its saved home while the box, at that monitor's scale, fits
+      there on a monitor still connected, else where it is
+      (`monitors::resting_home`)
    box: box:released → the box unfreezes (a pending hint shows now): the
         proxy is gone, so after a plain close the picture is its own again.
         What only the box shows — the hint, the Undo chip — is never in the
@@ -351,8 +352,9 @@ one switches the sidebar tab and asks the panel through
   design goes by it. A Library design is only ever saved over from a form
   that names it — Save to Library says "Updates …" (Save changes / Save as
   new); without that notice it saves as new: Ctrl+S and the palette's Save
-  to Library save an unlinked design as new at once and open that form for
-  a linked one (`shell.requestSaveToLibrary`, the form's open state is
+  to Library save an unlinked design as new at once (pressed again while
+  that save runs, they join it) and open that form for a linked one
+  (`shell.requestSaveToLibrary`, the form's open state is
   `shell.saveFormOpen`), and the Library view's "Save current design" adds
   a new design when the linked one is not on the page — so no design is
   overwritten unseen. "Save as new" under the linked design's own name
@@ -372,12 +374,12 @@ one switches the sidebar tab and asks the panel through
   work unasked: Close (✕, Esc, the palette: `shell.requestClose`) over
   unsaved changes — the open design's or another queued one's — asks
   first, and work closed anyway (`shell.discardOnReopen`) is reset at the
-  next Prepare; a close Rust starts asks nothing, and the next Prepare
-  without items keeps the session (its view as asked, Edit included)
-  instead of resetting it. A Prepare with items starts over. The JSON is
-  encoded off the main thread (`ProjectEncoder`: the page only copies the
-  layer pixels). Once the open design is safe the live slot takes another
-  queued unsaved design, or empties
+  next Prepare; a close Rust starts asks nothing, and while unsaved work
+  is open the next Prepare without items keeps the session (its view as
+  asked, Edit included) instead of resetting it. A Prepare with items
+  starts over. The JSON is encoded off the main thread (`ProjectEncoder`:
+  the page only copies the layer pixels). Once the open design is safe the
+  live slot takes another queued unsaved design, or empties
   (`autosave('')`). Rust keeps two slots (`AutosaveSlots`): each launch
   first turns what the previous one left live into the recovery offer
   (`autosave_load`), so a crashed design survives the next session's
@@ -550,13 +552,13 @@ Windows (`win/`, `#[cfg(windows)]`, type-checked on Linux with
   written nothing (not even `reskin.log`: the new start's first log line
   says `relaunched=true`); only then the log is rotated and started, and
   the panic hook installed (`reskin.log`, and an error box: release builds
-  abort on panic). When that restart fails it logs why, warns and carries
-  on. No WebView2 Runtime → an error box offering Microsoft's download,
-  exit 1; a history that cannot be loaded → an error box saying which of
-  three it is (another Reskin process holds the journal lock,
-  `Error::Busy`: try again in a
-  moment; a journal a newer Reskin wrote; a file it cannot read, or cannot
-  set aside when it is damaged), exit 1. Builder: single-instance first (a
+  abort on panic). When that restart fails it carries on, and once the log
+  is started it logs why and warns. No WebView2 Runtime → an error box
+  offering Microsoft's download, exit 1; a history that cannot be loaded →
+  an error box saying which of three it is (another Reskin process holds
+  the journal lock, `Error::Busy`: try again in a moment; a journal a newer
+  Reskin wrote; a file it cannot read, or cannot set aside when it is
+  damaged), exit 1. Builder: single-instance first (a
   second start with `--edit` paths opens them, without paths
   `actions::bring_forward`: the open editor to the front, else *Show
   box*), then dialog, opener, global-shortcut; `setup` creates the box

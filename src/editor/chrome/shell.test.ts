@@ -239,6 +239,26 @@ describe('Ctrl+S / the palette', () => {
     expect(session.view).toBe('library');
   });
 
+  it('pressed again while that save runs, adds the design once', async () => {
+    const saved = deferred<{ id: string; name: string }>();
+    session.saveToLibrary.mockImplementationOnce(async () => {
+      const entry = await saved.promise;
+      session.libraryId = entry.id;
+      return entry;
+    });
+    const first = shell.requestSaveToLibrary();
+    const second = shell.requestSaveToLibrary();
+    saved.resolve({ id: 'lib1', name: 'Steam' });
+    expect(await first).toEqual({ id: 'lib1', name: 'Steam' });
+    expect(await second).toEqual({ id: 'lib1', name: 'Steam' });
+    expect(session.saveToLibrary).toHaveBeenCalledTimes(1);
+    expect(shell.saveFormOpen).toBe(false);
+    // Saved (and linked) now: the next press asks with the form.
+    await shell.requestSaveToLibrary();
+    expect(session.saveToLibrary).toHaveBeenCalledTimes(1);
+    expect(shell.saveFormOpen).toBe(true);
+  });
+
   it('opens the form that names a linked design, in the Edit view, instead of saving over it', async () => {
     session.libraryId = 'lib1';
     session.view = 'history';

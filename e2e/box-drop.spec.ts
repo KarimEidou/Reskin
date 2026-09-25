@@ -685,6 +685,8 @@ test.describe('events from Rust', () => {
     await box.hit.hover();
     await box.expectState('idle');
     await emit(page, 'box:released', null);
+    // Its own again: under the pointer, it hovers.
+    await box.expectState('hover');
     await expect(hint).toHaveText(FIRST_RUN_HINT);
     await box.pointerAway();
 

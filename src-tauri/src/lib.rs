@@ -148,17 +148,18 @@ fn webview2_missing(smoke: bool, why: &str) {
     }
 }
 
-/// Run as administrator: starts Reskin again, unelevated, through Explorer
-/// and returns true (this instance then quits, having written nothing: the
-/// new start's log line says `relaunched=true`). Elevated, Windows would
-/// drop every drag from Explorer onto the box (UIPI), and shell writes
-/// would bypass the elevated helper's checks. When that fails Reskin warns
-/// and carries on.
-fn restarted_unelevated(argv: &[String]) -> bool {
+/// Run as administrator: starts Reskin again, unelevated, through Explorer.
+/// Elevated, Windows would drop every drag from Explorer onto the box
+/// (UIPI), and shell writes would bypass the elevated helper's checks.
+/// `None` when not run as administrator; `Some(Ok(()))` once the new start
+/// is on its way (this instance then quits, having written nothing: the new
+/// start's log line says `relaunched=true`); `Some(Err(why))` when it could
+/// not restart (see `warn_elevated`).
+fn restart_unelevated(argv: &[String]) -> Option<Result<(), String>> {
     if !elevate::is_uac_elevated() {
-        return false;
+        return None;
     }
-    let restarted = if argv.iter().any(|a| a == RELAUNCHED) {
+    Some(if argv.iter().any(|a| a == RELAUNCHED) {
         Err("it still runs as administrator after restarting through Explorer".to_string())
     } else {
         std::env::current_exe()
@@ -168,23 +169,22 @@ fn restarted_unelevated(argv: &[String]) -> bool {
                 args.push(RELAUNCHED.to_owned());
                 elevate::run_unelevated(&exe, &args).map_err(|e| e.to_string())
             })
-    };
-    match restarted {
-        Ok(()) => true,
-        Err(e) => {
-            log::line(&format!("running as administrator: {e}"));
-            message_box(
-                &format!(
-                    "Reskin is running as administrator, so Windows won't let you drag icons \
-                     from the desktop onto the box.\n\nClose Reskin and start it normally (not \
-                     with “Run as administrator”).\n\nReskin could not restart itself without \
-                     administrator rights: {e}"
-                ),
-                MB_OK | MB_ICONWARNING,
-            );
-            false
-        }
-    }
+    })
+}
+
+/// Reskin carries on as administrator (`restart_unelevated` failed): logs
+/// why and warns.
+fn warn_elevated(why: &str) {
+    log::line(&format!("running as administrator: {why}"));
+    message_box(
+        &format!(
+            "Reskin is running as administrator, so Windows won't let you drag icons \
+             from the desktop onto the box.\n\nClose Reskin and start it normally (not \
+             with “Run as administrator”).\n\nReskin could not restart itself without \
+             administrator rights: {why}"
+        ),
+        MB_OK | MB_ICONWARNING,
+    );
 }
 
 /// What the error box says when the history (`journal.json` at `path`)
@@ -241,12 +241,20 @@ pub fn run(argv: &[String]) -> i32 {
     // Started as administrator, Reskin hands over to an unelevated start
     // before it writes anything, the log included. The smoke test's exit
     // code is its result: it never hands over.
-    if !smoke && restarted_unelevated(argv) {
+    let handover = if smoke {
+        None
+    } else {
+        restart_unelevated(argv)
+    };
+    if let Some(Ok(())) = handover {
         return 0;
     }
     log::rotate();
     log::line(&start_line(&args, argv));
     install_panic_hook(!smoke);
+    if let Some(Err(why)) = handover {
+        warn_elevated(&why);
+    }
     if let Err(e) = selftest::webview2_version() {
         webview2_missing(smoke, &e);
         return EXIT_CANNOT_START;
