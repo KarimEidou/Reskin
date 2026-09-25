@@ -3,7 +3,7 @@
   Clean-up for the MSI package (the NSIS installer's is in hooks.nsh).
   Settings > "Reskin this icon" adds an Explorer verb for the user in HKCU
   that starts reskin.exe; uninstalling removes it with the app. An MSI
-  uninstall keeps Reskin's data and the icons it applied (README,
+  uninstall keeps Reskin's data and the icons it applied (docs/GUIDE.md,
   "Uninstalling").
 -->
 <Wix xmlns="http://schemas.microsoft.com/wix/2006/wi">
