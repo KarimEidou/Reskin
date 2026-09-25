@@ -525,8 +525,65 @@ fn resource_data<'m>(module: &'m Owned<HMODULE>, name: &ResName, kind: PCWSTR) -
         if ptr.is_null() || size == 0 {
             return Err(Error::NotFound("empty icon resource".into()));
         }
+        // A crafted file can claim more than it maps: never make a slice
+        // that runs past the module's readable pages.
+        if !mapped_readable(ptr, size) {
+            return Err(Error::Other(
+                "an icon resource runs past the end of its file".into(),
+            ));
+        }
         Ok(std::slice::from_raw_parts(ptr, size))
     }
+}
+
+/// Whether `len` bytes from `ptr` are committed, readable memory of one
+/// mapping (the loaded module), without touching them.
+fn mapped_readable(ptr: *const u8, len: usize) -> bool {
+    use windows::Win32::System::Memory::{
+        MEM_COMMIT, MEMORY_BASIC_INFORMATION, PAGE_EXECUTE_READ, PAGE_EXECUTE_READWRITE,
+        PAGE_EXECUTE_WRITECOPY, PAGE_GUARD, PAGE_NOACCESS, PAGE_READONLY, PAGE_READWRITE,
+        PAGE_WRITECOPY, VirtualQuery,
+    };
+    let readable = PAGE_READONLY
+        | PAGE_READWRITE
+        | PAGE_WRITECOPY
+        | PAGE_EXECUTE_READ
+        | PAGE_EXECUTE_READWRITE
+        | PAGE_EXECUTE_WRITECOPY;
+    let Some(end) = (ptr as usize).checked_add(len) else {
+        return false;
+    };
+    let mut at = ptr as usize;
+    let mut mapping = None;
+    while at < end {
+        let mut info = MEMORY_BASIC_INFORMATION::default();
+        // SAFETY: VirtualQuery only describes the pages at `at`; it reads nothing there.
+        let written = unsafe {
+            VirtualQuery(
+                Some(at as *const _),
+                &mut info,
+                std::mem::size_of::<MEMORY_BASIC_INFORMATION>(),
+            )
+        };
+        if written == 0
+            || info.State != MEM_COMMIT
+            || (info.Protect & readable).0 == 0
+            || (info.Protect & (PAGE_GUARD | PAGE_NOACCESS)).0 != 0
+        {
+            return false;
+        }
+        match mapping {
+            None => mapping = Some(info.AllocationBase),
+            Some(base) if base != info.AllocationBase => return false,
+            Some(_) => {}
+        }
+        let next = (info.BaseAddress as usize).saturating_add(info.RegionSize);
+        if next <= at {
+            return false;
+        }
+        at = next;
+    }
+    true
 }
 
 /// The icon group `index` of a PE file rebuilt into `.ico` bytes (within
@@ -870,5 +927,32 @@ mod tests {
             display_name(Path::new(r"C:\a\My.Folder"), ItemKind::Folder),
             "My.Folder"
         );
+    }
+    #[test]
+    fn a_resource_span_must_stay_in_committed_readable_pages() {
+        use windows::Win32::System::Memory::{
+            MEM_COMMIT, MEM_RELEASE, MEM_RESERVE, PAGE_NOACCESS, PAGE_READONLY, VirtualAlloc,
+            VirtualFree,
+        };
+        const PAGE: usize = 4096;
+        // SAFETY: plain allocations of this test's own pages, released below.
+        unsafe {
+            // Two pages reserved, only the first committed.
+            let base = VirtualAlloc(None, 2 * PAGE, MEM_RESERVE, PAGE_NOACCESS) as *const u8;
+            assert!(!base.is_null());
+            assert!(!VirtualAlloc(Some(base.cast()), PAGE, MEM_COMMIT, PAGE_READONLY).is_null());
+            assert!(mapped_readable(base, PAGE));
+            assert!(mapped_readable(base.add(100), PAGE - 100));
+            assert!(
+                !mapped_readable(base, PAGE + 1),
+                "runs into an uncommitted page"
+            );
+            assert!(
+                !mapped_readable(base.add(PAGE), 1),
+                "starts in an uncommitted page"
+            );
+            assert!(!mapped_readable(base, usize::MAX), "overflowing length");
+            VirtualFree(base.cast_mut().cast(), 0, MEM_RELEASE).unwrap();
+        }
     }
 }
