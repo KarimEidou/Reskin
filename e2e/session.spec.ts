@@ -1,6 +1,7 @@
 // Work that finishes after the user switched items (a backdrop render, a
 // sticker) — or that was started while the switch was half-way — never
-// lands on a design being put away or on the one that opened, and the
+// lands on a design being put away or on the one that opened; a queued
+// design with unsaved changes is removed only once the user agrees; and the
 // Stickers panel feeds the stamp tool while it is the selected tool.
 
 import type { Page } from '@playwright/test';
@@ -10,8 +11,12 @@ import { expect, openPage, SAMPLE_PATHS, simulateOpen, test } from './support/fi
 /** The session as the specs reach it (globalThis.__reskinSession). */
 type Session = {
   currentIndex: number;
+  switching: number;
+  queue: { info: { name: string }; unsaved: boolean }[];
   engine: {
     doc: { layers: { name: string }[]; meta: { name: string } };
+    activeLayer: { id: string };
+    editLayerPixels(id: string, label: string, edit: (surface: { data: Uint8ClampedArray }) => void): boolean;
     setTool(id: string): void;
     selectedToolId: string;
     getToolOptions(id: 'stamp'): { stamp: { data: Uint8ClampedArray } | null };
@@ -33,9 +38,9 @@ type Scope = {
   rendered: boolean;
 };
 
-async function openQueue(page: Page): Promise<void> {
+async function openQueue(page: Page, paths: string[] = [SAMPLE_PATHS.steam, SAMPLE_PATHS.notes]): Promise<void> {
   await openPage(page, 'editor');
-  await simulateOpen(page, [SAMPLE_PATHS.steam, SAMPLE_PATHS.notes]);
+  await simulateOpen(page, paths);
   await page.waitForFunction(() => (globalThis as unknown as { __reskinSession?: { hasDesign: boolean } }).__reskinSession?.hasDesign === true);
   await expect(sidebar(page)).toBeVisible();
 }
@@ -161,6 +166,56 @@ test.describe('a panel used while the switch is half-way', () => {
     await page.waitForFunction(() => (globalThis as unknown as Scope).rendered);
     await expect(heart).toHaveAttribute('aria-busy', 'false');
     await finishAndCheck(page);
+  });
+});
+
+test.describe('removing a queued item', () => {
+  const session = (page: Page) =>
+    page.evaluate(() => {
+      const s = (globalThis as unknown as Scope).__reskinSession;
+      return { names: s.queue.map((q) => q.info.name), unsaved: s.queue.map((q) => q.unsaved), open: s.engine.doc.meta.name };
+    });
+  const idle = (page: Page) => page.waitForFunction(() => (globalThis as unknown as Scope).__reskinSession.switching === 0);
+  const paint = (page: Page) =>
+    page.evaluate(() => {
+      const { engine } = (globalThis as unknown as Scope).__reskinSession;
+      engine.editLayerPixels(engine.activeLayer.id, 'Paint', (surface) => surface.data.fill(200));
+    });
+  const ask = (page: Page, name: string) => page.getByRole('dialog', { name: `Remove ${name} from the queue?` });
+
+  /** The × of an item (shown while the pointer is over it). */
+  async function removeItem(page: Page, name: string): Promise<void> {
+    await page.getByTestId('queue-item').and(page.locator(`[aria-label^="${name},"]`)).hover();
+    await page.getByRole('button', { name: `Remove ${name} from the queue` }).click();
+  }
+
+  test('asks first when its design has unsaved changes', async ({ page }) => {
+    await openQueue(page, [SAMPLE_PATHS.steam, SAMPLE_PATHS.notes, SAMPLE_PATHS.site]);
+    await idle(page);
+    // Steam changed, then put away: its design waits in the queue, unsaved.
+    await paint(page);
+    await page.getByTestId('queue-item').nth(1).click();
+    await idle(page);
+    expect((await session(page)).unsaved).toEqual([true, false, false]);
+
+    await removeItem(page, 'Steam');
+    await expect(ask(page, 'Steam')).toBeVisible();
+    await ask(page, 'Steam').getByRole('button', { name: 'Cancel' }).click();
+    await expect(ask(page, 'Steam')).toBeHidden();
+    expect((await session(page)).names).toEqual(['Steam', 'Notes', 'Docs Portal']);
+
+    // Nothing unsaved: it goes at once.
+    await removeItem(page, 'Docs Portal');
+    await expect.poll(async () => (await session(page)).names).toEqual(['Steam', 'Notes']);
+    await expect(ask(page, 'Docs Portal')).toHaveCount(0);
+
+    // The open design, changed: it goes once the user agrees, and Steam's opens.
+    await paint(page);
+    await removeItem(page, 'Notes');
+    await ask(page, 'Notes').getByRole('button', { name: 'Remove', exact: true }).click();
+    await expect.poll(async () => (await session(page)).names).toEqual(['Steam']);
+    await idle(page);
+    expect((await session(page)).open).toBe('Steam');
   });
 });
 

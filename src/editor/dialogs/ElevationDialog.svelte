@@ -3,7 +3,8 @@
   items are on the Public Desktop, which only administrators can change —
   one item after Save & Apply, or every such item of an "Apply style to
   all" at once. Allow → the elevated helper (a UAC prompt per item); or
-  personal copies on the user's own desktop; or cancel.
+  personal copies on the user's own desktop; or cancel. An "Apply style to
+  all" reports what it applied once the dialog is answered, Cancel included.
 -->
 <script lang="ts">
   import Copy from '@lucide/svelte/icons/copy';
@@ -34,7 +35,7 @@
     bind:open
     title="Administrator permission needed"
     size="lg"
-    onclose={() => session.dismissElevation()}
+    onclose={() => session.cancelElevation()}
   >
     <div class="body" data-testid="elevation-dialog">
       <div class="where">
@@ -78,7 +79,7 @@
       </ul>
     </div>
     {#snippet footer()}
-      <Button variant="ghost" onclick={() => session.dismissElevation()}>Cancel</Button>
+      <Button variant="ghost" onclick={() => session.cancelElevation()}>Cancel</Button>
       {#if copyable > 0}
         <Button icon={Copy} onclick={() => void session.personalCopy()}>
           {copyable > 1 ? 'Make personal copies' : 'Make a personal copy'}

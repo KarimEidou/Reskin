@@ -6,7 +6,7 @@ import { Engine, Surface, encodePng } from '$engine/index';
 import { isFilterCancelled } from '$engine/filters/client';
 import { chainRecipes, filterRecipe } from '../panels/styles/recipe';
 import { isCancelled } from '../panels/worker/client';
-import { EditorSession, isTarget, type SessionDeps, type StyleRecipe } from './session.svelte';
+import { EditorSession, isTarget, type ImportSource, type SessionDeps, type StyleRecipe } from './session.svelte';
 
 vi.mock('$lib/sound/synth', () => ({ play: vi.fn() }));
 vi.mock('$lib/ui/toasts.svelte', () => ({ toast: vi.fn() }));
@@ -94,6 +94,17 @@ function deferred<T = void>() {
   let resolve!: (v: T) => void;
   const promise = new Promise<T>((r) => (resolve = r));
   return { promise, resolve };
+}
+
+/** Holds the next call of a mocked command until the returned function lets it go. */
+function holdNext(command: Mock): () => void {
+  const gate = deferred();
+  const answer = command.getMockImplementation()!;
+  command.mockImplementationOnce(async (...args: unknown[]) => {
+    await gate.promise;
+    return answer(...args);
+  });
+  return gate.resolve;
 }
 
 /** Paints the whole active layer one colour: one history step. */
@@ -319,17 +330,15 @@ describe('EditorSession Save & Apply in a queue', () => {
   });
 
   it('while the editor stays open, a toast offers Undo for 6 s; Undo puts the icon back', async () => {
-    const { s, deps } = await queued(() => ({ type: 'applied', entries: [historyEntry('h1'), historyEntry('h2')], landed: false }));
+    // The main entry and a Start menu pin changed with it (Rust undoes the pin with its main entry).
+    const { s, deps } = await queued(() => ({ type: 'applied', entries: [historyEntry('h1'), historyEntry('h1-pin')], landed: false }));
     s.interactive = true;
     await s.apply();
     const offer = toasts().find((t) => t.action);
     expect(offer).toMatchObject({ kind: 'success', message: 'Applied to a.', timeout: 6000, action: { label: 'Undo' } });
     expect(s.queue[0]!.info.reskinned).toBe(true);
     await offer!.action!.run();
-    expect(vi.mocked(deps.commands.restore).mock.calls.map(([t]) => t)).toEqual([
-      { type: 'entry', id: 'h1' },
-      { type: 'entry', id: 'h2' },
-    ]);
+    expect(vi.mocked(deps.commands.restore).mock.calls.map(([t]) => t)).toEqual([{ type: 'entry', id: 'h1' }]);
     expect(s.queue[0]).toMatchObject({ status: 'editing', outcome: null, unsaved: true });
     expect(s.queue[0]!.info.reskinned).toBe(false);
     expect(toasts().at(-1)).toMatchObject({ message: 'Undid the change to a.', kind: 'success' });
@@ -343,6 +352,25 @@ describe('EditorSession Save & Apply in a queue', () => {
     await s.apply();
     await expect(toasts().find((t) => t.action)!.action!.run()).rejects.toThrow('locked');
     expect(s.queue[0]!.status).toBe('applied');
+    s.dispose();
+  });
+
+  it('an Undo tries every change: one that cannot be undone is reported with the rest, the others are undone', async () => {
+    const { s, deps } = await queued((req) => ({ type: 'applied', entries: [historyEntry(`h-${req.item}`)], landed: false }));
+    s.interactive = true;
+    s.recipe = { label: 'Look', apply: vi.fn() };
+    await s.applyStyleToAll();
+    // As Rust refuses an entry that is no longer its target's current icon.
+    vi.mocked(deps.commands.restore).mockRejectedValueOnce('only the current icon can be undone');
+    await expect(toasts().at(-1)!.action!.run()).rejects.toThrow(
+      'Could not undo everything: b — only the current icon can be undone',
+    );
+    expect(vi.mocked(deps.commands.restore).mock.calls.map(([t]) => t)).toEqual([
+      { type: 'entry', id: 'h-b' },
+      { type: 'entry', id: 'h-c' },
+    ]);
+    expect(s.queue.map((q) => q.status)).toEqual(['editing', 'applied', 'editing']);
+    expect(s.queue[2]!.info.reskinned).toBe(false);
     s.dispose();
   });
 
@@ -526,6 +554,121 @@ describe('EditorSession robustness', () => {
     expect(s.engine.doc.layers.length).toBe(layers);
     await s.select(0);
     expect(s.engine.doc.layers.map((l) => l.name)).toEqual(['a']);
+    s.dispose();
+  });
+
+  it('a design still loading when the editor closes stays out of the next open', async () => {
+    const red = await frameOf([255, 0, 0, 255]);
+    const deps = makeDeps({ a: red, img: red }, applied);
+    vi.mocked(deps.commands.libraryLoad).mockResolvedValue(await new Engine().serialize());
+    vi.mocked(deps.commands.readProject).mockResolvedValue(await new Engine().serialize());
+    deps.inspected.set(item('a').path, item('a'));
+    const project = item('p', { kind: 'project', modes: [], path: 'C:\\p.reskin' });
+    const drafted = new Engine();
+    drafted.newDocument({ name: 'a', source: { kind: 'shortcut', name: 'a', path: item('a').path } });
+    const draft = await drafted.serialize();
+    const pasted: ImportSource = { kind: 'image', name: 'Pasted image', surface: new Surface(8, 8) };
+    const s = new EditorSession(deps, new Engine());
+    const opens: [string, Mock, () => Promise<unknown>][] = [
+      ['a queued item', deps.commands.itemFrames as Mock, () => s.openItems([item('a')], { replace: true })],
+      ['an image', deps.commands.itemFrames as Mock, () => s.openItems([image('img')], { replace: true })],
+      ['a project file', deps.commands.readProject as Mock, () => s.openItems([project], { replace: true })],
+      ['an item and a project file', deps.commands.itemFrames as Mock, () => s.openItems([item('a'), project], { replace: true })],
+      ['a Library design', deps.commands.libraryLoad as Mock, () => s.openLibraryDesign('lib1')],
+      ['a recovered design', deps.commands.inspectPaths as Mock, () => s.restoreAutosave(draft)],
+      ['a recovered design with its item', deps.commands.itemFrames as Mock, () => s.restoreAutosave(draft)],
+      ['an item and a picture', deps.commands.itemFrames as Mock, () => s.importSources([{ kind: 'item', info: item('a') }, pasted], 'queue')],
+    ];
+    for (const [what, command, open] of opens) {
+      const release = holdNext(command);
+      const calls = command.mock.calls.length;
+      const opening = open();
+      await vi.waitFor(() => expect(command.mock.calls.length).toBe(calls + 1));
+      // The editor closed; the next open's Prepare resets the session.
+      s.reset();
+      release();
+      await opening;
+      expect([s.hasDesign, s.queue.length, s.currentIndex, s.original, s.view], what).toEqual([false, 0, -1, null, 'start']);
+    }
+    // The recovery offer was not answered: it stays for later.
+    expect(deps.commands.autosave).not.toHaveBeenCalled();
+    // The next open goes ahead as usual.
+    await s.openItems([item('a')], { replace: true });
+    expect(s.item?.id).toBe('a');
+    expect(center(s)).toEqual([255, 0, 0, 255]);
+    s.dispose();
+  });
+
+  it('what is still being added to the open design or queue as the editor closes stays out of the next open', async () => {
+    const deps = makeDeps({ a: await frameOf([255, 0, 0, 255]) }, applied);
+    const s = new EditorSession(deps, new Engine());
+    const project = item('p', { kind: 'project', modes: [], path: 'C:\\p.reskin' });
+    // An item, a picture queued as a design of its own, another item.
+    await s.openItems([item('a')]);
+    const encoded = deferred<string>();
+    vi.spyOn(s, 'encodeProject').mockReturnValueOnce(encoded.promise);
+    const importing = s.importSources(
+      [
+        { kind: 'item', info: item('b') },
+        { kind: 'image', name: 'Pasted image', surface: new Surface(8, 8) },
+        { kind: 'item', info: item('c') },
+      ],
+      'queue',
+    );
+    // The editor closed; the next open's Prepare resets the session and shows the Start view.
+    s.reset();
+    s.navigate('start');
+    encoded.resolve(await new Engine().serialize());
+    // Nothing joined a queue that is still there.
+    expect(await importing).toBe(0);
+    expect([s.queue.length, s.view]).toEqual([0, 'start']);
+    // An image becoming a layer, then a project joining the queue.
+    await s.openItems([item('a')]);
+    const release = holdNext(deps.commands.itemFrames as Mock);
+    const calls = vi.mocked(deps.commands.itemFrames).mock.calls.length;
+    const adding = s.openItems([image('img'), project]);
+    await vi.waitFor(() => expect(deps.commands.itemFrames).toHaveBeenCalledTimes(calls + 1));
+    s.reset();
+    s.navigate('start');
+    release();
+    await adding;
+    expect([s.hasDesign, s.queue.length, s.view]).toEqual([false, 0, 'start']);
+    s.dispose();
+  });
+
+  it('a switch that fails after the editor closed puts nothing back: the next open goes ahead', async () => {
+    const { s, deps } = await queued();
+    s.queue[1]!.project = '{"format":"reskin","version":1';
+    const release = holdNext(deps.commands.itemFrames as Mock);
+    const loading = s.select(1);
+    await vi.waitFor(() => expect(deps.commands.itemFrames).toHaveBeenCalledTimes(2));
+    s.reset();
+    const opening = s.openItems([item('c')], { replace: true });
+    release();
+    // Nobody is told: the queue it was for is gone.
+    await Promise.all([loading, opening]);
+    expect([s.item?.id, s.currentIndex, s.hasDesign]).toEqual(['c', 0, true]);
+    expect(center(s)).toEqual([0, 0, 255, 255]);
+    s.dispose();
+  });
+
+  it('a switch queued for a queue the editor forgot does not run on the next one', async () => {
+    const { s, deps } = await queued();
+    const release = holdNext(deps.commands.itemFrames as Mock);
+    const loading = s.select(1);
+    const next = s.select(2);
+    await vi.waitFor(() => expect(deps.commands.itemFrames).toHaveBeenCalledTimes(2));
+    s.reset();
+    const opening = s.openItems([item('b'), item('c'), item('a')], { replace: true });
+    release();
+    await Promise.all([loading, next, opening]);
+    expect(s.queue.map((q) => [q.info.id, q.status])).toEqual([
+      ['b', 'editing'],
+      ['c', 'pending'],
+      ['a', 'pending'],
+    ]);
+    expect(s.currentIndex).toBe(0);
+    expect(center(s)).toEqual([0, 255, 0, 255]);
     s.dispose();
   });
 
@@ -977,6 +1120,7 @@ describe('EditorSession "Apply style to all" and administrator approval', () => 
 
   it('asks about every item that needs approval at once; Allow runs their tickets in turn', async () => {
     const { s, deps } = await batch({ b: admin('t-b'), c: admin('t-c') });
+    s.interactive = true;
     expect(await s.applyStyleToAll()).toEqual({ applied: 1, failed: 0, needsElevation: 2 });
     expect(s.elevation?.batch).toBe(true);
     expect(s.elevation?.requests.map((r) => [r.entry.info.id, r.ticket])).toEqual([
@@ -989,7 +1133,8 @@ describe('EditorSession "Apply style to all" and administrator approval', () => 
       ['failed', 'Needs administrator approval'],
       ['applied', null],
     ]);
-    expect(toasts().at(-1)).toMatchObject({ kind: 'warning', message: 'Applied to 1; 0 failed. 2 need administrator approval.' });
+    // The batch's summary waits for the answer.
+    expect(toasts()).toEqual([]);
     vi.mocked(deps.commands.applyIconElevated).mockImplementation(async (ticket: string) => ({
       type: 'applied',
       entries: [historyEntry(ticket)],
@@ -1000,7 +1145,14 @@ describe('EditorSession "Apply style to all" and administrator approval', () => 
     expect(s.queue.map((q) => q.status)).toEqual(['editing', 'applied', 'applied', 'applied']);
     expect(s.elevation).toBeNull();
     expect(s.busy).toBeNull();
-    expect(toasts().at(-1)).toMatchObject({ kind: 'success', message: 'Applied to 2 more icons.' });
+    // One summary, one Undo for the whole batch.
+    expect(toasts()).toHaveLength(1);
+    expect(toasts()[0]).toMatchObject({ kind: 'success', message: 'Applied to 3 more icons.', action: { label: 'Undo' } });
+    await toasts()[0]!.action!.run();
+    expect(vi.mocked(deps.commands.restore).mock.calls.map(([t]) => t)).toEqual(
+      ['h-d', 't-b', 't-c'].map((id) => ({ type: 'entry', id })),
+    );
+    expect(s.queue.map((q) => q.status)).toEqual(['editing', 'editing', 'editing', 'editing']);
     s.dispose();
   });
 
@@ -1012,7 +1164,44 @@ describe('EditorSession "Apply style to all" and administrator approval', () => 
     expect(deps.commands.applyIconElevated).toHaveBeenCalledTimes(1);
     expect(s.queue[1]).toMatchObject({ status: 'failed', problem: 'Administrator approval was declined' });
     expect(s.queue[2]).toMatchObject({ status: 'failed', problem: 'Needs administrator approval' });
-    expect(toasts().at(-1)).toMatchObject({ kind: 'error', message: 'Applied to 0 of 2 icons.' });
+    expect(toasts()).toHaveLength(1);
+    expect(toasts()[0]).toMatchObject({ kind: 'warning', message: 'Applied to 1 of 3 icons.' });
+    s.dispose();
+  });
+
+  it('Cancel leaves the items waiting as they are and reports what the batch applied, with its Undo', async () => {
+    const { s, deps } = await batch({ b: admin('t-b'), c: { type: 'failed', message: 'The shortcut is read-only.', hint: null } });
+    s.interactive = true;
+    expect(await s.applyStyleToAll()).toEqual({ applied: 1, failed: 1, needsElevation: 1 });
+    expect(toasts()).toEqual([]);
+    s.cancelElevation();
+    expect(s.elevation).toBeNull();
+    expect(deps.commands.applyIconElevated).not.toHaveBeenCalled();
+    expect(s.queue.map((q) => q.status)).toEqual(['editing', 'failed', 'failed', 'applied']);
+    expect(toasts()).toHaveLength(1);
+    expect(toasts()[0]).toMatchObject({ kind: 'warning', message: 'Applied to 1 of 3 icons.', action: { label: 'Undo' } });
+    // Answered already: a second Cancel (the dialog's close) says nothing more.
+    s.cancelElevation();
+    expect(toasts()).toHaveLength(1);
+    await toasts()[0]!.action!.run();
+    expect(vi.mocked(deps.commands.restore).mock.calls.map(([t]) => t)).toEqual([{ type: 'entry', id: 'h-d' }]);
+    expect(s.queue[3]!.status).toBe('editing');
+    s.dispose();
+  });
+
+  it('nothing applied and Cancel: the summary is an error; closing the editor instead says nothing', async () => {
+    const { s } = await batch({ b: admin('t-b'), c: admin('t-c'), d: admin('t-d') });
+    await s.applyStyleToAll();
+    s.cancelElevation();
+    expect(toasts()).toEqual([expect.objectContaining({ kind: 'error', message: 'Applied to 0 of 3 icons.' })]);
+    vi.mocked(toast).mockClear();
+    await s.applyStyleToAll();
+    expect(s.elevation?.requests).toHaveLength(3);
+    // The editor closes (closeTransient): the dialog goes without a summary.
+    s.dismissElevation();
+    s.cancelElevation();
+    expect(s.elevation).toBeNull();
+    expect(toasts()).toEqual([]);
     s.dispose();
   });
 
@@ -1027,6 +1216,17 @@ describe('EditorSession "Apply style to all" and administrator approval', () => 
     expect(copies[0]!.images).toBe(images);
     expect(deps.commands.applyIconElevated).not.toHaveBeenCalled();
     expect(s.queue.map((q) => q.status)).toEqual(['editing', 'applied', 'failed', 'applied']);
+    expect(toasts()).toEqual([expect.objectContaining({ kind: 'warning', message: 'Applied to 2 of 3 icons.' })]);
+    s.dispose();
+  });
+
+  it('personal copies asked for where none can be made: nothing runs, and the batch still reports', async () => {
+    const { s, deps } = await batch({ b: admin('t-b') });
+    await s.applyStyleToAll();
+    await s.personalCopy();
+    expect(s.elevation).toBeNull();
+    expect(deps.applied.filter((r) => r.mode === 'personalCopy')).toEqual([]);
+    expect(toasts()).toEqual([expect.objectContaining({ kind: 'warning', message: 'Applied to 2 of 3 icons.' })]);
     s.dispose();
   });
 
@@ -1184,6 +1384,104 @@ describe('EditorSession autosave', () => {
     // Undone back to where it was loaded: nothing unsaved.
     s.engine.undo();
     expect(s.unsaved).toBe(false);
+    s.dispose();
+  });
+
+  it('a design undone back to where it was loaded leaves no draft behind; redone, it is written again', async () => {
+    const { s, deps } = await queued();
+    paint(s, [9, 9, 9, 255]);
+    await vi.advanceTimersByTimeAsync(2500);
+    await s.flushAutosave();
+    expect(writes(deps)).toHaveLength(1);
+    s.engine.undo();
+    await vi.advanceTimersByTimeAsync(2500);
+    await s.flushAutosave();
+    expect(writes(deps)).toHaveLength(2);
+    expect(writes(deps).at(-1)).toBe('');
+    s.engine.redo();
+    await vi.advanceTimersByTimeAsync(2500);
+    await s.flushAutosave();
+    expect(writes(deps)).toHaveLength(3);
+    expect(JSON.parse(writes(deps).at(-1)!).meta.source.path).toBe(item('a').path);
+    // Clean again while another queued design is unsaved: that one is kept.
+    await s.select(1);
+    paint(s, [7, 7, 7, 255]);
+    await vi.advanceTimersByTimeAsync(2500);
+    s.engine.undo();
+    await vi.advanceTimersByTimeAsync(2500);
+    await s.flushAutosave();
+    expect(writes(deps).at(-1)).toBe(s.queue[0]!.project);
+    s.dispose();
+  });
+
+  it('a flushed draft goes too once its design is undone back to where it was loaded', async () => {
+    const { s, deps } = await queued();
+    paint(s, [9, 9, 9, 255]);
+    await s.flushAutosave();
+    s.engine.undo();
+    await vi.advanceTimersByTimeAsync(2500);
+    await s.flushAutosave();
+    expect(writes(deps)).toEqual([expect.stringContaining('"format":"reskin"'), '']);
+    s.dispose();
+  });
+
+  it('a design undone back to where it was loaded and put away before its autosave came leaves no draft either', async () => {
+    const blank = await new Engine().serialize();
+    const leaves: [string, (s: EditorSession) => Promise<unknown> | void][] = [
+      ['switched', (s) => s.select(1)],
+      ['removed', (s) => s.remove(0)],
+      ['replaced by a blank design', (s) => s.newBlank()],
+      ['replaced by a Library design', (s) => s.openLibraryDesign('lib1')],
+    ];
+    for (const [how, leave] of leaves) {
+      const { s, deps } = await queued();
+      vi.mocked(deps.commands.libraryLoad).mockResolvedValue(blank);
+      paint(s, [9, 9, 9, 255]);
+      await vi.advanceTimersByTimeAsync(2500);
+      s.engine.undo();
+      await leave(s);
+      await vi.advanceTimersByTimeAsync(5000);
+      await s.flushAutosave();
+      expect(writes(deps), how).toEqual([expect.stringContaining('"format":"reskin"'), '']);
+      s.dispose();
+    }
+  });
+
+  it('a design written as a switch put it away, then kept open (the switch failed) and undone, leaves no draft', async () => {
+    const { s, deps } = await queued();
+    paint(s, [5, 5, 5, 255]);
+    s.queue[1]!.project = '{"format":"reskin","version":1';
+    await expect(s.select(1)).rejects.toThrow();
+    expect(writes(deps)).toHaveLength(1);
+    s.engine.undo();
+    await vi.advanceTimersByTimeAsync(2500);
+    await s.flushAutosave();
+    expect(writes(deps)).toEqual([expect.stringContaining('"format":"reskin"'), '']);
+    s.dispose();
+  });
+
+  it('an item removed with unsaved changes takes them out of the autosave', async () => {
+    const { s, deps } = await queued();
+    paint(s, [5, 5, 5, 255]);
+    // a's draft is written as it is put away.
+    await s.select(1);
+    expect(writes(deps)).toEqual([s.queue[0]!.project]);
+    expect(await s.remove(0)).toBe(true);
+    expect(writes(deps)).toHaveLength(2);
+    expect(writes(deps).at(-1)).toBe('');
+    // The open design, unsaved, removed: the next one opens and the draft goes.
+    paint(s, [6, 6, 6, 255]);
+    await s.flushAutosave();
+    expect(writes(deps)).toHaveLength(3);
+    await s.remove(0);
+    expect(s.item?.id).toBe('c');
+    expect(writes(deps)).toHaveLength(4);
+    expect(writes(deps).at(-1)).toBe('');
+    // Nothing unsaved goes with the last one: the autosave is left alone.
+    await s.remove(0);
+    expect(s.hasDesign).toBe(false);
+    await vi.advanceTimersByTimeAsync(5000);
+    expect(writes(deps)).toHaveLength(4);
     s.dispose();
   });
 

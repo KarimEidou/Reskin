@@ -130,7 +130,9 @@ The visual and interaction contract for the box and the editor. Tokens live in
   motion is not reduced and the box may show; otherwise its icon changes in
   place and the editor stays open with the same Undo toast. Queue items
   cannot be switched or removed while a job runs or an item loads (the strip
-  and the title bar's queue menu alike show them disabled).
+  and the title bar's queue menu alike show them disabled). Removing an item
+  whose design has unsaved changes asks first; once it is gone, crash
+  recovery no longer offers them.
 
 ## Views
 

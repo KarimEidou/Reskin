@@ -4,8 +4,10 @@
   did not go through and the item's notes. Click switches the design (each
   item keeps its own), × removes an item — both wait while a job runs or
   an item loads (the session's queue lock, shared with the title bar's
-  queue menu). "Apply style to all" replays the current item's recipe on
-  every other queued icon (each on its own icon) and applies it.
+  queue menu); removing an item with unsaved changes asks first. The strip
+  scrolls sideways (the mouse wheel too) and keeps the current item in
+  view. "Apply style to all" replays the current item's recipe on every
+  other queued icon (each on its own icon) and applies it.
 -->
 <script lang="ts">
   import CircleAlert from '@lucide/svelte/icons/circle-alert';
@@ -16,6 +18,7 @@
   import Spinner from '$lib/ui/Spinner.svelte';
   import { toast } from '$lib/ui/toasts.svelte';
   import Tooltip from '$lib/ui/Tooltip.svelte';
+  import { confirm } from '../dialogs/confirm.svelte';
   import { errorText, type QueueEntry, type QueueStatus } from '../state/session.svelte';
   import { getSession } from '../state/context';
 
@@ -62,12 +65,57 @@
     }
   }
 
+  /** × on an item: a design with unsaved changes goes only once the user agrees. */
   async function remove(i: number): Promise<void> {
+    const entry = session.queue[i];
+    if (!entry) return;
+    const { name } = entry.info;
+    const unsaved = i === session.currentIndex ? session.unsaved : entry.unsaved;
+    const question = {
+      title: `Remove ${name} from the queue?`,
+      message: `Your changes to ${name}'s design will be lost. Save it to the Library first to keep them.`,
+      confirmLabel: 'Remove',
+      danger: true,
+    };
+    if (unsaved && !(await confirm(question))) return;
     try {
-      await session.remove(i);
+      // Found again: the queue may have changed while the question was open
+      // (gone, or locked by a job: the session refuses then).
+      await session.remove(session.queue.indexOf(entry));
     } catch (e) {
       toast({ message: `Could not switch icons: ${errorText(e)}`, kind: 'error' });
     }
+  }
+
+  /** The list's padding (see .items): room for the edge items' remove buttons, badges and focus rings. */
+  const PAD_START = 6;
+  const PAD_END = 8;
+  /** How far one line of a line-based mouse wheel scrolls. */
+  const LINE_PX = 16;
+
+  let list: HTMLUListElement | undefined = $state();
+
+  // The current item stays in view, as it changes and as items come and go.
+  // Only the strip scrolls: scrollIntoView would move every scroll box
+  // around it too.
+  $effect(() => {
+    void session.queue.length;
+    const item = list?.children[session.currentIndex];
+    if (!list || !(item instanceof HTMLElement)) return;
+    const box = list.getBoundingClientRect();
+    const r = item.getBoundingClientRect();
+    const hiddenBefore = box.left + PAD_START - r.left;
+    const hiddenAfter = r.right - (box.right - PAD_END);
+    if (hiddenBefore > 0) list.scrollLeft -= hiddenBefore;
+    else if (hiddenAfter > 0) list.scrollLeft += hiddenAfter;
+  });
+
+  /** A vertical mouse wheel scrolls the strip sideways while it overflows. */
+  function wheel(e: WheelEvent): void {
+    if (!list || e.deltaX !== 0 || e.shiftKey || list.scrollWidth <= list.clientWidth) return;
+    e.preventDefault();
+    const unit = e.deltaMode === WheelEvent.DOM_DELTA_LINE ? LINE_PX : e.deltaMode === WheelEvent.DOM_DELTA_PAGE ? list.clientWidth : 1;
+    list.scrollLeft += e.deltaY * unit;
   }
 
   async function applyAll(): Promise<void> {
@@ -82,7 +130,7 @@
 
 {#if session.queue.length > 0}
   <div class="queue" data-testid="queue-strip">
-    <ul class="items" aria-label="Queued icons">
+    <ul class="items" aria-label="Queued icons" bind:this={list} onwheel={wheel}>
       {#each session.queue as entry, i (entry.info.id)}
         {@const current = i === session.currentIndex}
         <li class="item" class:current data-status={entry.status}>
